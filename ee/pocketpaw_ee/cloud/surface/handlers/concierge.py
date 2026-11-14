@@ -13,7 +13,8 @@
 #   * actions declared (``meta.pawbar_actions``): lists the ``pawbar_<verb>``
 #     tools (auto vs gated), a compact catalog block (the turn's retrieved items:
 #     real ids, names, prices formatted from ISO 4217 minor units by
-#     ``pocketpaw.money.format_minor``, sold-out items last and marked) and the
+#     ``pocketpaw.money.format_minor``, no price for a price of 0, sold-out
+#     items last and marked) and the
 #     exact ```pawbar-card product-fence contract; gated actions with args also
 #     teach the ``kind: "form"`` card. A widget with no actions keeps the
 #     original "you answer questions; you don't act" text.
@@ -37,15 +38,17 @@ def _catalog_block(catalog: list[dict] | None) -> str:
     the agent can put it straight into a pawbar-card fence and the add_to_cart
     tool call. An item whose ``in_stock`` is False is listed after the others and
     marked sold out, so the agent stops recommending it; unknown stock (None /
-    absent) adds nothing. Otherwise the order given (the owner's, or relevance) is
-    kept."""
+    absent) adds nothing. A price of 0 means no listed price (an application-only
+    event, an item never priced) and prints none, never "$0.00". Otherwise the
+    order given (the owner's, or relevance) is kept."""
     items = [c for c in (catalog or []) if isinstance(c, dict) and c.get("id")]
     items.sort(key=lambda c: c.get("in_stock") is False)
     if not items:
         return ""
     lines = []
     for c in items:
-        price = format_minor(c.get("price_cents"), c.get("currency") or "USD")
+        cents = c.get("price_cents")
+        price = format_minor(cents, c.get("currency") or "USD") if cents else ""
         name = str(c.get("name") or c.get("id"))
         price_part = f" - {price}" if price else ""
         stock_part = " (sold out)" if c.get("in_stock") is False else ""

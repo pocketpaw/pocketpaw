@@ -1,0 +1,30 @@
+[
+  {
+    "label": "the Claude SDK resolves its provider model with no backend again: on the litellm route the gateway default runs instead of the agent's model",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "llm = resolve_llm_client(self.settings, force_provider=provider, backend=\"claude_agent_sdk\")",
+    "replace": "llm = resolve_llm_client(self.settings, force_provider=provider)",
+    "tests": ["tests/test_claude_sdk_agent_model.py::test_agent_model_wins_on_the_litellm_route"]
+  },
+  {
+    "label": "resolve_llm_client ignores the backend it is given: the per-agent model is dropped on every non-Anthropic route",
+    "file": "src/pocketpaw/llm/client.py",
+    "find": "    config = adapter.resolve_config(settings, backend=backend)\n    return LLMClient(\n        provider=config.provider,",
+    "replace": "    config = adapter.resolve_config(settings, backend=\"\")\n    return LLMClient(\n        provider=config.provider,",
+    "tests": ["tests/test_claude_sdk_agent_model.py::test_agent_model_wins_on_the_litellm_route"]
+  },
+  {
+    "label": "an agent's pinned model no longer turns smart routing off: the complexity tier beats the agent's pick",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            settings.smart_routing_enabled = False\n",
+    "replace": "            pass\n",
+    "tests": ["tests/test_claude_sdk_agent_model.py::test_agent_model_wins_over_smart_routing"]
+  },
+  {
+    "label": "smart routing is turned off for every agent, including those with no model of their own",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "        if route_model(settings, canonical_backend, model):\n",
+    "replace": "        route_model(settings, canonical_backend, model)\n        if True:\n",
+    "tests": ["tests/test_claude_sdk_agent_model.py::test_no_agent_model_keeps_smart_routing"]
+  }
+]

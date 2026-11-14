@@ -1,0 +1,83 @@
+[
+  {
+    "label": "architecture code: a file outside the component's listing is served",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_code.py",
+    "find": "    if row is None:\n        raise BeltConsoleError(404, \"No such file in this component.\", \"belt.file_not_found\")\n",
+    "replace": "    row = row or {\"path\": file, \"lang\": None, \"loc\": 1, \"url\": None}\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_a_file_outside_the_component_is_404"
+    ]
+  },
+  {
+    "label": "architecture code: the excerpt ignores line",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_code.py",
+    "find": "    start = max(1, min(line, len(lines)))\n",
+    "replace": "    start = 1\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_the_excerpt_is_forty_lines_from_the_top_or_from_line"
+    ]
+  },
+  {
+    "label": "architecture code: a binary file is read for an excerpt",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_code.py",
+    "find": "    if row[\"loc\"]:  # None: binary; 0: empty\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_a_binary_or_empty_file_has_no_excerpt"
+    ]
+  },
+  {
+    "label": "architecture symbols: an oversized world-model is parsed",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "        if st.st_size > MAX_WORLD_MODEL_BYTES:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_an_oversized_model_is_skipped_unread"
+    ]
+  },
+  {
+    "label": "architecture symbols: a duplicate or component calls edge inflates callers",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "        if edge.get(\"to\") in syms and edge.get(\"from\") in syms:\n            callers[edge[\"to\"]].add(edge.get(\"from\"))\n",
+    "replace": "        if edge.get(\"to\") in syms:\n            callers[edge[\"to\"]].add(len(callers[edge[\"to\"]]))\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_a_files_symbols_sort_by_callers_with_a_line_url"
+    ]
+  },
+  {
+    "label": "architecture symbols: symbols are not sorted by callers",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "        rows.sort(key=lambda s: (-s[\"callers\"], s[\"line\"] or 0, s[\"name\"]))\n",
+    "replace": "        rows.sort(key=lambda s: (s[\"line\"] or 0, s[\"name\"]))\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_a_files_symbols_sort_by_callers_with_a_line_url"
+    ]
+  },
+  {
+    "label": "architecture symbols: the index is never cached",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "            _CACHE[key] = index\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_the_index_is_cached_per_mtime"
+    ]
+  },
+  {
+    "label": "architecture symbols: a regenerated world-model is never re-read",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "        key = (str(model), st.st_mtime_ns, st.st_size)\n",
+    "replace": "        key = (str(model), 0, st.st_size)\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_the_index_is_cached_per_mtime"
+    ]
+  },
+  {
+    "label": "architecture symbols: the C4 scope's model is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_symbols.py",
+    "find": "    if loom and isinstance(scope, str) and _SCOPE.fullmatch(scope):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_code.py::test_the_model_named_by_the_c4_scope_wins"
+    ]
+  }
+]

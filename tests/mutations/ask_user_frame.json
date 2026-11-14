@@ -1,0 +1,30 @@
+[
+  {
+    "label": "ask_user: run_core emits a frame for the input_pending placeholder",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "ask_frame = None if pending else ask_user_payload(tool_input)",
+    "replace": "ask_frame = {\"question\": \"\", \"options\": []} if pending else ask_user_payload(tool_input)",
+    "tests": ["tests/ee/agent/test_ask_mcp_server/test_mcp_tool.py"]
+  },
+  {
+    "label": "ask_user: run_core emits a frame for a call the tool rejects",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "ask_frame = None if pending else ask_user_payload(tool_input)",
+    "replace": "ask_frame = None if pending else (ask_user_payload(tool_input) or dict(tool_input))",
+    "tests": ["tests/ee/agent/test_ask_mcp_server/test_mcp_tool.py"]
+  },
+  {
+    "label": "ask_user: run_core sends a generic tool_start chip for the ask tool",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                    if ask_frame is not None:\n                        yield (\"ask_user_question\", ask_frame)\n",
+    "replace": "                    if ask_frame is not None:\n                        yield (\"ask_user_question\", ask_frame)\n                    yield (\"tool_start\", {\"tool\": name, \"input\": tool_input})\n",
+    "tests": ["tests/ee/agent/test_ask_mcp_server/test_mcp_tool.py"]
+  },
+  {
+    "label": "ask_user: shared payload drops the option cap",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/ask.py",
+    "find": "\"options\": options[:_MAX_OPTIONS]}",
+    "replace": "\"options\": options}",
+    "tests": ["tests/ee/agent/test_ask_mcp_server/test_mcp_tool.py"]
+  }
+]

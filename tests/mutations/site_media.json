@@ -19,7 +19,7 @@
   },
   {
     "label": "drop the site tag from the history record",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
     "find": "            source=\"sites\",",
     "replace": "            source=\"studio\",",
     "tests": [
@@ -28,18 +28,18 @@
   },
   {
     "label": "report success when nothing was generated",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    if not assets:",
-    "replace": "    if False:",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    if not assets:\n        raise SiteMediaError(\"failed\"",
+    "replace": "    if False:\n        raise SiteMediaError(\"failed\"",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_a_generation_failure_never_returns_a_phantom_asset"
     ]
   },
   {
     "label": "remove the per-call image ceiling",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    count = max(1, min(requested, _MAX_IMAGES_PER_CALL))",
-    "replace": "    count = max(1, requested)",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    count = max(1, min(count, _MAX_IMAGES_PER_CALL))",
+    "replace": "    count = max(1, count)",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_count_is_bounded"
     ]
@@ -73,25 +73,25 @@
   },
   {
     "label": "trust any pocket id (the tool's only real boundary)",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    if owner != workspace_id:\n        return _error_response(f\"No site {pocket_id!r} in this workspace — nothing was generated.\")\n\n    store = public_asset_store()\n    if store is None:\n        # A deployment fact,",
-    "replace": "    if False:\n        return _error_response(f\"No site {pocket_id!r} in this workspace — nothing was generated.\")\n\n    store = public_asset_store()\n    if store is None:\n        # A deployment fact,",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    owner = await pockets_service.get_pocket_workspace(pocket_id)\n    if owner != workspace_id:",
+    "replace": "    owner = await pockets_service.get_pocket_workspace(pocket_id)\n    if False:",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_a_pocket_owned_by_another_workspace_is_refused"
     ]
   },
   {
     "label": "treat an unknown pocket as ownable",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
-    "find": "    from pocketpaw_ee.cloud.pockets import service as pockets_service\n\n    owner = await pockets_service.get_pocket_workspace(pocket_id)",
-    "replace": "    from pocketpaw_ee.cloud.pockets import service as pockets_service\n\n    owner = workspace_id",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
+    "find": "    owner = await pockets_service.get_pocket_workspace(pocket_id)\n    if owner != workspace_id:\n        raise SiteMediaError(\n            \"not_found\"",
+    "replace": "    owner = workspace_id\n    if owner != workspace_id:\n        raise SiteMediaError(\n            \"not_found\"",
     "tests": [
       "tests/ee/sites/test_site_media_tool.py::test_an_unknown_pocket_is_refused"
     ]
   },
   {
     "label": "let a storage failure discard already-paid-for images",
-    "file": "ee/pocketpaw_ee/agent/mcp_servers/site_media.py",
+    "file": "ee/pocketpaw_ee/sites/media_generation.py",
     "find": "        except Exception as exc:  # noqa: BLE001\n            # A StorageFailure or an S3 client error is not a PublicAssetError. If",
     "replace": "        except _NeverRaised as exc:  # noqa: BLE001\n            # A StorageFailure or an S3 client error is not a PublicAssetError. If",
     "tests": [

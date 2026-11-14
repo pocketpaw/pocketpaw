@@ -171,5 +171,104 @@
     "tests": [
       "tests/cloud/livekit/test_scheduled_meeting_group_scope.py"
     ]
+  },
+  {
+    "label": "ask: skip the group check",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)\n    if not await livekit_service._meeting_notes_allowed(workspace_id):",
+    "replace": "    if not await livekit_service._meeting_notes_allowed(workspace_id):",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: answer even when the bot is not allowed",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if not await livekit_service._meeting_notes_allowed(workspace_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: read the asker's private KB scope",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        f\"workspace:{workspace_id}\", question, limit=3",
+    "replace": "        f\"user:{workspace_id}\", question, limit=3",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: read member-attributed memory facts",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        if (entry.metadata or {}).get(\"user_id\") not in _SHARED_MEMORY_USER_IDS:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: release a lock someone else holds",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "    return bool(await _redis().eval(_RELEASE_LUA, 1, key, ask_id))",
+    "replace": "    return bool(await _redis().delete(key))",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: answer with no bot in the call",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if not await _assistant_redis(assistant.bot_in_call(group_id)):\n        raise ConflictError(\"livekit.assistant_offline\", \"Paw isn't in this call.\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: let any member end someone's push-to-talk",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if holder != body.ask_id or asker != user_id:\n",
+    "replace": "    if holder != body.ask_id:\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: go idle before the answer has played",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        await wait_for_playback(ask_id, len(spoken))\n        if await ask_lock_holder(group_id) != ask_id:\n",
+    "replace": "        if await ask_lock_holder(group_id) != ask_id:\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: bot token back to listen-only",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        \"call-bot\",\n        can_publish=True,\n",
+    "replace": "        \"call-bot\",\n        can_publish=False,\n",
+    "tests": [
+      "tests/ee/test_livekit_service.py"
+    ]
+  },
+  {
+    "label": "ask: bot token publishes camera and screen too",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        publish_sources=[\"microphone\"],\n        can_publish_data=False,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_service.py"
+    ]
+  },
+  {
+    "label": "ask: assistant_state no longer reaches the group",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            \"call.assistant_state\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py"
+    ]
   }
 ]

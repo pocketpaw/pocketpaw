@@ -1,13 +1,12 @@
 """The brief set SD-6 scores against, and the pairing that makes rotation checkable.
 
-New file 2026-09-08 (feat/sites-design-skills), part of SD-6.
-
 WHY THESE BRIEFS. Each pair is two businesses in the SAME industry, because that
-is the condition under which the rotation rule is load-bearing: an agent that
+is the condition under which the variety rule is load-bearing: an agent that
 defaults by topic will hand a cafe and a bakery the identical warm-earthy palette,
-which is the exact failure `pocketpaw-design-taste` MODULE 2.G names ("do NOT
-default to the warm / earthy family just because the business is a cafe, salon, or
-shop"). Two briefs from different industries would pass rotation by accident.
+which is the exact failure `pocketpaw-design-taste` 2.E names ("two briefs in one
+industry should differ ... each derived from this business rather than from what
+the last site did"). Two briefs from different industries would pass rotation by
+accident.
 
 The pairs also span the three dials so a cut cannot be judged on one register:
 one consumer/warm-coded pair, one technical/neutral-coded pair, one

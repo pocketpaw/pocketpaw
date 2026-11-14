@@ -56,6 +56,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     assemble_toolset,
     build_context_block,
     build_knowledge_context,
+    chat_ripple_prompt,
 )
 from pocketpaw_ee.cloud.surface import (
     SurfaceContext,
@@ -64,7 +65,6 @@ from pocketpaw_ee.cloud.surface import (
     resolve_profile,
 )
 
-from pocketpaw.ripple import INLINE_RIPPLE_SYSTEM_PROMPT
 from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
 
 
@@ -573,7 +573,7 @@ def test_sites_surface_omits_ripple_block():
         _sites_surface_ctx(SurfaceMeta(engine="svelte")), backend_name="claude_agent_sdk"
     )
     # The whole inline ripple prompt must be gone.
-    assert INLINE_RIPPLE_SYSTEM_PROMPT not in block, (
+    assert chat_ripple_prompt() not in block, (
         "INLINE_RIPPLE_SYSTEM_PROMPT must be omitted on the /sites svelte-create "
         "surface — its 'default to ui-spec' LAW biases the agent away from "
         "hand-authored Svelte"
@@ -613,7 +613,7 @@ def test_non_sites_surface_keeps_ripple_block():
         resolved_profile=resolve_profile(SurfaceKind.POCKETS_LIST, SurfaceMeta()),
     )
     block = build_behavior_instructions(pockets_ctx, backend_name="claude_agent_sdk")
-    assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
+    assert chat_ripple_prompt() in block, (
         "a non-sites surface must keep INLINE_RIPPLE_SYSTEM_PROMPT — the SITES "
         "omission must not regress ordinary chat surfaces"
     )
@@ -630,7 +630,7 @@ def test_non_sites_surface_keeps_ripple_block():
         agent_ids_in_scope=["a1"],
     )
     legacy_block = build_behavior_instructions(legacy_ctx, backend_name="claude_agent_sdk")
-    assert INLINE_RIPPLE_SYSTEM_PROMPT in legacy_block, (
+    assert chat_ripple_prompt() in legacy_block, (
         "the surface-less legacy path must keep INLINE_RIPPLE_SYSTEM_PROMPT"
     )
 
@@ -654,7 +654,7 @@ def test_sites_svelte_create_omits_ripple_block():
     block = build_behavior_instructions(
         _sites_surface_ctx(SurfaceMeta(engine="svelte")), backend_name="claude_agent_sdk"
     )
-    assert INLINE_RIPPLE_SYSTEM_PROMPT not in block, (
+    assert chat_ripple_prompt() not in block, (
         "INLINE_RIPPLE_SYSTEM_PROMPT must be omitted on the /sites svelte-create surface"
     )
     assert "<ripple>" not in block, "the <ripple> framing tag leaked onto /sites svelte-create"
@@ -673,7 +673,7 @@ def test_sites_ripple_create_keeps_ripple_block():
         block = build_behavior_instructions(
             _sites_surface_ctx(meta), backend_name="claude_agent_sdk"
         )
-        assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
+        assert chat_ripple_prompt() in block, (
             f"ripple-create /sites meta {meta!r} must KEEP INLINE_RIPPLE_SYSTEM_PROMPT "
             "— it authors a ripple landing page and needs the widget LAW"
         )
@@ -694,7 +694,7 @@ def test_sites_refine_keeps_ripple_block():
         block = build_behavior_instructions(
             _sites_surface_ctx(meta), backend_name="claude_agent_sdk"
         )
-        assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
+        assert chat_ripple_prompt() in block, (
             f"refine /sites meta {meta!r} must KEEP INLINE_RIPPLE_SYSTEM_PROMPT — "
             "it edits an existing ripple landing spec"
         )

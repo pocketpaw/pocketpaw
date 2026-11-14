@@ -13,8 +13,15 @@
 # unknown formats are normalised (``hook-demo`` → ``hook_demo``) or dropped,
 # hashtags get a leading ``#``, and an unreadable answer is zero ideas, which
 # the service turns into a 502. The same agent draws an idea's media: a poster
-# (sanitised SVG) or a 15-20 s reel (a HyperFrames composition, optionally with
-# a Ripple explainer figure as one beat; ``clean_reel`` enforces the length).
+# (sanitised SVG) or a 15-20 s reel: a HyperFrames composition that opens on a
+# short hook, gives the middle to one visual and ends on a closing line. The
+# visual follows the business model (``reel_visual``): a full-frame anatomy film
+# of the product for companies that sell physical things, a Ripple explainer
+# diagram of how the product works for software and services, the agent's pick
+# otherwise. The reel prompt carries the whole company profile so the visual is
+# built from what the company actually sells. ``check_reel`` enforces the length
+# and the routed visual; ``agent_make_media`` gives the agent one repair pass
+# with the check's error before giving up.
 
 from __future__ import annotations
 
@@ -291,17 +298,49 @@ _MEDIA_BRIEFS = {
         '15 and 20 (e.g. "18") data-width="1080" data-height="1920"; GSAP from '
         "https://cdn.jsdelivr.net/npm/gsap@3 building a paused timeline registered as "
         'window.__timelines = window.__timelines || {{}}; window.__timelines["main"] = tl; '
-        "brand-toned colours, no <audio>, every asset inline or absolute https. Tell it with "
-        "a diagram, not text: a hook of at most six words for the first two seconds, then one "
-        "explainer diagram (below; it is required) filling most of the frame from about two "
-        "seconds until the last two, building itself and then revealing its pins every two "
-        "to three seconds so they carry the story, then a closing line of at most six words. "
-        "No other on-screen text, no paragraphs, no bullet lists. Answer with only the "
-        "HTML.\n\n{ripple}"
+        "brand-toned colours, no <audio>, every asset inline or absolute https. Tell it "
+        "with the visual, not text: a hook of at most six words for the first two seconds, "
+        "then {middle}, then a closing line of at most six words. When the post gives a "
+        "Logo URL, show that image (about 160px wide) in the hook and in the closing line. "
+        "No other on-screen text, no paragraphs, no bullet lists. Build the visual from "
+        "the company profile in the post: its real product, the problem it solves and its "
+        "benefits. Answer with only the HTML.\n\n{brief}"
     ),
+}
+_REEL_MIDDLES = {
+    "film": (
+        "the anatomy film element (below; it is required) filling the frame from about two "
+        "seconds until about two seconds before the end"
+    ),
+    "diagram": (
+        "ONE Ripple explainer diagram (below; it is required) of how the company's product "
+        "works or the system it fits into, filling most of the frame from about two seconds "
+        "until the last two, building itself and then revealing its labels every two to "
+        "three seconds so they carry the story; the labels name the product's parts and "
+        "benefits"
+    ),
+    "either": (
+        "ONE visual (required) from about two seconds until about two seconds before the "
+        "end: the anatomy film when the company sells a physical product you can take "
+        "apart, otherwise one Ripple explainer diagram of how its product works, revealing "
+        "its labels every two to three seconds"
+    ),
+}
+_RIPPLE_STUDIO_CLAUSE = (
+    " (include one whenever the post involves a physical thing, product, building part, "
+    "machine or process, which most do)"
+)
+REEL_VISUALS: dict[str, str] = {
+    "ecommerce": "film",
+    "b2b_saas": "diagram",
+    "b2c_app": "diagram",
+    "services": "diagram",
+    "marketplace": "diagram",
 }
 _POSTER_SIZES = {"x": "1080x1080", "reddit": "1200x628"}
 _SVG_RE = re.compile(r"<svg\b.*?</svg>", re.IGNORECASE | re.DOTALL)
+_FILM_RE = re.compile(r"<[a-zA-Z][^>]*\bdata-anatomy-film\b", re.IGNORECASE)
+_RIPPLE_RE = re.compile(r"<[a-zA-Z][^>]*\bdata-ripple\s*=", re.IGNORECASE)
 _HTML_RE = re.compile(r"(<!doctype html.*?</html>|<html\b.*?</html>)", re.IGNORECASE | re.DOTALL)
 _UNSAFE_SVG = (
     re.compile(r"<(script|foreignObject)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL),
@@ -318,17 +357,59 @@ REEL_MAX_S = 20
 MAX_EDITED_POSTER_CHARS = 2_000_000
 
 
-def build_media_prompt(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
+def reel_visual(profile: SocialProfile) -> str:
+    """Which visual the reel's middle gets: "film", "diagram" or "either"."""
+    return REEL_VISUALS.get(profile.business_model or "", "either")
+
+
+def _reel_brief(visual: str) -> str:
+    from pocketpaw_ee.agent.mcp_servers.anatomy_film import ANATOMY_FILM_BRIEF
     from pocketpaw_ee.agent.mcp_servers.ripple_beats import RIPPLE_BEATS_BRIEF
 
+    ripple = RIPPLE_BEATS_BRIEF.replace(_RIPPLE_STUDIO_CLAUSE, "")
+    briefs = {"film": [ANATOMY_FILM_BRIEF], "diagram": [ripple]}
+    return "\n\n".join(briefs.get(visual, [ANATOMY_FILM_BRIEF, ripple]))
+
+
+def _profile_lines(profile: SocialProfile) -> list[str]:
+    analysis = profile.analysis
+    typed = profile.description
+    facts = [
+        ("Website", profile.website or ""),
+        ("Category", profile.category or ""),
+        ("Business model", (profile.business_model or "").replace("_", " ")),
+        ("Product", (analysis.product if analysis else "") or typed.get("product", "")),
+        ("Audience", (analysis.audience if analysis else "") or typed.get("audience", "")),
+        ("Problem", (analysis.problem if analysis else "") or typed.get("problem", "")),
+        ("Summary", analysis.summary if analysis else ""),
+        ("Benefits", "; ".join(analysis.benefits) if analysis else typed.get("benefits", "")),
+        ("Differentiators", "; ".join(analysis.differentiators) if analysis else ""),
+        ("Content pillars", "; ".join(analysis.content_pillars) if analysis else ""),
+        ("Tone", (analysis.tone if analysis else "") or typed.get("tone", "")),
+        ("Avoid", "; ".join(analysis.avoid) if analysis else typed.get("avoid", "")),
+        ("Logo URL", (analysis.logo_url if analysis else "") or ""),
+    ]
+    return [f"{label}: {fence((v or '').strip())}" for label, v in facts if (v or "").strip()]
+
+
+def build_media_prompt(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
     size = _POSTER_SIZES.get(idea.platform, "1080x1080")
-    lines = [_MEDIA_BRIEFS[kind].format(size=size, ripple=RIPPLE_BEATS_BRIEF), "", "<post>"]
+    if kind == "reel":
+        visual = reel_visual(profile)
+        brief = _MEDIA_BRIEFS[kind].format(middle=_REEL_MIDDLES[visual], brief=_reel_brief(visual))
+    else:
+        brief = _MEDIA_BRIEFS[kind].format(size=size)
+    lines = [brief, "", "<post>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
-    if profile.analysis is not None and profile.analysis.tone:
+    if kind == "reel":
+        lines += _profile_lines(profile)
+    elif profile.analysis is not None and profile.analysis.tone:
         lines.append(f"Tone: {fence(profile.analysis.tone)}")
     lines.append(f"Hook: {fence(idea.hook)}")
     if idea.caption:
         lines.append(f"Post: {fence(idea.caption)}")
+    if kind == "reel" and idea.script:
+        lines.append(f"Script: {fence(' / '.join(idea.script))}")
     lines += ["</post>"]
     return "\n".join(lines)
 
@@ -343,18 +424,30 @@ def clean_svg(text: str, limit: int = MAX_POSTER_CHARS) -> str:
     return svg if len(svg) <= limit else ""
 
 
-def clean_reel(text: str) -> str:
+def check_reel(text: str, visual: str = "film") -> tuple[str, str | None]:
+    """The reel's HTML and None, or "" and why it was rejected."""
     from pocketpaw_ee.agent.mcp_servers.timeline import validate_motion_graphic
 
     match = _HTML_RE.search(text or "")
     html = match.group(0) if match else (text or "").strip()
     shape, error = validate_motion_graphic(html, 30)
     if not error and not REEL_MIN_S <= shape["durationS"] <= REEL_MAX_S:
-        error = f"data-duration {shape['durationS']:g}s is outside {REEL_MIN_S}-{REEL_MAX_S}s"
+        error = f"data-duration {shape['durationS']:g}s is outside {REEL_MIN_S}-{REEL_MAX_S}s."
+    has_film, has_diagram = bool(_FILM_RE.search(html)), bool(_RIPPLE_RE.search(html))
+    if not error and visual == "film" and not has_film:
+        error = "There is no data-anatomy-film element; the reel's middle must be the film."
+    if not error and visual == "diagram" and not has_diagram:
+        error = "There is no data-ripple diagram; the reel's middle must be the diagram."
+    if not error and visual == "either" and not (has_film or has_diagram):
+        error = "There is neither a data-anatomy-film element nor a data-ripple diagram."
     if error:
         logger.warning("growth social reel rejected: %s", error[:200])
-        return ""
-    return html
+        return "", error
+    return html, None
+
+
+def clean_reel(text: str, visual: str = "film") -> str:
+    return check_reel(text, visual)[0]
 
 
 class MediaFn(Protocol):
@@ -363,13 +456,21 @@ class MediaFn(Protocol):
 
 async def agent_make_media(profile: SocialProfile, idea: SocialIdea, kind: str) -> str:
     """The production ``MediaFn``: "" when the agent's answer is unusable."""
-    text = await run_pinned_agent(
-        profile.workspace_id,
-        GROWTH_SOCIAL_IDEAS_AGENT,
-        build_media_prompt(profile, idea, kind),
-        f"{GROWTH_SOCIAL_IDEAS_SLUG}-{kind}",
+    prompt = build_media_prompt(profile, idea, kind)
+    session = f"{GROWTH_SOCIAL_IDEAS_SLUG}-{kind}"
+    text = await run_pinned_agent(profile.workspace_id, GROWTH_SOCIAL_IDEAS_AGENT, prompt, session)
+    if kind == "poster":
+        return clean_svg(text)
+    visual = reel_visual(profile)
+    html, error = check_reel(text, visual)
+    if error is None:
+        return html
+    retry = (
+        f"{prompt}\n\nYour last answer was rejected: {error} "
+        "Write the whole HTML again with that fixed."
     )
-    return clean_svg(text) if kind == "poster" else clean_reel(text)
+    text = await run_pinned_agent(profile.workspace_id, GROWTH_SOCIAL_IDEAS_AGENT, retry, session)
+    return check_reel(text, visual)[0]
 
 
 _PRODUCTION_MEDIA_FN: MediaFn | None = None
@@ -387,7 +488,9 @@ def resolve_media_fn() -> MediaFn | None:
 __all__ = [
     "MediaFn",
     "agent_make_media",
+    "check_reel",
     "clean_reel",
+    "reel_visual",
     "clean_svg",
     "resolve_media_fn",
     "set_production_media_fn",

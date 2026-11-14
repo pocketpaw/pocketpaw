@@ -157,7 +157,7 @@ async def test_read_table_returns_rows_for_dynamic_site(beanie_test_db, monkeypa
     # table is the whitelisted identifier — never a free-text interpolation).
     assert len(cf.calls) == 1
     call = cf.calls[0]
-    assert "FROM entry" in call["sql"]
+    assert 'FROM "entry"' in call["sql"]  # whitelisted AND quoted
     assert "LIMIT ?" in call["sql"]
     assert isinstance(call["params"], list) and len(call["params"]) == 1
 

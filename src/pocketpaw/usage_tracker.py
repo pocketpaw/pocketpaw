@@ -1,31 +1,22 @@
-# Usage tracker — persistent token/cost tracking across sessions.
-# Created: 2026-03-09
-# Updated: 2026-09-04 (fix/proxy-model-prices) — ``set_price_provider`` adds a
-#   rung ABOVE genai-prices for the deployment's own price list. Every rung
-#   below is somebody else's published rates and none of them know what WE
-#   pay: a model served at a negotiated rate billed at list, and a model that
-#   exists only on our proxy is in no public list at all, so it priced None and
-#   billed ZERO. The cloud registers the LiteLLM proxy's configured costs; OSS
-#   registers nothing and prices exactly as before. The trade is dating — a
-#   proxy rate is current, not effective-dated. See set_price_provider.
-# Updated: 2026-09-02 (fix/metering-dated-pricing) — pricing is no longer a flat
-#   hand table. ``price_run`` is the front door: it asks ``genai-prices`` for an
-#   EFFECTIVE-DATED rate at the run's own moment, falls back to the same lookup
-#   with a provider prefix stripped, and only then reads ``_PRICING`` below. It
-#   returns ``Decimal | None`` and never raises; ``None`` means "could not
-#   price" and is not the same fact as ``Decimal("0")``. ``_estimate_cost`` is
-#   unchanged in signature and is now rung 3 of that ladder. See the long note
-#   above ``_PRICING`` for why the table stayed and which rows were wrong.
+# Usage tracker: persistent token/cost tracking across sessions, and the price
+# ladder every run is billed through.
 #
-# Stores per-request usage records as append-only JSONL in ~/.pocketpaw/usage.jsonl.
-# Provides aggregation helpers for the /api/v1/metrics/usage endpoint.
+# ``price_run`` is the front door. It asks, in order: the deployment's own price
+# list (``set_price_provider``; on cloud the LiteLLM proxy's configured costs,
+# current rather than effective-dated), ``genai-prices`` for an EFFECTIVE-DATED
+# rate at the run's own moment, the same lookup with a provider prefix stripped,
+# and last the flat ``_PRICING`` table (``_estimate_cost``). It returns
+# ``Decimal | None`` and never raises; ``None`` means "could not price" and is
+# not the same fact as ``Decimal("0")``. See the note above ``_PRICING`` for why
+# the table stays.
 #
-# Budget enforcement:
-#   record() performs a cumulative-spend check against the configured cap
-#   before writing to disk.  When budget_auto_pause is True and the cap is
-#   exhausted, it raises BudgetExhaustedError.  The AgentLoop preflight
-#   catches this before routing to the LLM, but the check here ensures
-#   enforcement even in code paths that call record() directly.
+# Stores per-request usage records as append-only JSONL in ~/.pocketpaw/usage.jsonl
+# and provides aggregation helpers for the /api/v1/metrics/usage endpoint.
+#
+# Budget enforcement: record() checks cumulative spend against the configured cap
+# before writing. With budget_auto_pause on and the cap exhausted it raises
+# BudgetExhaustedError; the AgentLoop preflight catches this before routing to
+# the LLM, and the check here covers code paths that call record() directly.
 
 from __future__ import annotations
 
@@ -130,6 +121,16 @@ _PRICING: dict[str, dict[str, float]] = {
     "claude-3-opus-20240229": {"input": 15.0, "output": 75.0, "cached_input": 1.50},
     # Anthropic — current families (added 2026-08-21).
     "claude-fable-5": {"input": 10.0, "output": 50.0, "cached_input": 1.0},
+    # The 5.5 family (Anthropic's model table, cached 2026-10-06). Without these
+    # rows the longest-prefix match priced them as Opus 5 / Sonnet 5 and left
+    # Haiku 5.5 unpriced. Haiku 5.5's rate is for prompts up to 100K tokens
+    # ($0.50 / $2.50 beyond); this flat table can't tier, so a longer prompt is
+    # under-priced here. Its cache-read rate is not published there: 10% of input.
+    # Opus 5.5's cache read is $0.20/MTok, the same as Sonnet 5.5's, as Anthropic's
+    # pricing table lists it (claude-api skill, cached 2026-10-06). Not 10% of input.
+    "claude-opus-5-5": {"input": 4.0, "output": 20.0, "cached_input": 0.20},
+    "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cached_input": 0.20},
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cached_input": 0.01},
     "claude-opus-5": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cached_input": 0.50},

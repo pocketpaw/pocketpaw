@@ -15,6 +15,10 @@
 # ``EventBus.emit`` swallows a failing handler, so a subscriber can never lose a
 # persisted lead.
 #
+# A lead is filed under ``domain.lead_site_id``: the script_name of a built
+# site, the object id of a connected one (which has no script_name). Every
+# write, rate bucket, audit row and ``lead.captured`` emit uses it.
+#
 # The owner side: ``update_lead`` (status / read) and ``mark_all_read``.
 # ``lead.updated`` is emitted on a status change only. Every read and write
 # filters on workspace (and site), so another tenant's lead reads as absent.
@@ -43,7 +47,7 @@ from pocketpaw.sites_capture.ingest import (
     origin_allowed,
 )
 from pocketpaw.sites_capture.models import SiteEventMapping
-from pocketpaw_ee.cloud.leads.domain import Lead
+from pocketpaw_ee.cloud.leads.domain import Lead, lead_site_id
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
@@ -91,7 +95,7 @@ def _emit_drop_audit(
 
         context: dict[str, Any] = {
             "reason": reason,
-            "site_id": site.script_name,
+            "site_id": lead_site_id(site),
             "form_type": form_type,
         }
         if count is not None:
@@ -101,7 +105,7 @@ def _emit_drop_audit(
                 severity=AuditSeverity.INFO,
                 actor="sites_capture",
                 action="sites.capture.drop",
-                target=site.script_name,
+                target=lead_site_id(site),
                 status="dropped",
                 category="sites_capture",
                 workspace_id=site.workspace,
@@ -159,7 +163,7 @@ async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -
     Mongo transaction across the two counter docs (deferred)."""
     now = datetime.now(UTC)
     bucket = _bucket_minute(now)
-    site_scope_id = f"{workspace_id}:{site.script_name}"
+    site_scope_id = f"{workspace_id}:{lead_site_id(site)}"
 
     per_ip = await _bump("ip", f"{site_scope_id}:{rate_key}", bucket, now)
     if per_ip > site.per_ip_limit_per_min:
@@ -268,7 +272,7 @@ async def capture(
         properties,
         _LeadSourceDoc(
             form_type=form_type,
-            site_id=site.script_name,
+            site_id=lead_site_id(site),
             submitter_ref=submitter_ref,
             rate_key=effective_rate_key,
             origin=origin,
@@ -294,7 +298,7 @@ async def _persist(
     """Insert one Lead and ring the workspace. The one insert both entries share."""
     doc = _LeadDoc(
         workspace=site.workspace,
-        site_id=site.script_name,
+        site_id=lead_site_id(site),
         form_type=form_type,
         properties=properties,
         source=source,
@@ -309,7 +313,7 @@ async def _persist(
         {
             "workspace_id": site.workspace,
             "lead_id": str(doc.id),
-            "site_id": site.script_name,
+            "site_id": lead_site_id(site),
             # The site's DISPLAY name (site_id is a hex script name); "" when unnamed.
             "site_name": site.name,
             "form_type": form_type,
@@ -347,7 +351,7 @@ async def capture_internal(
             dict(properties),
             _LeadSourceDoc(
                 form_type=form_type,
-                site_id=site.script_name,
+                site_id=lead_site_id(site),
                 submitter_ref=submitter_ref,
                 kind=kind,
                 conversation_ref=conversation_ref,
@@ -462,7 +466,10 @@ async def lead_payload(workspace_id: str, lead_id: str) -> dict[str, Any] | None
     doc = await _LeadDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         return None
-    site = await _SiteDoc.find_one({"workspace": workspace_id, "script_name": doc.site_id})
+    from pocketpaw_ee.cloud.leads.notification_settings import find_site
+
+    # By script_name (built) or object id (connected), as ``lead_site_id`` filed it.
+    site = await find_site(workspace_id, doc.site_id)
     contact = contact_form.normalize(dict(doc.properties or {}))
     src = doc.source
     created = getattr(doc, "createdAt", None)

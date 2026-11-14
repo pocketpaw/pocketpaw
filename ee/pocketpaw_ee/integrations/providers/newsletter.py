@@ -6,8 +6,9 @@
 # makes a repeat a no-op). The answer is the same for a new and a repeat address,
 # so the endpoint can't be used to test who is on a list.
 #
-# ``export_csv`` backs the owner's CSV download. Cells that a spreadsheet would
-# read as a formula are prefixed with a quote.
+# ``export_csv`` backs the owner's CSV download (cells a spreadsheet would read as
+# a formula are prefixed with a quote); ``latest_subscribers`` backs the owner's
+# count + newest-first glance beside it. Both are owner-only at the router.
 
 from __future__ import annotations
 
@@ -70,6 +71,21 @@ async def subscriber_count(workspace_id: str, pocket_id: str) -> int:
     from pocketpaw_ee.cloud.models.integration import NewsletterSubscriber as Doc
 
     return await Doc.find(Doc.workspace == workspace_id, Doc.pocket_id == pocket_id).count()
+
+
+async def latest_subscribers(
+    workspace_id: str, pocket_id: str, limit: int = 20
+) -> list[tuple[str, Any]]:
+    """The newest ``limit`` subscribers of one site as ``(email, subscribed_at)``."""
+    from pocketpaw_ee.cloud.models.integration import NewsletterSubscriber as Doc
+
+    rows = (
+        await Doc.find(Doc.workspace == workspace_id, Doc.pocket_id == pocket_id)
+        .sort("-createdAt")
+        .limit(limit)
+        .to_list()
+    )
+    return [(row.email, row.createdAt) for row in rows]
 
 
 def _cell(value: str) -> str:

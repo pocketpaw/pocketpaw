@@ -588,6 +588,14 @@ class SiteIntegrationChanged(Event):
     EVENT_TYPE: ClassVar[str] = "site.integration_changed"
 
 
+# A site's AI spend crossed one of its alert thresholds this month. Data:
+# {workspace_id, pocket_id, site_id, owner, period, threshold, spent_month_micro,
+# monthly_cap_micro}. Routed to the site owner only.
+@dataclass
+class SiteAiBudget(Event):
+    EVENT_TYPE: ClassVar[str] = "site.ai_budget"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):
@@ -723,6 +731,15 @@ class CallParticipantJoined(Event):
 @dataclass
 class CallParticipantLeft(Event):
     EVENT_TYPE: ClassVar[str] = "call.participant_left"
+
+
+# Ask Paw: the in-call assistant's state for one question (listening, thinking,
+# speaking, idle, error). Emitted by ``livekit/assistant.py`` and the Ask Paw
+# routes; payload {group_id, state, ask_id, asked_by, asked_by_name, question,
+# answer, error}.
+@dataclass
+class CallAssistantState(Event):
+    EVENT_TYPE: ClassVar[str] = "call.assistant_state"
 
 
 # Meetings — the realtime ``meeting.updated`` the meetings service emits.

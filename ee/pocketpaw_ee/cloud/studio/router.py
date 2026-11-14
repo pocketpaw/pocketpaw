@@ -7,7 +7,8 @@
 #
 #   GET  /studio/models          → StudioModelsResponse   (gateway-backed)
 #   GET  /studio/styles          → StudioStylesResponse   (static)
-#   GET  /studio/generations     → GenerationsResponse    (per-workspace history)
+#   GET  /studio/generations     → GenerationsResponse    (per-workspace history;
+#                                  optional ?source= and ?pocket_id= filters)
 #   POST /studio/generate        → Generation             (LiteLLM + fal.ai)
 #   GET  /studio/generations/{id}→ Generation
 #   POST /studio/edit            → Generation             (fal.ai edit endpoints)
@@ -22,14 +23,20 @@
 # tagged as the OpenAI ``user`` on each proxy generation so proxy spend attributes
 # to the workspace. Mounted in ``mount_cloud()``.
 #
-# Created 2026-08-17 (studio-real-backend): new entity router.
+# Every route that calls a paid model (generate, edit, the two video routes,
+# music, transcribe) carries ``require_paid_or_early_access_allowed``: refused
+# with 403 ``early_access.not_available`` for an unpaid early-access workspace,
+# since that spend never reaches the credit ledger. Reads stay open.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
-from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud._core.deps import (
+    current_workspace_id,
+    require_paid_or_early_access_allowed,
+)
 from pocketpaw_ee.cloud.license import require_license
 
 from . import schemas, service
@@ -67,13 +74,22 @@ async def list_camera_catalog() -> schemas.CameraCatalogResponse:
 @router.get("/generations", response_model=schemas.GenerationsResponse)
 async def list_generations(
     workspace_id: str = Depends(current_workspace_id),
+    source: str | None = Query(default=None, max_length=32),
+    pocket_id: str | None = Query(default=None, max_length=64),
 ) -> schemas.GenerationsResponse:
     """Return the workspace's generation history, newest first (persisted, so it
-    survives reloads)."""
-    return schemas.GenerationsResponse(generations=await service.list_generations(workspace_id))
+    survives reloads). ``source`` ("studio" | "sites") and ``pocket_id`` narrow it,
+    e.g. to what a site agent generated for one site. Both omitted = everything."""
+    return schemas.GenerationsResponse(
+        generations=await service.list_generations(workspace_id, source=source, pocket_id=pocket_id)
+    )
 
 
-@router.post("/generate", response_model=schemas.Generation)
+@router.post(
+    "/generate",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def generate(
     req: schemas.GenerateRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -111,7 +127,11 @@ async def get_generation(
     return generation
 
 
-@router.post("/edit", response_model=schemas.Generation)
+@router.post(
+    "/edit",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def edit(
     req: schemas.EditRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -133,7 +153,11 @@ async def edit(
         raise HTTPException(502, f"Image edit failed: {exc}") from exc
 
 
-@router.post("/video-elements", response_model=schemas.Generation)
+@router.post(
+    "/video-elements",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def video_elements(
     req: schemas.VideoElementsRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -152,7 +176,11 @@ async def video_elements(
         raise HTTPException(502, f"Video edit failed: {exc}") from exc
 
 
-@router.post("/video-motion-control", response_model=schemas.Generation)
+@router.post(
+    "/video-motion-control",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def video_motion_control(
     req: schemas.VideoMotionRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -171,7 +199,11 @@ async def video_motion_control(
         raise HTTPException(502, f"Motion control failed: {exc}") from exc
 
 
-@router.post("/music", response_model=schemas.Generation)
+@router.post(
+    "/music",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def music(
     req: schemas.MusicRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -194,7 +226,11 @@ async def suggest_prompt(req: schemas.SuggestPromptRequest) -> schemas.PromptSug
     return service.suggest_prompt(req.sentence)
 
 
-@router.post("/transcribe", response_model=schemas.TranscriptResponse)
+@router.post(
+    "/transcribe",
+    response_model=schemas.TranscriptResponse,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def transcribe(
     file: UploadFile = File(..., description="Audio extracted from a clip (wav/mp3/m4a/ogg)"),
     model: str | None = Form(default=None, description="Deepgram model override (e.g. nova-2)"),

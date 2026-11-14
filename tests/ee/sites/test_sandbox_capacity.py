@@ -137,9 +137,32 @@ class TestCopy:
     def test_no_sandbox_keeps_its_own_message(self, reason: str) -> None:
         assert capacity.reason_message(reason) == capacity.NO_SANDBOX_MESSAGE
 
-    @pytest.mark.parametrize("reason", [None, "", "timeout", "build_failed:install_failed"])
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            None,
+            "",
+            "timeout",
+            "build_failed:install_failed",
+            # A settled in-sandbox timeout has a build log; its caller shows that.
+            "timed_out:no_sentinel_at_timeout",
+        ],
+    )
     def test_other_reasons_are_left_to_their_callers(self, reason: Any) -> None:
         assert capacity.reason_message(reason) is None
+
+    def test_a_job_timeout_says_the_build_ran_out_of_time(self) -> None:
+        msg = capacity.reason_message("timed_out:job_timeout")
+        assert msg == capacity.JOB_TIMEOUT_MESSAGE
+        assert "time" in msg
+        assert "could not be reached" not in msg
+
+    def test_a_crash_says_it_is_ours_not_an_unreachable_service(self) -> None:
+        msg = capacity.reason_message("job_crashed:unhandled_exception")
+        assert msg == capacity.JOB_CRASHED_MESSAGE
+        assert "Nothing is wrong with the site" in msg
+        assert "could not be reached" not in msg
+        assert "capacity" not in msg.lower()
 
     def test_capacity_never_says_the_server_is_down(self) -> None:
         for msg in (capacity.CAPACITY_WAITING_MESSAGE, capacity.CAPACITY_EXHAUSTED_MESSAGE):
@@ -213,8 +236,9 @@ class TestPreviewLane:
 
     async def test_a_non_capacity_failure_still_raises_without_retry(self) -> None:
         client = _sandbox(fail_at="create", error=DaytonaUnavailable(status=503))
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _preview(_ctx(1), client)
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
 
     async def test_a_waiting_job_reads_as_queued_for_capacity(self, monkeypatch) -> None:
         class _Job:
@@ -239,6 +263,45 @@ class TestPreviewLane:
 
         monkeypatch.setattr(arq.jobs, "Job", _Job)
         assert await verify._timeout_reason(object(), "j") == "waiting_for_capacity"
+
+    @pytest.mark.parametrize(
+        ("status", "info", "reason"),
+        [
+            # arq's own limit: ``Job.result()`` re-raises the stored TimeoutError, which
+            # lands in verify's ``except TimeoutError`` branch.
+            (
+                JobStatus.complete,
+                SimpleNamespace(success=False, result=TimeoutError()),
+                "timed_out:job_timeout",
+            ),
+            (
+                JobStatus.complete,
+                SimpleNamespace(success=False, result=RuntimeError("boom")),
+                "job_crashed:unhandled_exception",
+            ),
+            # Our wait ran out while the job is still going: a genuine wait timeout.
+            (JobStatus.in_progress, None, "timeout"),
+            (JobStatus.complete, SimpleNamespace(success=True, result={}), "timeout"),
+            (JobStatus.complete, None, "timeout"),
+        ],
+    )
+    async def test_verify_timeout_reads_a_finished_jobs_own_raise(
+        self, monkeypatch, status: JobStatus, info: Any, reason: str
+    ) -> None:
+        import arq.jobs
+
+        class _Job:
+            def __init__(self, *_a: Any, **_k: Any) -> None:
+                pass
+
+            async def status(self) -> JobStatus:
+                return status
+
+            async def result_info(self) -> Any:
+                return info
+
+        monkeypatch.setattr(arq.jobs, "Job", _Job)
+        assert await verify._timeout_reason(object(), "j") == reason
 
 
 class TestHtmlVerifyLane:
@@ -327,8 +390,9 @@ class TestProjectLane:
 
     async def test_unreachable_daytona_is_still_no_sandbox(self) -> None:
         records = _Records()
-        with pytest.raises(DaytonaUnavailable):
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _project(_ctx(1, job_id=self.JOB), _RaisingRunner(DaytonaUnavailable()), records)
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
         assert _project_record(records)["reason"] == "sandbox_unavailable:no_sandbox"
 
 
@@ -435,9 +499,57 @@ class TestLifetimes:
 
         assert workspace_vm_lifecycle(config) == {
             "auto_stop_interval": stop,
-            "auto_archive_interval": 24 * 60,
+            "auto_archive_interval": 15,
             "auto_delete_interval": -1,
         }
+
+    @pytest.mark.parametrize(
+        ("raw", "archive"),
+        [
+            ("15", 15),
+            (" 30 ", 30),
+            # 1 is the ops override for a disk crunch.
+            ("1", 1),
+            ("60", 60),
+            # Clamped to 1..60: a long archive holds 10 GiB of disk per stopped VM.
+            ("120", 60),
+            # 0 is Daytona's "use the MAXIMUM interval" (7+ days), the opposite of fast.
+            ("0", 1),
+            ("-5", 1),
+            ("junk", 15),
+            ("", 15),
+        ],
+    )
+    def test_workspace_vm_archive_interval_reads_the_env(self, monkeypatch, raw, archive) -> None:
+        from pocketpaw_ee.cloud.daytona import store
+
+        monkeypatch.setenv(store.WORKSPACE_VM_AUTO_ARCHIVE_ENV, raw)
+        assert store.workspace_vm_lifecycle({})["auto_archive_interval"] == archive
+
+    def test_workspace_vm_archive_env_name_is_stable(self) -> None:
+        from pocketpaw_ee.cloud.daytona import store
+
+        assert (
+            store.WORKSPACE_VM_AUTO_ARCHIVE_ENV == "PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES"
+        )
+
+    async def test_project_build_sandbox_self_deletes(self) -> None:
+        """The project lane builds through ``run_build``; its box must also be deleted
+        on stop, so a stopped build box never sits on the org's disk quota."""
+        from pocketpaw_ee.sites.daytona_runner import run_build
+
+        client = FaultyDaytonaClient(fail_at="create")
+
+        async def runner(files: Any, **kw: Any) -> Any:
+            kw["client"] = client
+            return await run_build(files, **kw)
+
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
+            await _project(_ctx(1, job_id=TestProjectLane.JOB), runner, _Records())
+        assert isinstance(raised.value.__cause__, DaytonaUnavailable)
+        kw = client.create_kwargs
+        assert kw["auto_delete_interval"] == 0
+        assert 0 < kw["auto_stop_interval"] <= 60
 
     async def test_workspace_vm_auto_provision_passes_the_lifecycle(self, monkeypatch) -> None:
         from pocketpaw_ee.cloud.daytona import router as router_mod
@@ -471,7 +583,7 @@ class TestLifetimes:
 
         await router_mod.get_workspace_vm(workspace_id="ws1")
         assert created["auto_stop_interval"] == 60
-        assert created["auto_archive_interval"] == 24 * 60
+        assert created["auto_archive_interval"] == 15
         assert created["auto_delete_interval"] == -1
 
     def test_the_client_default_is_minutes_not_hours(self) -> None:
@@ -481,6 +593,99 @@ class TestLifetimes:
 
         default = inspect.signature(DaytonaClient.create_sandbox).parameters["auto_stop_interval"]
         assert default.default == 30
+
+
+class _StatefulVm:
+    """A VM whose ``get`` walks through ``states`` (the last one repeats), recording
+    every call, so a test can drive it through Daytona's transitional states."""
+
+    def __init__(self, states: list[str]) -> None:
+        self.states = list(states)
+        self.calls: list[str] = []
+
+    async def get_sandbox_by_id(self, sandbox_id: str) -> Any:
+        self.calls.append("get")
+        state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+        return SimpleNamespace(state=state)
+
+    async def start_sandbox(self, sandbox_id: str) -> None:
+        self.calls.append("start")
+
+    async def wait_for_sandbox(self, sandbox_id: str, **kw: Any) -> None:
+        self.calls.append("wait")
+
+
+class TestWorkspaceVmTransitionalStates:
+    """A VM caught mid-transition (the 30-45 minute "back from a break" moment, when it
+    is stopping or archiving) must end up running before the tool call, and a state
+    that is not ``started`` is never cached as started."""
+
+    @pytest.fixture(autouse=True)
+    def _fast(self, monkeypatch: Any) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        context._last_seen_started.clear()
+        monkeypatch.setattr(context, "_SETTLE_POLL_SECONDS", 0.0)
+
+    @pytest.mark.parametrize(
+        ("states", "rest"),
+        [
+            (["archiving", "archiving", "archived"], "archived"),
+            (["stopping", "stopped"], "stopped"),
+            (["stopping", "archiving", "archived"], "archived"),
+        ],
+    )
+    async def test_a_settling_vm_is_waited_for_then_started(
+        self, states: list[str], rest: str
+    ) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        vm = _StatefulVm(states)
+        await context._ensure_started(vm, "sb-settling")
+        assert vm.calls == ["get"] * len(states) + ["start", "wait"]
+        assert "sb-settling" in context._last_seen_started
+
+    @pytest.mark.parametrize("state", ["starting", "restoring", "resuming", "creating"])
+    async def test_a_booting_vm_is_waited_for_not_restarted(self, state: str) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        vm = _StatefulVm([state])
+        await context._ensure_started(vm, f"sb-{state}")
+        assert vm.calls == ["get", "wait"]
+        assert f"sb-{state}" in context._last_seen_started
+
+    async def test_a_vm_that_never_settles_is_bounded_and_not_cached(
+        self, monkeypatch: Any
+    ) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        monkeypatch.setattr(context, "_RESUME_TIMEOUT_SECONDS", 0.0)
+        vm = _StatefulVm(["archiving"])
+        await context._ensure_started(vm, "sb-stuck")
+        assert "start" not in vm.calls
+        assert "sb-stuck" not in context._last_seen_started
+
+    @pytest.mark.parametrize("state", ["error", "unknown", "destroyed", "build_failed"])
+    async def test_an_unusable_state_is_not_cached_as_started(self, state: str) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        vm = _StatefulVm([state])
+        await context._ensure_started(vm, f"sb-{state}")
+        await context._ensure_started(vm, f"sb-{state}")
+        assert vm.calls == ["get", "get"]  # re-checked, never cached
+        assert f"sb-{state}" not in context._last_seen_started
+
+    async def test_a_failed_wait_is_not_cached(self) -> None:
+        from pocketpaw_ee.cloud.daytona import context
+
+        class _Slow(_StatefulVm):
+            async def wait_for_sandbox(self, sandbox_id: str, **kw: Any) -> None:
+                self.calls.append("wait")
+                raise TimeoutError("still starting")
+
+        vm = _Slow(["starting"])
+        await context._ensure_started(vm, "sb-slow")
+        assert "sb-slow" not in context._last_seen_started
 
 
 class TestWorkspaceVmResumes:
@@ -539,5 +744,48 @@ class TestWorkspaceVmResumes:
         await context._ensure_lifecycle(_Client(), "sb-old", "ws1")
         await context._ensure_lifecycle(_Client(), "sb-old", "ws1")
         assert applied == [
-            {"auto_stop_interval": 60, "auto_archive_interval": 1440, "auto_delete_interval": -1}
+            {"auto_stop_interval": 60, "auto_archive_interval": 15, "auto_delete_interval": -1}
         ]
+
+    async def test_a_failed_lifecycle_set_is_retried_on_the_next_resolve(
+        self, monkeypatch: Any
+    ) -> None:
+        from pocketpaw_ee.cloud.daytona import context, store
+
+        attempts: list[str] = []
+
+        class _Client:
+            async def set_sandbox_lifecycle(self, sandbox_id: str, **kw: Any) -> None:
+                attempts.append(sandbox_id)
+                if len(attempts) == 1:
+                    raise RuntimeError("daytona 503")
+
+        async def _config(_ws: str) -> dict:
+            return {}
+
+        monkeypatch.setattr(store, "get_workspace_vm_config", _config)
+        context._lifecycle_applied.clear()
+        await context._ensure_lifecycle(_Client(), "sb-flaky", "ws1")
+        await context._ensure_lifecycle(_Client(), "sb-flaky", "ws1")
+        await context._ensure_lifecycle(_Client(), "sb-flaky", "ws1")
+        assert attempts == ["sb-flaky", "sb-flaky"]
+
+    async def test_an_old_vm_gets_the_env_archive_interval(self, monkeypatch: Any) -> None:
+        """A VM created under the old one-day archive converges on the configured
+        interval at its next resolve, without re-provisioning."""
+        from pocketpaw_ee.cloud.daytona import context, store
+
+        applied: list[dict] = []
+
+        class _Client:
+            async def set_sandbox_lifecycle(self, sandbox_id: str, **kw: Any) -> None:
+                applied.append(kw)
+
+        async def _config(_ws: str) -> dict:
+            return {}
+
+        monkeypatch.setattr(store, "get_workspace_vm_config", _config)
+        monkeypatch.setenv(store.WORKSPACE_VM_AUTO_ARCHIVE_ENV, "10")
+        context._lifecycle_applied.clear()
+        await context._ensure_lifecycle(_Client(), "sb-day-archive", "ws1")
+        assert applied[0]["auto_archive_interval"] == 10

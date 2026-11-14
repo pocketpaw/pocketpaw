@@ -1,21 +1,18 @@
 # Studio templates — cross-tenant reads and writes for the Discover index.
 #
-# Created 2026-10-02 (feat/studio-templates): Discover (``cloud.discover``)
-# mirrors every public studio template as one listing and reads templates only
-# through these functions. They are the only template reads that skip the
-# workspace filter, and every one carries ``# admin-cross-tenant: <reason>``.
+# Discover (``cloud.discover``) mirrors every public studio template as one
+# listing and reads templates only through these functions. They are the only
+# template reads that skip the workspace filter, and every one carries
+# ``# admin-cross-tenant: <reason>``.
 #
 # Rows come back already in Discover listing shape (``title``, ``kind``,
-# ``preview_image_url``, ``live_url`` = None, ``media_kind``, ``media_url``) plus
-# ``id`` / ``public`` / ``hidden``, with the REAL ``workspace`` and ``owner``
-# (Discover stores both and keeps them off its public wire). Media URLs are made
-# absolute with ``POCKETPAW_PUBLIC_BASE_URL`` (read per call): a logged-out
-# Discover viewer is not on the backend origin. ``recipe_for_discover`` serves
-# ``use``: the recipe of a public, unhidden template, with no write anywhere.
-#
-# Updated 2026-10-02 (feat/studio-templates): the base URL comes from
-# ``_core.public_url.public_base_url`` (the dup-ratchet's one accessor) instead of
-# a direct env read.
+# ``preview_image_url``, ``live_url`` = None, ``media_kind``, ``media_url``,
+# ``show_creator``) plus ``id`` / ``public`` / ``hidden``, with the REAL
+# ``workspace`` and ``owner`` (Discover stores both and keeps them off its
+# public wire). Media URLs are made absolute with
+# ``_core.public_url.public_base_url`` (read per call): a logged-out Discover
+# viewer is not on the backend origin. ``recipe_for_discover`` serves ``use``:
+# the recipe of a public, unhidden template, with no write anywhere.
 
 from __future__ import annotations
 
@@ -58,6 +55,7 @@ def _discover_row(doc: StudioTemplate) -> dict[str, Any]:
         "live_url": None,
         "media_kind": _MEDIA_KINDS[doc.kind],
         "media_url": _absolute(cover.get("url")),
+        "show_creator": doc.show_creator,
     }
 
 

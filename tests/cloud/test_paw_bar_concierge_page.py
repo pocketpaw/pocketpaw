@@ -344,6 +344,76 @@ def test_the_retrieval_query_is_the_message_two_visitor_turns_and_the_page_title
     assert _retrieval_query("hi", [], None) == "hi"
 
 
+def _seed_ranked_kb(monkeypatch, articles: list[dict[str, str]]) -> None:
+    """A KB fake that ranks like BM25 enough to matter: articles by how many of
+    the query's terms they contain (ties keep KB order), no-match ones dropped,
+    capped at ``limit``. ``_seed_kb`` ignores the query, so it cannot show which
+    query won."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+    from pocketpaw_ee.paw_bar.concierge_runtime import _query_terms
+
+    def _ranked(query: str, limit: int) -> list[dict[str, str]]:
+        terms = _query_terms(query)
+        scored = [
+            (sum(t in f"{a['title']} {a['content']}".lower() for t in terms), a) for a in articles
+        ]
+        hits = sorted((s for s in scored if s[0]), key=lambda s: -s[0])
+        return [a for _n, a in hits][:limit]
+
+    async def _articles(scope: str, query: str, limit: int = 5) -> list[dict]:
+        return [
+            {"id": a["id"], "title": a["title"], "summary": "", "concepts": []}
+            for a in _ranked(query, limit)
+        ]
+
+    async def _entries(scope: str, query: str, limit: int = 3, **_kw: Any) -> list[dict]:
+        return [
+            {"id": a["id"], "title": a["title"], "text": a["content"], "truncated": False}
+            for a in _ranked(query, limit)
+        ]
+
+    monkeypatch.setattr(KnowledgeService, "search_articles_for_scope", staticmethod(_articles))
+    monkeypatch.setattr(
+        KnowledgeService, "search_context_entries_for_scope", staticmethod(_entries)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "title"),
+    [("/membership", "Membership"), ("/", "Home"), ("/about", "About"), ("/apply", "Apply")],
+)
+async def test_a_new_topic_retrieves_its_own_knowledge_over_the_last_turns(
+    concierge_client, model, monkeypatch, path, title
+):
+    """Turn 1 asks how to apply, turn 2 what events are coming up, from any page
+    but /events. The joined query (message + last turns + page title) ranked six
+    of the page's own apply-and-events sections over the event listing, so it
+    never arrived and the concierge said it had no event details. The message's
+    own hits must lead, whatever page the visitor is on."""
+    client, store = concierge_client
+    faqs = [
+        {
+            "id": f"faq-{n}",
+            "title": f"{title} section {n}",
+            "content": "How to apply to attend events.",
+        }
+        for n in range(6)
+    ]
+    salons = {"id": "forthcoming-salons", "title": "Salons", "content": "Upcoming events."}
+    _seed_ranked_kb(monkeypatch, [*faqs, salons])
+    await _site()
+    widget = await store.create_widget(_widget())
+
+    page = {"url": f"https://brewco.com{path}", "title": title}
+    first = await _chat(client, widget.id, message="how can i apply", page=page)
+    assert first.status_code == 200, first.text
+    second = await _chat(client, widget.id, message="what are the events upcoming", page=page)
+    assert second.status_code == 200, second.text
+
+    assert "forthcoming-salons" in _item_ids(model.user_prompt())
+
+
 # --------------------------------------------------------------------------- #
 # 3. The page reaches the model (end to end, through POST /paw-bar/chat)
 # --------------------------------------------------------------------------- #
@@ -424,8 +494,9 @@ async def test_an_indexed_page_brings_its_title_summary_and_article(
     assert _item_ids(prompt)[0] == "our-menu"
     assert _MENU_ARTICLE in _block(prompt, "knowledge")
     assert shows == [("pocket:pocket-1", "our-menu")]
-    # The indexed title joins the retrieval query.
-    assert all("Our menu" in q for _s, q in seen)
+    # The indexed title joins the retrieval query; the message is also searched alone.
+    message = "how much is the oat latte?"
+    assert {q for _s, q in seen} == {message, f"{message}\nOur menu"}
     # Owner block (none here) → page → knowledge: the PRD's fixed order.
     assert prompt.index("<page>") < prompt.index("<knowledge>")
 
@@ -451,7 +522,8 @@ async def test_a_page_that_is_not_indexed_brings_its_clipped_untrusted_title(
     assert title[:121] not in page
     assert "unverified" in page
     assert shows == []  # nothing to read: the page is not in the index
-    assert all(title[:120] in q for _s, q in seen)
+    message = "When do you open on Sunday?"
+    assert {q for _s, q in seen} == {message, f"{message}\n{title[:120]}"}
 
 
 @pytest.mark.asyncio

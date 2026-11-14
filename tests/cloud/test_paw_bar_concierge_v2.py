@@ -355,6 +355,111 @@ async def test_v2_persists_both_halves_to_the_concierge_run_store(
     assert persisted and persisted[0]["run_id"] == run.run_id
 
 
+# A reasoning model can write its chain of thought into ordinary text. Some
+# provider templates put the opening <think> in the PROMPT, so the reply starts
+# mid-thought and only the closing tag arrives (seen live on an OpenRouter model:
+# ~2,200 chars quoting <owner-settings> before "</think>\n\nHi!").
+_ANSWER = "We open at 7:30am."
+_THINKING_REPLIES = {
+    "tagged": ["<think>The visitor wants hours. Check <owner-settings>.</think>", _ANSWER],
+    "no-opener": [
+        "Thinking Process:\n\n1.  **Analyze the Request:** check <owner-settings>\n",
+        "2.  **Draft:** short.\n</think>\n\n",
+        _ANSWER,
+    ],
+    "split-tags": ["<thi", "nk>plan it</th", "ink>\n\n", _ANSWER],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", sorted(_THINKING_REPLIES))
+async def test_v2_never_shows_the_models_thinking(concierge_client, monkeypatch, shape):
+    """Breaks if the think filter is bypassed: the reasoning reaches the chunks."""
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    client, store = concierge_client
+    rec = _RecordingModel(_THINKING_REPLIES[shape])
+    monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
+    _seed_kb(monkeypatch, _HOURS_KB)
+    await _site()
+    widget = await store.create_widget(_widget())
+
+    res = await _chat(client, widget.id)
+
+    assert res.status_code == 200, res.text
+    text = "".join(d["content"] for e, d in _frames(res.text) if e == "chunk")
+    assert text == _ANSWER
+    for leaked in ("think>", "Thinking", "owner-settings", "plan it"):
+        assert leaked not in res.text
+    run = (await ChatRunDoc.find(ChatRunDoc.context_type == "concierge").to_list())[0]
+    assert run.partial_text == _ANSWER
+
+
+@pytest.mark.asyncio
+async def test_v2_thinking_that_never_closes_is_unavailable_not_shown(
+    concierge_client, monkeypatch
+):
+    """A reply that is all thinking (the closer never came) shows the visitor
+    nothing of it and ends like a failed provider call."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    client, store = concierge_client
+    rec = _RecordingModel(["<think>Check <owner-settings>. ", "Still thinking about it"])
+    monkeypatch.setattr(concierge_runtime, "_build_model", rec.build)
+    _seed_kb(monkeypatch, _HOURS_KB)
+    await _site()
+    widget = await store.create_widget(_widget())
+
+    res = await _chat(client, widget.id)
+
+    assert res.status_code == 200, res.text
+    frames = _frames(res.text)
+    assert not [d for e, d in frames if e == "chunk"]
+    assert [e for e, _d in frames][-2:] == ["unavailable", "stream_end"]
+    assert "owner-settings" not in res.text
+
+
+def _think_through(chunks: list[str]) -> tuple[list[str], str, bool]:
+    from pocketpaw_ee.paw_bar.concierge_runtime import ThinkFilter
+
+    f = ThinkFilter()
+    shown = [f.feed(c) for c in chunks]
+    tail = f.close()
+    return shown, "".join(shown) + tail, f.unclosed
+
+
+def test_think_filter_streams_a_plain_reply_without_holding_it():
+    shown, text, unclosed = _think_through(["We open ", "at 7:30am."])
+    assert shown == ["We open ", "at 7:30am."]
+    assert text == "We open at 7:30am." and not unclosed
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ["<think>x</think>", "Hi."],
+        ["Thinking Process:\n1. x\n</think>\n\nHi."],
+        ["<thinking>x</thinking>Hi."],
+        list("<think>x</think>Hi."),  # one char at a time
+        ["Hi", "<think>aside</think>."],
+    ],
+)
+def test_think_filter_drops_thinking_in_any_split(chunks):
+    _shown, text, unclosed = _think_through(chunks)
+    assert text == "Hi." and not unclosed
+
+
+def test_think_filter_cuts_a_stray_closer_and_keeps_a_lone_angle_bracket():
+    _shown, text, _ = _think_through(["Price < 5", "0 today</think>."])
+    assert text == "Price < 50 today."
+
+
+def test_think_filter_flags_thinking_that_never_closes():
+    _shown, text, unclosed = _think_through(["<think>still going"])
+    assert text == "" and unclosed
+
+
 @pytest.mark.asyncio
 async def test_v2_honours_transcript_retention(concierge_client, model, monkeypatch):
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc

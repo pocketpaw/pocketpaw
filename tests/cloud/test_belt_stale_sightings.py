@@ -7,7 +7,8 @@
 # sighted again. Until the patrol runs, the backlog skips a closed issue. And an
 # issue whose live body names a ``Depends on`` issue still open (``#N``,
 # ``owner/repo#N``, a heading over a list, no colon) is blocked: neither the
-# foreman nor the due check takes it, and a gh failure blocks too.
+# foreman nor the due check takes it, and a gh failure blocks too. A ref in a
+# note after the refs (`` (`` or `` - ``) is not a dependency; ``none`` is none.
 # Real store (mongomock), real trigger, mock foreman; gh is a fake executor.
 
 from __future__ import annotations
@@ -341,6 +342,55 @@ async def test_a_gh_failure_counts_as_blocked(tmp_path, issues, views, blocked_b
     assert found == {_src(31): blocked_by}
 
 
+def _old_deps(count: int) -> tuple[list[dict], dict[int, str], list[str]]:
+    """``count`` open line issues (#101..) each depending on its own CLOSED
+    issue (#1..) that the ``--state all`` list no longer reaches, as on a repo
+    past ``_GH_STATE_LIMIT`` issues: the open list rows, the listed states
+    (the line issues only) and the sources."""
+    numbers = range(1, count + 1)
+    issues = [{**_issue(100 + n, "suite"), "body": f"Depends on: #{n}"} for n in numbers]
+    return issues, {100 + n: "OPEN" for n in numbers}, [_src(100 + n) for n in numbers]
+
+
+async def test_dependencies_past_the_state_list_are_read_in_one_batch(tmp_path):
+    """Belt's live bug: 109 open sightings whose ``Depends on`` issues (all
+    closed) were older than the 500-row ``--state all`` list; the 20-view
+    budget ran out by the 20th and every later one read as blocked. The states
+    the list misses come from ONE GraphQL batch, so more such refs than
+    ``_MAX_ISSUE_VIEWS`` block nothing and spend no view."""
+    count = patrols._MAX_ISSUE_VIEWS + 5
+    issues, states, sources = _old_deps(count)
+    closed = {n: "CLOSED" for n in range(1, count + 1)}
+    gh = FakeGh(issues, states=states, views={n: _closed() for n in closed}, graphql=closed)
+
+    found = await patrols.open_dependencies(str(tmp_path), sources, gh=gh)
+
+    assert found == {}
+    assert _views(gh) == []
+    assert sum(a[:3] == ["gh", "api", "graphql"] for a in gh.calls) == 1
+
+
+async def test_a_dependency_the_batch_says_is_open_still_blocks(tmp_path):
+    issues, states, sources = _old_deps(2)
+    gh = FakeGh(issues, states=states, graphql={1: "CLOSED", 2: "OPEN"})
+
+    found = await patrols.open_dependencies(str(tmp_path), sources, gh=gh)
+
+    assert found == {_src(102): [f"{SLUG}#2"]}
+
+
+async def test_without_the_batch_dependencies_are_still_viewed(tmp_path):
+    """gh without GraphQL (or a failed batch) falls back to the per-ref view
+    and its budget: a closed dependency it can view is no block."""
+    issues, states, sources = _old_deps(2)
+    gh = FakeGh(issues, states=states, views={1: _closed(), 2: _closed()}, graphql=None)
+
+    found = await patrols.open_dependencies(str(tmp_path), sources, gh=gh)
+
+    assert found == {}
+    assert len(_views(gh)) == 2
+
+
 async def test_off_github_nothing_is_checked(tmp_path):
     async def gitlab(argv):
         if "get-url" in argv:
@@ -348,3 +398,75 @@ async def test_off_github_nothing_is_checked(tmp_path):
         raise AssertionError(f"unexpected argv {argv}")
 
     assert await patrols.open_dependencies(str(tmp_path), [_src(31)], gh=gitlab) == {}
+
+
+# ---------------------------------------------------------------------------
+# A note after the Depends on refs is not a dependency
+# ---------------------------------------------------------------------------
+# Live 2026-10-15: creative-apps #873 said "Depends on: none (#763 is lane-wide,
+# not a dependency)" and never launched in 13 h: the #763 in the note blocked
+# it. Only refs before a parenthesis or a " - " note count; "none" is none.
+
+
+@pytest.mark.parametrize(
+    ("body", "refs"),
+    [
+        ("Depends on: none (#763 is lane-wide, not a dependency)", []),
+        ("**Depends on:** None - #763 is lane-wide", []),
+        ("Depends on: none (#763 is lane-wide)\n#412 is a sibling, not a blocker", []),
+        ("Depends on: #12 (see #763)", [f"{SLUG}#12"]),
+        ("Depends on: #12, #13 - both lane-wide, see #763", [f"{SLUG}#12", f"{SLUG}#13"]),
+        ("## Depends on\n\n- #12 (see #763)\n  - #13 - after #764\n", [f"{SLUG}#12", f"{SLUG}#13"]),
+        ("Depends on: [#12](https://github.com/acme/app/issues/12)", [f"{SLUG}#12", "acme/app#12"]),
+    ],
+    ids=["none-paren", "none-dash", "none-ends-section", "ref-paren", "refs-dash", "list", "link"],
+)
+def test_a_depends_on_note_names_no_dependency(body, refs):
+    assert patrols.depends_on_refs(body, SLUG) == refs
+
+
+# Live 2026-10-20 (qbtrix/creative-apps): blueprint issues end with lines like
+# "Depends on: foundation (#777), render-out (#1505), core-loop (planned)" and
+# "Depends on: #3401 (gradient model), #3402 (fill UI)". Cutting the line at its
+# first " (" read the first as no dependency at all and the second as #3401 only.
+# Each comma item counts: its refs outside parentheses, else the ones inside.
+APPS = "qbtrix/creative-apps"
+
+
+@pytest.mark.parametrize(
+    ("body", "refs"),
+    [
+        ("Depends on: #3401 (gradient model), #3402 (fill UI)", [f"{APPS}#3401", f"{APPS}#3402"]),
+        (
+            "Depends on: foundation (#777), render-out (#1505), core-loop (planned)",
+            [f"{APPS}#777", f"{APPS}#1505"],
+        ),
+        (
+            "**Depends on:** qbtrix/creative-core#225 (LC-12), #323 (LM-0c2)",
+            ["qbtrix/creative-core#225", f"{APPS}#323"],
+        ),
+        ("Depends on: core#232, #26", ["qbtrix/creative-core#232", f"{APPS}#26"]),
+        ("Depends on: import (built), thumbnails (planned)", []),
+    ],
+    ids=["ref-then-note", "name-then-ref", "cross-repo-notes", "core-alias", "names-only"],
+)
+def test_every_ref_on_a_depends_on_line_counts(body, refs):
+    assert patrols.depends_on_refs(body, APPS) == refs
+
+
+async def test_depends_on_none_with_a_note_is_not_blocked(tmp_path):
+    issue = _issue(873, "feature-lead")
+    issue["body"] = "Feature\n\nDepends on: none (#763 is lane-wide, not a dependency)"
+    gh = FakeGh([issue], states={763: "OPEN", 873: "OPEN"})
+
+    assert await patrols.open_dependencies(str(tmp_path), [_src(873)], gh=gh) == {}
+
+
+async def test_depends_on_a_ref_with_a_note_blocks_on_the_ref_only(tmp_path):
+    issue = _issue(31, "suite")
+    issue["body"] = "Depends on: #12 (see #763)"
+    gh = FakeGh([issue], states={12: "OPEN", 31: "OPEN", 763: "OPEN"})
+
+    found = await patrols.open_dependencies(str(tmp_path), [_src(31)], gh=gh)
+
+    assert found == {_src(31): [f"{SLUG}#12"]}

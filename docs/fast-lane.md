@@ -9,6 +9,18 @@ It runs as `.github/workflows/fast-lane.yml`, which calls `scripts/fast-lane.sh`
 The workflow never checks out or runs PR code. It reads PR metadata from the
 GitHub API and runs the script from `dev`.
 
+GitHub only runs this kind of workflow (`pull_request_target`, `workflow_run`,
+`workflow_dispatch`) from the default branch, which is `main`. So the copy of
+`fast-lane.yml` on `main` is the one that runs. The `dev` copy is a mirror.
+After you change the workflow on `dev`, copy it to `main` with a one-file PR:
+
+```bash
+git switch -c chore/fast-lane-to-main origin/main
+git checkout origin/dev -- .github/workflows/fast-lane.yml
+```
+
+The script is fetched from `dev` on every run, so changing it needs no copy.
+
 ## Eligibility
 
 All of these must hold:
@@ -17,7 +29,8 @@ All of these must hold:
 2. The author is on the allowlist (`FAST_LANE_AUTHORS` in the script).
    Community PRs are never fast-laned.
 3. At most 400 changed lines (additions + deletions) and at most 15 files.
-4. No changed path matches the deny list: `.github/`, `.claude/`, `CLAUDE.md`,
+4. No changed path matches the deny list: `.github/`, `.claude/`, the lane's
+   own `scripts/fast-lane*`, `CLAUDE.md`,
    `AGENTS.md`, dependency manifests and lockfiles, `Dockerfile`, `deploy/`,
    migrations, and any path containing auth, security, secret, credential,
    billing, payment, wallet, permission, policy, crypto, token, instinct,
@@ -36,6 +49,11 @@ All of these must hold:
   fix push tries again.
 - Eligible and green: squash merge, label `fast-lane-merged`, and a
   `Fast lane: merged` comment with the size and check count.
+
+The merge is made with the workflow's `GITHUB_TOKEN`, and GitHub starts no
+workflows for pushes made with that token. So a fast-lane merge does not run
+CI on `dev` or the `Deploy to Coolify` job. Both run on the next normal push
+to `dev`.
 
 ## Opt in or out
 

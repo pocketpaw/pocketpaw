@@ -9,11 +9,13 @@
 # other engines and unsafe paths, and every write lands in the source map and queues
 # a build; apply_site_recipe writes the CLI's files back, records the recipe, returns
 # secret names, writes NOTHING on a conflict, and refuses below the recipe's plan;
-# run_site_build / get_site_build_log read A1's build records. The CLI is the fake in
-# tests/ee/sites/project_cli_fake.py; the sandbox queue is stubbed.
+# run_site_build / get_site_build_log read A1's build records; a write or patch of the
+# repo-root PLAN.md records one chat artifact per run, and no other file does. The CLI
+# is the fake in tests/ee/sites/project_cli_fake.py; the sandbox queue is stubbed.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -63,6 +65,8 @@ def cli(monkeypatch) -> FakeCli:
 class BuildQueue:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.triggers: list[str] = []
+        self.forces: list[bool] = []
         self.answer: dict[str, Any] = {
             "build_status": "queued",
             "build_job_id": "site-preview-p-abc",
@@ -70,8 +74,18 @@ class BuildQueue:
             "preview_mode": None,
         }
 
-    async def __call__(self, *, workspace_id: str, user_id: str, pocket_id: str) -> dict:
+    async def __call__(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str,
+        pocket_id: str,
+        trigger: str = "draft",
+        force: bool = False,
+    ) -> dict:
         self.calls.append(pocket_id)
+        self.triggers.append(trigger)
+        self.forces.append(force)
         return dict(self.answer)
 
 
@@ -195,7 +209,7 @@ class TestRegistration:
         create = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="project"))
         assert set(SITES_PROJECT_TOOL_IDS) <= set(create.allow_mcp_tool_ids or ())
         assert create.ripple_mode == "off"
-        assert "pocketpaw-create-project-site" in (create.skill_names or set())
+        assert "pocketpaw-site" in (create.skill_names or set())
         refine = resolve_profile(
             SurfaceKind.SITES, SurfaceMeta(pocket_id="pkt_1", engine="project")
         )
@@ -402,8 +416,45 @@ class TestFileTools:
         doc = await _doc(pocket_id)
         assert doc.source["src/pages/about.astro"] == "<h1>About us</h1>\n"
         assert "src/pages/index.astro" not in doc.source
-        # Every write queued the draft build of the new source.
+        # Every write queued the draft build of the new source, as the agent's.
         assert len(builds.calls) == 4
+        assert builds.triggers == ["agent"] * 4
+
+    async def test_a_write_over_a_file_the_owner_changed_is_refused(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        """read_site_file hands the agent each file's hash; a write that names it is
+        refused, with nothing saved, once the owner has saved that file since."""
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        _ws, user = identity
+        pocket_id = await _start(cli)
+        out = await _call("read_site_file", {"pocket_id": pocket_id, "path": "AGENTS.md"})
+        seen = _body(out)["files"][0]["hash"]
+        await pockets_service.set_project_source(pocket_id, user, writes={"AGENTS.md": "# owner\n"})
+
+        out = await _call(
+            "write_site_files",
+            {
+                "pocket_id": pocket_id,
+                "files": {"AGENTS.md": "# agent\n"},
+                "base_hashes": {"AGENTS.md": seen},
+            },
+        )
+        assert out["is_error"]
+        text = out["content"][0]["text"]
+        assert "sites.project_file_conflict" in text and "read_site_file" in text
+        out = await _call(
+            "patch_site_file",
+            {
+                "pocket_id": pocket_id,
+                "path": "AGENTS.md",
+                "edits": [{"old": "owner", "new": "agent"}],
+                "base_hash": seen,
+            },
+        )
+        assert out["is_error"]
+        assert (await _doc(pocket_id)).source["AGENTS.md"] == "# owner\n"
 
     async def test_patch_needs_exactly_one_match_and_saves_nothing_otherwise(
         self, cli, identity, builds, beanie_test_db, recording_bus
@@ -486,13 +537,26 @@ class TestRecipes:
         assert _body(await _call("list_site_recipes", {"template": "rails"}))["recipes"] == []
 
     async def test_apply_writes_back_records_and_returns_secret_names(
-        self, cli, identity, builds, beanie_test_db, recording_bus
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
     ) -> None:
+        from cryptography.fernet import Fernet
+
+        monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
         pocket_id = await _start(cli)
         out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
         assert not out.get("is_error"), out
         body = _body(out)
-        assert body["secret_names"] == ["BETTER_AUTH_SECRET"]
+        # A signing secret is Paw's to create: it is never among the names to request.
+        assert body["secret_names"] == []
+        assert body["platform_secret_names"] == ["BETTER_AUTH_SECRET"]
+        assert body["secrets"][0]["set_by"] == "paw"
+        # ...and it exists from the apply on, so the Worker reads it without a request.
+        from pocketpaw_ee.sites import site_secrets
+
+        minted = await site_secrets.secrets_for_deploy(
+            SimpleNamespace(workspace=(await _doc(pocket_id)).workspace, pocket_id=pocket_id)
+        )
+        assert set(minted) == {"BETTER_AUTH_SECRET"}
         assert body["glue_tasks"] == [{"task": "Wire getUser.", "file": "src/server/auth/index.ts"}]
         assert "request_site_secret" in body["message"]
         assert "never write" in body["message"].lower()
@@ -743,6 +807,52 @@ class TestBuilds:
         assert body["status"] == "failed" and body["reason"] == "build_failed:build_failed"
         assert out["content"][1]["text"].endswith("x" * 50)
 
+    async def test_run_build_asks_for_a_fresh_attempt_and_writes_do_not(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        """run_site_build is an explicit request, so a stale infra failure is retried;
+        the write tools' verification is not, so it keeps the poll budget."""
+        from pocketpaw_ee.sites import project_tools
+
+        pocket_id = await _start(cli)
+        builds.answer = {**builds.answer, "build_status": "none", "preview_mode": "full"}
+        await _call("run_site_build", {"pocket_id": pocket_id})
+        assert builds.forces[-1] is True
+
+        ws, user = identity
+        await project_tools.build_verification(
+            workspace_id=ws, user_id=user, pocket_id=pocket_id, trigger="agent"
+        )
+        assert builds.forces[-1] is False
+
+    async def test_run_build_says_a_replayed_infra_failure_is_the_previous_attempt(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_project
+        from pocketpaw_ee.sites import project_build
+
+        pocket_id = await _start(cli)
+        reason = "sandbox_unavailable:no_sandbox"
+        builds.answer = {
+            **builds.answer,
+            "build_status": "failed",
+            "build_reason": reason,
+            "build_previous_attempt": True,
+        }
+        monkeypatch.setattr(sites_project, "RUN_BUILD_POLL_SEC", 0)
+        monkeypatch.setattr(
+            project_build,
+            "read_build_record",
+            lambda *_a: {"status": "failed", "reason": reason, "log": ""},
+        )
+        out = await _call("run_site_build", {"pocket_id": pocket_id})
+        body = _body(out)
+        assert out["is_error"]
+        assert body["previous_attempt"] is True
+        assert "previous attempt" in body["message"]
+        assert "try again in a few minutes" in body["message"]
+        assert "edit the files" in body["message"]
+
     async def test_run_build_reports_static_preview_mode(
         self, cli, identity, builds, beanie_test_db, recording_bus
     ) -> None:
@@ -845,6 +955,118 @@ class TestBuilds:
 
 
 # ---------------------------------------------------------------------------
+# PLAN.md shows in chat as an artifact
+# ---------------------------------------------------------------------------
+
+
+PLAN = "# Plan\n\n- [ ] Milestone 1\n"
+
+
+class TestPlanArtifact:
+    """A write or patch of the repo-root PLAN.md records one artifact for the run, in
+    the deliver_artifact meta shape plus the raw read route the card opens."""
+
+    async def test_writing_the_plan_records_one_artifact(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            out = await _call(
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN, "src/a.ts": "1"}},
+            )
+        assert not out.get("is_error"), out
+        assert artifacts == [
+            {
+                "file_id": f"site-file:{pocket_id}:PLAN.md",
+                "name": "PLAN.md",
+                "mime": "text/markdown",
+                "size": len(PLAN.encode("utf-8")),
+                "src": f"/api/v1/sites/by-pocket/{pocket_id}/source-file?path=PLAN.md",
+                "kind": "site_plan",
+                "pocket_id": pocket_id,
+            }
+        ]
+
+    async def test_patching_the_plan_replaces_the_entry_with_the_latest_size(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            await _call("write_site_files", {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN}})
+            out = await _call(
+                "patch_site_file",
+                {
+                    "pocket_id": pocket_id,
+                    "path": "PLAN.md",
+                    "edits": [{"old": "- [ ] Milestone 1", "new": "- [x] Milestone 1 (done)"}],
+                },
+            )
+        assert not out.get("is_error"), out
+        ticked = (await _doc(pocket_id)).source["PLAN.md"]
+        assert len(artifacts) == 1
+        assert artifacts[0]["size"] == len(ticked.encode("utf-8")) != len(PLAN.encode("utf-8"))
+
+    async def test_a_patch_alone_records_the_artifact(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        await _call("write_site_files", {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN}})
+        with collect_delivered_artifacts() as artifacts:
+            await _call(
+                "patch_site_file",
+                {
+                    "pocket_id": pocket_id,
+                    "path": "PLAN.md",
+                    "edits": [{"old": "[ ]", "new": "[x]"}],
+                },
+            )
+        assert [a["name"] for a in artifacts] == ["PLAN.md"]
+
+    async def test_other_files_and_a_nested_plan_record_nothing(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            await _call(
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"docs/PLAN.md": PLAN, "plan.md": PLAN}},
+            )
+            await _call(
+                "patch_site_file",
+                {"pocket_id": pocket_id, "path": "AGENTS.md", "edits": [{"old": "#", "new": "##"}]},
+            )
+        assert artifacts == []
+
+    async def test_a_failed_write_or_patch_records_nothing(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+        pocket_id = await _start(cli)
+        with collect_delivered_artifacts() as artifacts:
+            out = await _call(
+                "write_site_files",
+                {"pocket_id": pocket_id, "files": {"PLAN.md": PLAN, "../x.ts": "1"}},
+            )
+            assert out["is_error"]
+            out = await _call(
+                "patch_site_file",
+                {"pocket_id": pocket_id, "path": "PLAN.md", "edits": [{"old": "zz", "new": "b"}]},
+            )
+            assert out["is_error"]
+        assert artifacts == []
+
+
+# ---------------------------------------------------------------------------
 # Skill
 # ---------------------------------------------------------------------------
 
@@ -892,10 +1114,9 @@ def test_create_and_refine_preambles_route_project_sites() -> None:
     from pocketpaw_ee.cloud.surface import SurfaceMeta
     from pocketpaw_ee.cloud.surface.handlers import sites as handler
 
-    assert handler._preamble_engine("project", default="html") == "project"
     create = handler._create_preamble(SurfaceMeta(engine="project"))
     assert 'engine="project"' in create
-    assert "pocketpaw-create-project-site" in create
+    assert "`pocketpaw-site`" in create
     assert "start_site_from_template" in create and "run_site_build" in create
     assert "request_site_secret" in create
     assert "create_html_site" not in create
@@ -905,6 +1126,112 @@ def test_create_and_refine_preambles_route_project_sites() -> None:
     assert "mcp__pocketpaw_ask__ask_user" in refine
     assert "edit_html_file" not in refine
 
-    # The html default names the project route for full-stack asks.
+    # Every new site is a project now, the html default included.
     html = handler._create_preamble(SurfaceMeta())
-    assert "pocketpaw-create-project-site" in html
+    assert 'engine="project"' in html and "start_site_from_template" in html
+
+
+class TestOwnerPagePath:
+    """The accounts recipe records where the site's owner page lives
+    (``site_meta.admin_path``), so Paw can link the owner straight to their bookings
+    and orders instead of leaving them to find a footer link."""
+
+    async def test_better_auth_records_the_default_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+        assert not out.get("is_error"), out
+        assert _body(out)["admin_path"] == "/admin"
+        assert (await _doc(pocket_id)).site_meta["admin_path"] == "/admin"
+
+    async def test_the_agent_names_its_own_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "better-auth", "admin_path": " /owner/orders "},
+        )
+        assert not out.get("is_error"), out
+        assert (await _doc(pocket_id)).site_meta["admin_path"] == "/owner/orders"
+
+    async def test_an_already_applied_recipe_still_moves_the_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.sites import project_tools
+
+        pocket_id = await _start(cli)
+        await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+        monkeypatch.setattr(
+            project_tools, "apply_recipe", AsyncMock(return_value=({"alreadyApplied": True}, {}))
+        )
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "better-auth", "admin_path": "/dashboard"},
+        )
+        assert _body(out)["status"] == "already_applied"
+        assert (await _doc(pocket_id)).site_meta["admin_path"] == "/dashboard"
+
+    @pytest.mark.parametrize(
+        "bad", ["admin", "//evil.example", "https://evil.example/admin", "/a b", "/../x"]
+    )
+    async def test_an_unsafe_owner_page_path_writes_nothing(
+        self, cli, identity, builds, beanie_test_db, recording_bus, bad
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "better-auth", "admin_path": bad},
+        )
+        assert out["is_error"]
+        doc = await _doc(pocket_id)
+        assert doc.source == TEMPLATE_FILES
+        assert "admin_path" not in (doc.site_meta or {})
+
+    async def test_other_recipes_record_no_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "d1-drizzle", "admin_path": "/admin"},
+        )
+        assert not out.get("is_error"), out
+        assert "admin_path" not in _body(out)
+        assert "admin_path" not in (await _doc(pocket_id)).site_meta
+
+
+def test_a_copy_keeps_the_owner_page_path_and_nothing_else_new() -> None:
+    """A duplicate or template carries the same code, so its owner page is at the same
+    path; any other site_meta key still stays behind."""
+    from pocketpaw_ee.cloud.pockets.service import site_meta_snapshot
+
+    meta = {
+        "project": {"template": "astro", "framework": "astro", "recipes": ["better-auth"]},
+        "admin_path": "/owner",
+        "secret_thing": "x",
+    }
+    assert site_meta_snapshot(meta) == {
+        "project": {"template": "astro", "framework": "astro", "recipes": ["better-auth"]},
+        "admin_path": "/owner",
+    }
+    assert "admin_path" not in site_meta_snapshot({"project": {}, "admin_path": 5})
+    # A stored value that is not a plain site path never crosses into a copy.
+    for bad in ["//evil.example", "https://evil.example/admin", "admin", "/../x"]:
+        assert "admin_path" not in site_meta_snapshot({"project": {}, "admin_path": bad})
+
+
+async def test_a_bad_recorded_owner_page_path_is_replaced_by_the_default(
+    cli, identity, builds, beanie_test_db, recording_bus
+) -> None:
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    pocket_id = await _start(cli)
+    doc = await Pocket.get(ObjectId(pocket_id))
+    doc.site_meta = {**(doc.site_meta or {}), "admin_path": "https://evil.example/admin"}
+    await doc.save()
+    out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+    assert not out.get("is_error"), out
+    assert (await _doc(pocket_id)).site_meta["admin_path"] == "/admin"

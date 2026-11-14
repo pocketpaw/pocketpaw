@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as html_lib
 import json
 import logging
@@ -38,7 +39,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -66,6 +67,7 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
     with_cause,
 )
+from pocketpaw_ee.cloud.leads.domain import lead_site_id
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
@@ -113,12 +115,16 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
     SlugAvailability,
+    utc_iso,
 )
 from pocketpaw_ee.sites.engines import (
     content_key,
     has_write_back_lane,
     is_source_engine,
     normalize_engine,
+    site_capabilities,
+    site_has_database,
+    spec_is_dynamic,
     write_back_lane,
 )
 from pocketpaw_ee.sites.export import (
@@ -283,7 +289,7 @@ def _extract_css(html: str, cloudflare_dir: Path) -> str:
     component's link is refused) before it is read.
 
     A stylesheet link with an absolute ``https://`` or protocol-relative ``//`` href
-    (a web font from Google Fonts / Fontshare in ``<head>``) is not on disk: it is
+    (a web-font stylesheet such as Google Fonts in ``<head>``) is not on disk: it is
     emitted as ``@import url("...");`` in its document position instead, since the
     native preview drops the page ``<head>``. Plain ``http://`` and other schemes
     are ignored. Finally every top-level ``@import`` is hoisted to the start of the
@@ -707,6 +713,7 @@ async def _build_native_artifact(
     content_hash: str,
     engine: str = "svelte",
     keeps_client_bundle: bool = False,
+    rebuild_stale: bool = False,
     _pool: Any | None = None,
 ) -> Any:
     """QUEUE the ARMED build for a native artifact in the ephemeral Daytona lane.
@@ -772,6 +779,7 @@ async def _build_native_artifact(
         content_hash=content_hash,
         engine=engine,
         generator_input=generator_input,
+        rebuild_stale=rebuild_stale,
         _pool_override=_pool,
     )
 
@@ -1201,12 +1209,8 @@ def _is_dynamic(pattern: str | None, ripple_spec: dict[str, Any] | None) -> bool
     stamped — a spec declaring any top-level ``sources`` / ``actions`` (or
     ``auth``) is also dynamic, mirroring the generator's own classifier. Anything
     else (a static landing / brochure pocket) is NOT dynamic and has no D1 to
-    read."""
-    if pattern == "dynamic":
-        return True
-    if not isinstance(ripple_spec, dict):
-        return False
-    return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
+    read. The rule itself is ``engines.spec_is_dynamic``, shared with ``has_database``."""
+    return spec_is_dynamic(pattern, ripple_spec)
 
 
 def _dynamic_objects(ripple_spec: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1424,6 +1428,41 @@ def _cf_client():
     )
 
 
+_data_token_warned = False
+
+
+def _data_cf_client():
+    """The Cloudflare client the Data dashboard reads and writes a site's stores with.
+
+    Built from ``PAW_CF_DATA_API_TOKEN`` (D1 / KV / R2 edit only) so dashboard traffic
+    never spends the publish token's rate budget; falls back to ``PAW_CF_API_TOKEN``
+    with a one-time warning (fine in dev, not in production). Needs no zone id. A
+    missing account id or token is a ``ValidationError`` (422), like ``_cf_client``."""
+    import os
+
+    from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
+
+    global _data_token_warned
+    account_id = os.environ.get("PAW_CF_ACCOUNT_ID")
+    api_token = os.environ.get("PAW_CF_DATA_API_TOKEN")
+    if not api_token:
+        api_token = os.environ.get("PAW_CF_API_TOKEN")
+        if api_token and not _data_token_warned:
+            _data_token_warned = True
+            logger.warning(
+                "PAW_CF_DATA_API_TOKEN is not set: the Sites Data dashboard is using the "
+                "publish token, so its traffic shares the publish rate budget"
+            )
+    if not (account_id and api_token):
+        raise ValidationError("sites.cloudflare_unconfigured", "Cloudflare is not configured")
+    return CloudflareClient(
+        account_id=account_id,
+        api_token=api_token,
+        zone_id=os.environ.get("PAW_CF_ZONE_ID", ""),
+        dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
+    )
+
+
 def _local_mode() -> bool:
     """Whether publish() takes the LOCAL deploy branch (skip Cloudflare, serve the
     static site from localhost). True when PAW_SITES_LOCAL=1 is set explicitly, or
@@ -1557,7 +1596,12 @@ def _canonical_plan_tier(stored: str | None) -> str:
     return _site_plans.canonical_site_tier_key(stored) or stored
 
 
-def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
+def _to_response(
+    doc: _SiteDoc,
+    pattern: str = "",
+    engine: str = "",
+    capabilities: dict[str, bool] | None = None,
+) -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     created_at = getattr(doc, "createdAt", None)
     return SiteResponse(
@@ -1581,14 +1625,14 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         builder_origin=getattr(doc, "builder_origin", ""),
         # P2b: ISO string of the last successful live deploy, or None before the
         # first deploy (pre-P2b rows read null via the getattr default).
-        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        deployed_at=utc_iso(deployed_at),
         # When the row was made. The gallery orders by "most recent", and
         # ``deployed_at`` above is None for every draft — so without this the whole
         # draft half of a workspace had no ordering key and sorted alphabetically,
         # which put a site created a minute ago below one created last month. Read
         # via getattr for the same reason deployed_at is: a doc that predates the
         # field reads None rather than raising.
-        created_at=created_at.isoformat() if created_at is not None else None,
+        created_at=utc_iso(created_at),
         # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" |
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
@@ -1597,6 +1641,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # resolved by the caller from Pocket.engine (sibling of pattern above). ""
         # when unresolved, so the gallery's engine badge is empty-safe.
         engine=engine,
+        # The site's edit/build flags (``engines.site_capabilities``), resolved by the
+        # caller alongside ``engine``. None when the pocket was not resolved.
+        capabilities=capabilities,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
@@ -1617,11 +1664,7 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # is more useful to whoever gets the support ticket than a blank.
         plan_tier=_canonical_plan_tier(getattr(doc, "plan_tier", None)),
         subscription_status=getattr(doc, "subscription_status", None) or "none",
-        renewal_date=(
-            _renewal.isoformat()
-            if (_renewal := getattr(doc, "renewal_date", None)) is not None
-            else None
-        ),
+        renewal_date=utc_iso(getattr(doc, "renewal_date", None)),
         # What the current period has already been bought at, so the builder can
         # price a plan CHANGE correctly. Sent for every site, including free ones
         # (where it is 0), because the client subtracts against it unconditionally.
@@ -1706,8 +1749,8 @@ async def require_sites_plan(workspace_id: str) -> None:
         )
         raise Forbidden(
             "plan.feature_denied",
-            f"Sites requires the {needed.capitalize()} plan — upgrade, or switch "
-            "to a workspace that has it.",
+            f"Sites requires the {needed.capitalize()} plan. Upgrade under "
+            "Settings → Billing, or switch to a workspace that has it.",
         )
 
 
@@ -1742,6 +1785,7 @@ async def create_draft_site(
     user_id: str,
     pocket_id: str,
     name: str = "",
+    generation_session_id: str | None = None,
 ) -> _SiteDoc:
     """Mint the DRAFT Site doc for a freshly created site pocket so it lists in the
     /sites gallery BEFORE it is ever published (fix/sites-draft-visible).
@@ -1782,6 +1826,12 @@ async def create_draft_site(
     invisible until someone pressed Refresh. The emit sits AFTER the idempotent early
     return above, so it fires once per real insert — a repeat create, or one against
     an already-live doc, stays silent.
+
+    ``generation_session_id``: passed ONLY by the agent create tools' shared mint,
+    with the chat session the creating run lives in. A fresh mint then starts as
+    ``generation="generating"`` (see ``sites.generation``); every other caller
+    (import, remix, the pockets path) leaves it None, and a repeat create never
+    restamps an existing doc.
     """
     # Resolved, not derived: a TRANSFERRED site keeps the id it was minted with,
     # so a create against a moved pocket finds the real row instead of minting a
@@ -1813,6 +1863,10 @@ async def create_draft_site(
         signed_key=f"site_key_{secrets.token_urlsafe(24)}",
         allowed_origins=_default_allowed_origins(),
         event_mapping=_DEFAULT_EVENT_MAPPING,
+        # Only the agent create tools pass a session: the run in it is still
+        # building this site. Read by the list / status reads alone.
+        generation="generating" if generation_session_id else None,
+        generation_session_id=generation_session_id or None,
     )
     await doc.insert()
     # The gallery IS a downstream listener, and a draft is the moment its card
@@ -2574,8 +2628,10 @@ async def publish(
     builder_origin: str | None = None,
     keeps_client_bundle: bool = False,
     preview: bool = False,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
+    # The publish gate found no stored build to read: check the build made here.
+    gate_built_output: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2815,6 +2871,7 @@ async def publish(
         workers_deploy=_workers_deploy,
         confirm_destructive_migrations=confirm_destructive_migrations,
         confirm_do_data_loss=confirm_do_data_loss,
+        gate_built_output=gate_built_output,
     )
 
 
@@ -2830,20 +2887,26 @@ async def _deploy_project_site(
     builder_origin: str | None,
     cloudflare: Any | None,
     local_deploy: Callable[[str, str], str] | None,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     _store: Any | None = None,
 ) -> _SiteDoc:
     """Publish a ``project`` pocket from its stored draft build.
 
-    Nothing builds here and nothing the author wrote runs here: the bundle the sandbox
-    built for the pocket's CURRENT source (``project_build``) is materialized and
-    handed to ``_deploy_site_doc`` as a prebuilt tree, which deploys it through
+    Nothing the author wrote runs here. A no-build tree (``project_build.is_no_build``)
+    is staged from the CURRENT source right here, in-process, with the live site
+    config (no sandbox, and no draft needed first). Anything else: the bundle the
+    sandbox built for the CURRENT source (``project_build``) is materialized, and a
+    source with no finished draft build is a 409 (open the preview, or run a build,
+    then publish). Either way paw.js is (re)applied to the bundle's static pages with
+    the live identity (``project_build.apply_paw_client_to_bundle``, idempotent), the
+    lead-form capture placeholders are resolved
+    (``project_build.apply_capture_tokens_to_bundle``), and the tree goes to
+    ``_deploy_site_doc`` as a prebuilt dir, which deploys it through
     ``bundle_deploy`` + the binding provisioner: into the WfP namespace, or (workers
-    mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker.
-    A source with no finished draft build is a 409 (open the preview, or run a
-    build, then publish). The site's plan is checked against the manifest first
-    (``project_build.check_plan_allows``).
+    mode / ``PAW_SITES_PROJECT_DEPLOY_TARGET=account``) as an account-level Worker; a
+    no-build bundle is an assets-only Worker (``workerModules: []``). The site's plan
+    is checked against the manifest first (``project_build.check_plan_allows``).
 
     The Site doc is ensured (inserted undeployed on a first publish) BEFORE the deploy,
     because the provisioner records the D1 / KV / R2 it creates on it. A ``d1``
@@ -2858,10 +2921,18 @@ async def _deploy_project_site(
     from pocketpaw_ee.sites import project_build
 
     files_source = source if isinstance(source, dict) else None
-    project_build.project_files(files_source)
-    content_hash = project_build.project_content_hash(files_source or {})
-    store = _store or _default_artifact_store()
-    bundle = store.read_dist(pocket_id, project_build.bundle_key(content_hash))
+    files = project_build.project_files(files_source)
+    turnstile_site_key = (await _turnstile_build_kwargs(workspace_id, pocket_id)).get(
+        "turnstile_site_key", ""
+    )
+    site_config = _project_paw_config(site_id, signed_key, turnstile_site_key)
+    if project_build.files_are_no_build(files):
+        _manifest, staged, _ = project_build.no_build_bundle(files, site_config=site_config)
+        bundle = preview_origin.pack_files(staged)
+    else:
+        content_hash = project_build.project_content_hash(files_source or {})
+        store = _store or _default_artifact_store()
+        bundle = store.read_dist(pocket_id, project_build.bundle_key(content_hash))
     if not bundle:
         raise ConflictError(
             "sites.project_build_required",
@@ -2876,6 +2947,12 @@ async def _deploy_project_site(
             raise ValidationError(
                 "sites.bundle_invalid", f"The stored build cannot be deployed: {exc}"
             ) from exc
+        # The Turnstile sitekey counts as baked only when paw.js (which carries it) shipped.
+        shipped = project_build.apply_paw_client_to_bundle(
+            Path(work), manifest, files_source, site_config
+        )
+        # A contact form's capture placeholders get the live identity, as on the html lane.
+        project_build.apply_capture_tokens_to_bundle(Path(work), manifest, site_config)
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         project_build.check_plan_allows(
             manifest,
@@ -2913,6 +2990,7 @@ async def _deploy_project_site(
             prebuilt_project_dir=work,
             confirm_destructive_migrations=confirm_destructive_migrations,
             confirm_do_data_loss=confirm_do_data_loss,
+            turnstile_site_key=turnstile_site_key if shipped else "",
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -2991,9 +3069,12 @@ async def _deploy_site_doc(
     # growing a second copy of the deploy tail. One deploy path, two places the build
     # can have happened.
     prebuilt_project_dir: str | None = None,
+    # ``publish_gate.check_built_output`` runs on the inline build before anything
+    # deploys (the gate had no stored build of this content to read).
+    gate_built_output: bool = False,
     # A project publish may run migrations that delete data the site holds only when
     # the owner confirmed it (``project_d1``). Ignored by every other engine.
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     # The Turnstile sitekey a PREBUILT artifact was built with (the async lane puts
     # it in ``deploy_inputs``). An inline build looks its own up.
@@ -3093,6 +3174,7 @@ async def _deploy_site_doc(
             pattern=pattern,
             builder_origin=builder_origin,
             keeps_client_bundle=keeps_client_bundle,
+            gate_built_output=gate_built_output,
         )
 
     gen = generator or GeneratorClient()
@@ -3137,6 +3219,15 @@ async def _deploy_site_doc(
             # rollback in edit_svelte_component are unchanged — a broken edit never
             # reaches the live deploy.
             smoke=True,
+        )
+
+    # The publish gate had no stored build of this content: check the one just made,
+    # before anything below touches or deploys it.
+    if gate_built_output:
+        from pocketpaw_ee.sites import publish_gate
+
+        await asyncio.to_thread(
+            publish_gate.check_built_output, build.project_dir, engine, pocket_id=pocket_id
         )
 
     # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
@@ -3274,7 +3365,7 @@ async def _deploy_site_doc(
         # script that appeared under the pending name since is refused, not overwritten.
         rename = await _pending_rename(workspace_id=workspace_id, site_id=site_id)
         if rename is not None:
-            await _refuse_taken_pending_name(rename.slug_pending)
+            await _refuse_taken_pending_name(rename.slug_pending, site_id=rename.id)
             deploy_name = rename.slug_pending
         else:
             # VS-1: the Worker this site already lives under, read from its row, so a
@@ -3430,6 +3521,11 @@ async def _deploy_site_doc(
     # "last shipped", not "first shipped"). It is NOT a plain updatedAt bump, so it
     # stays a true "last deployed" marker.
     now = datetime.now(UTC)
+    # What went live, by content, in the same save that marks the site deployed:
+    # Discard restores only a version whose content hashes to this.
+    live_source_hash = (
+        source_content_hash(source) if is_source_engine(engine) and isinstance(source, dict) else ""
+    )
     doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         doc = _SiteDoc(
@@ -3440,6 +3536,7 @@ async def _deploy_site_doc(
             name=site_name,
             script_name=site_id,
             deployed=True,
+            live_source_hash=live_source_hash,
             deployed_at=now,
             # SA-4: the stamp says counting is ON and began here. A first publish that
             # deployed no counter records None, which the read reports as "nothing has
@@ -3475,6 +3572,7 @@ async def _deploy_site_doc(
         doc.script_name = site_id
         doc.deployed = True
         doc.deployed_at = now
+        doc.live_source_hash = live_source_hash
         doc.deploy_target = mode
         doc.url = url
         # SA-4, and unlike ``deployed_at`` this is NOT "last" — it is "since", so a
@@ -3547,7 +3645,7 @@ async def _deploy_paw_bundle(
     is_dynamic: bool,
     d1_database_id: str,
     source: dict[str, str] | None,
-    confirm_destructive: bool,
+    confirm_destructive: bool | list[str],
     confirm_do_data_loss: list[str] | None = None,
 ) -> None:
     """Deploy a ``paw-build.json`` build through ``bundle_deploy`` to ``target``.
@@ -4343,6 +4441,9 @@ async def _slug_unavailable_reason(slug: str, *, workspace_id: str, own: Any | N
     # global-read: see ``_address_claimed_by_other_site``.
     if await _SiteDoc.get_pymongo_collection().find_one(query, {"_id": 1}) is not None:
         return "taken"
+    if own is not None and await _owns_redirect(slug, own.id):
+        # One of this site's own old addresses, redirecting to it: it may take it back.
+        return None
     if slug in await account_script_names() and (own is None or site_worker_name(own) != slug):
         return "taken"
     if await _slug_held_from(slug, workspace_id):
@@ -4495,7 +4596,14 @@ async def _pending_rename(*, workspace_id: str, site_id: str) -> Any | None:
     return doc
 
 
-async def _refuse_taken_pending_name(name: str) -> None:
+async def _owns_redirect(name: str, site_id: Any) -> bool:
+    """Is ``name`` one of this site's old addresses, now redirecting to it?"""
+    from pocketpaw_ee.sites import slug_redirect
+
+    return await slug_redirect.owns_redirect(name, str(site_id))
+
+
+async def _refuse_taken_pending_name(name: str, *, site_id: Any) -> None:
     """Refuse to deploy a rename onto a Worker name that exists in the account now.
 
     Unlike VS-2's claimed-name exemption, a renaming site already has a live Worker
@@ -4504,7 +4612,15 @@ async def _refuse_taken_pending_name(name: str) -> None:
     ``wrangler deploy`` would silently replace, or what a failed rename left when
     even its cleanup failed. Overwriting the first is unrecoverable; the second costs
     the owner one cancel. So refuse, keep ``slug_pending``, and say how to get out.
-    Reads the account FRESH, and fails open like the listing."""
+    The one script it may replace is the site's OWN redirect (taking an old address
+    back). Reads the account FRESH, and fails open like the listing."""
+    if await _owns_redirect(name, site_id):
+        # Taking an old address back: drop the row BEFORE the deploy overwrites the
+        # redirect Worker, so nothing ever sweeps the site's own Worker.
+        from pocketpaw_ee.sites import slug_redirect
+
+        await slug_redirect.forget(name, site_id=str(site_id))
+        return
     if name in await account_script_names(refresh=True):
         raise ConflictError(
             "sites.slug_taken",
@@ -4514,14 +4630,15 @@ async def _refuse_taken_pending_name(name: str) -> None:
         )
 
 
-async def _discard_worker(name: str, *, reason: str) -> bool:
+async def _discard_worker(name: str, *, reason: str, force: bool = False) -> bool:
     """Delete an account-level Worker, best effort. Logs WARNING and returns False on
-    any failure: every caller is cleaning up after something that already happened."""
+    any failure: every caller is cleaning up after something that already happened.
+    ``force`` for a script that holds Durable Objects."""
     try:
         client = _cf_account_client()
         if client is None:
             raise RuntimeError("no Cloudflare account credentials")
-        await client.delete_account_script(name)
+        await client.delete_account_script(name, **({"force": True} if force else {}))
     except Exception:  # noqa: BLE001 - cleanup only; the caller's outcome stands
         logger.warning(
             "sites: could not delete the Worker %s after %s; it may need removing by hand",
@@ -4545,7 +4662,10 @@ async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
          would take that domain down) and the failure is logged at ERROR.
       2. Record the new name on the row with a targeted write, BEFORE the post-deploy
          upsert re-reads it, so that full-document save carries it instead of undoing it.
-      3. Delete the old Worker. Nothing routes to it any more; a failure only logs.
+      3. Replace the old Worker with a redirect to the new address for the hold
+         period (``slug_redirect``), and point the site's earlier old addresses at the
+         new one too, so a chain of renames collapses. If the redirect cannot deploy,
+         delete the old Worker instead. Neither failure fails the publish.
       4. Hold a real old slug for 30 days. ``paw-site-<id>`` is never held.
     """
     from pocketpaw_ee.cloud.models.released_slug import HOLD_DAYS, ReleasedSlug
@@ -4600,7 +4720,7 @@ async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
     await _release_hold(new_name)
     logger.info("sites: site %s moved from %s to %s", doc.id, old_name, new_name)
 
-    await _discard_worker(old_name, reason="a rename")
+    await _redirect_old_address(doc, old_name=old_name, new_name=new_name, url=url)
 
     if old_slug and not slug_mod.has_reserved_prefix(old_slug):
         now = datetime.now(UTC)
@@ -4614,6 +4734,59 @@ async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
                 "hold_until": now + timedelta(days=HOLD_DAYS),
             },
             upsert=True,
+        )
+
+
+async def _redirect_old_address(doc: Any, *, old_name: str, new_name: str, url: str) -> None:
+    """Step 3 of ``_apply_rename``: the old address 301s to ``url`` for the hold period.
+
+    The site may have just taken one of its own old names back, in which case its
+    deploy replaced that redirect Worker and only the row goes. Every other redirect
+    the site owns is re-pointed at ``url``. A redirect that cannot deploy (bad target,
+    Cloudflare refusal, no credentials) falls back to deleting the old Worker, the
+    behaviour before redirects existed. A Durable Object site cannot redirect (its old
+    script's classes would be dropped), so its old Worker is force-deleted, logged at
+    ERROR. A name some site claims is never replaced (deploy_redirect says so)."""
+    from pocketpaw_ee.cloud.models.released_slug import HOLD_DAYS
+    from pocketpaw_ee.sites import slug_redirect
+
+    site_id = str(doc.id)
+    if getattr(doc, "do_classes", None):
+        # A replacement without the old script's Durable Object classes is refused,
+        # so a DO site's old address cannot redirect: it stops, said loudly.
+        logger.error(
+            "sites: site %s holds Durable Objects, so its old address %s cannot redirect "
+            "to %s; deleting the old Worker, the old link stops working",
+            site_id,
+            old_name,
+            url,
+        )
+        await _discard_worker(old_name, reason="a rename of a Durable Object site", force=True)
+        return
+    try:
+        await slug_redirect.forget(new_name, site_id=site_id)
+        client = _cf_account_client()
+        if client is None:
+            raise RuntimeError("no Cloudflare account credentials")
+        await slug_redirect.deploy_redirect(
+            client,
+            name=old_name,
+            site_id=site_id,
+            workspace_id=doc.workspace,
+            url=url,
+            days=HOLD_DAYS,
+        )
+    except Exception:  # noqa: BLE001 - the site already moved; the old address just stops
+        logger.warning(
+            "sites: could not redirect %s to %s; deleting it instead", old_name, url, exc_info=True
+        )
+        await _discard_worker(old_name, reason="a rename")
+        return
+    try:
+        await slug_redirect.retarget_site(client, site_id=site_id, url=url, skip=old_name)
+    except Exception:  # noqa: BLE001 - older redirects still answer, one hop longer
+        logger.warning(
+            "sites: could not re-point the older redirects of %s", site_id, exc_info=True
         )
 
 
@@ -4746,6 +4919,8 @@ def _schedule_draft_cleanup(site: _SiteDoc, *, engine: str, source: Any) -> None
             reason="published",
             published_hash=published_hash,
             published_url=getattr(site, "url", "") or "",
+            # The deploy has returned: an open-draft after this moment survives the purge.
+            published_at=datetime.now(UTC),
         )
     except Exception:  # noqa: BLE001 - never fail a live publish over draft cleanup
         logger.warning(
@@ -5275,8 +5450,13 @@ async def _enqueue_static_build(
     pattern: str | None,
     builder_origin: str | None,
     keeps_client_bundle: bool,
+    gate_built_output: bool = False,
 ) -> _SiteDoc:
     """Enqueue a static site's build and return immediately (SL-3).
+
+    ``gate_built_output`` rides the job's ``deploy_inputs`` to the worker, whose deploy
+    (``deploy_prebuilt_site``) then runs the publish gate on the built tree before
+    anything goes live; a refusal settles the row ``deploy_failed:publish_blocked``.
 
     The async half of ``_deploy_site_doc``. It ensures the ONE canonical Site doc for
     ``(workspace, pocket_id)`` exists, stamps the build lifecycle onto it, and hands the
@@ -5364,6 +5544,8 @@ async def _enqueue_static_build(
         "builder_origin": builder_origin,
         **turnstile_kwargs,
     }
+    if gate_built_output:
+        deploy_inputs["gate_built_output"] = True
 
     # An enqueue failure PROPAGATES. The helper rolls the row to a terminal status
     # first, so the site stays republishable, and the raise becomes the 5xx the user
@@ -5714,8 +5896,22 @@ async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, A
         "site_id": str(doc.id) if doc is not None else None,
         "name": doc.name if doc is not None else "",
         "published": doc is not None,
+        # The async lane's publish gate refused the build (owner-worded findings, the
+        # same ``details`` a sync 409 carries); None otherwise.
+        "publish_blocked": _publish_blocked_details(doc, pocket_id),
+        # A saved rename waiting for the next publish: the live ``url`` changes to it
+        # then, and the old address stops working. The agent quotes ``url`` until then.
+        "slug_pending": getattr(doc, "slug_pending", None) if doc is not None else None,
         **state,
     }
+
+
+def _publish_blocked_details(doc: _SiteDoc | None, pocket_id: str) -> dict[str, Any] | None:
+    if doc is None or getattr(doc, "build_reason", None) != "deploy_failed:publish_blocked":
+        return None
+    from pocketpaw_ee.sites import publish_gate
+
+    return publish_gate.read_blocked(pocket_id)
 
 
 async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
@@ -5883,8 +6079,19 @@ async def deploy_bundle(
     )
 
 
+def _normalize_destructive_confirm(raw: Any) -> bool | list[str]:
+    """A destructive-migration confirm as stored or replayed (``project_d1``)."""
+    from pocketpaw_ee.sites import project_d1
+
+    return project_d1.normalize_confirm(raw)
+
+
 def _project_migrator(
-    cf: Any, *, site_id: str, source: dict[str, str] | None, confirm_destructive: bool
+    cf: Any,
+    *,
+    site_id: str,
+    source: dict[str, str] | None,
+    confirm_destructive: bool | list[str],
 ) -> Any:
     """The ``before_upload`` hook of a project's bundle deploy: apply the project's
     ``migrations/*.sql`` (from ``source``, the files the bundle was built from) to the
@@ -5919,6 +6126,15 @@ def _site_paid(site: Any) -> bool:
         plan_tier=getattr(site, "plan_tier", None),
         subscription_status=getattr(site, "subscription_status", None),
     )
+
+
+def _requested_secret_names(requests: Any) -> list[str]:
+    """The names of a build's ``secret`` binding requests."""
+    return [
+        str(r.get("name"))
+        for r in (requests if isinstance(requests, list) else [])
+        if isinstance(r, dict) and str(r.get("type", "")).lower() == "secret" and r.get("name")
+    ]
 
 
 def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None = None) -> Any:
@@ -5957,8 +6173,31 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
 
         if d1_database_id is not None:
             res = replace(res, d1_database_id=d1_database_id)
+        # A site with a linked integration always deploys with its gateway token.
+        from pocketpaw_ee.integrations import bindings as integration_bindings
+
+        workspace_id = str(getattr(site, "workspace", "") or "")
+        pocket_id = str(getattr(site, "pocket_id", "") or "")
+        requested = _requested_secret_names(requests)
+        await integration_bindings.ensure_gateway_token_if_linked(workspace_id, pocket_id)
+        # A build that reads the gateway token (Paw integrations, owner sign-in) gets one.
+        if integration_bindings.GATEWAY_TOKEN_NAME in requested:
+            await integration_bindings.ensure_gateway_token(workspace_id, pocket_id)
+        # Session-signing secrets are the platform's to mint, never the owner's to type,
+        # so the missing-secrets check below never names one.
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=requested
+        )
         # The owner's secrets ride as secret_text bindings (values never logged).
-        return replace(res, secrets=await site_secrets.secrets_for_deploy(site))
+        secrets = await site_secrets.secrets_for_deploy(site)
+        res = replace(res, secrets=secrets)
+        if integration_bindings.GATEWAY_TOKEN_NAME in secrets:
+            # The token is useless without where to call and who is calling.
+            res = replace(
+                res,
+                plain_text={**res.plain_text, **integration_bindings.platform_vars(site)},
+            )
+        return res
 
     return _provision
 
@@ -6199,6 +6438,32 @@ async def mark_build_waiting(site: _SiteDoc, *, job_id: str | None, reason: str)
     values: dict[str, Any] = {
         "build_status": "queued",
         "build_reason": reason,
+        "build_started_at": datetime.now(UTC),
+    }
+    if job_id is None:
+        await site.set(values)
+        return True
+    collection = type(site).get_pymongo_collection()
+    won = await collection.find_one_and_update(
+        {"_id": site.id, "build_job_id": job_id}, {"$set": values}
+    )
+    if won is None:
+        return False
+    for field, value in values.items():
+        setattr(site, field, value)
+    return True
+
+
+async def mark_build_admitted(site: _SiteDoc, *, job_id: str | None) -> bool:
+    """Flip a build that waited for a memory lease back to ``building``, clear the wait
+    reason and RE-STAMP its clock (the attempt starts now, as in :func:`mark_build_running`).
+
+    Conditional on ``build_job_id == job_id`` like :func:`mark_build_waiting`: False means
+    a newer publish owns the row and it is left alone. ``job_id=None`` writes
+    unconditionally."""
+    values: dict[str, Any] = {
+        "build_status": "building",
+        "build_reason": None,
         "build_started_at": datetime.now(UTC),
     }
     if job_id is None:
@@ -7427,9 +7692,7 @@ def _analytics_iso(moment: datetime) -> str:
     own local time — a silent several-hour lie about when counting started, which is
     the very value a chart's x-axis begins at.
     """
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC).isoformat()
+    return utc_iso(moment) or ""
 
 
 def _analytics_empty(
@@ -7482,7 +7745,7 @@ def _client_response(site: _SiteDoc) -> SiteClientResponse:
         invoices=[
             SiteInvoiceOut(
                 id=inv.id,
-                issued_at=inv.issued_at.isoformat(),
+                issued_at=utc_iso(inv.issued_at) or "",
                 amount_cents=inv.amount_cents,
                 currency=inv.currency,
                 paid=inv.paid,
@@ -7849,8 +8112,14 @@ async def publish_pocket(
     purchase_authorized: bool = False,
     preview: bool = False,
     # Owner confirmed a project migration that deletes data (``project_d1``).
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
+    # Owner chose to go live despite placeholders / made-up contacts / broken forms
+    # (``publish_gate``); audited.
+    confirm_placeholders: bool = False,
+    # A republish the platform makes (plan sale, payment restamp, AI-visibility fix, an
+    # approved plan request): exempt from the gate only for content that last passed it.
+    machine_republish: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -7858,6 +8127,15 @@ async def publish_pocket(
 ) -> _SiteDoc:
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
+
+    PUBLISH GATE: a LIVE publish first runs ``publish_gate.gate_publish`` over what goes
+    live (the stored build of the current content, or the build made here when there
+    is none) and raises ``PublishBlocked`` (409 ``sites.publish_blocked``, owner-worded
+    findings in ``details``) while it still shows placeholder copy, a made-up phone
+    number, or a form that saves nothing or failed its test submit.
+    ``confirm_placeholders=True`` (the owner) publishes anyway and is audited;
+    ``machine_republish=True`` is exempt only for content that last passed. Previews
+    skip it.
 
     BC-9 (per-site annual plan — the Webflow model): a published site carries its
     OWN recurring annual plan on a tier. ``site_plan_key`` selects the tier from
@@ -7923,6 +8201,18 @@ async def publish_pocket(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
+    gate_built_output = False
+    if not preview:
+        from pocketpaw_ee.sites import publish_gate
+
+        gate_built_output = await publish_gate.gate_publish(
+            pocket,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            confirmed=confirm_placeholders,
+            machine_republish=machine_republish,
+        )
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     # Paw Sites "Svelte track" — the pocket carries which generation engine it
@@ -8465,6 +8755,7 @@ async def publish_pocket(
         preview=False,
         confirm_destructive_migrations=confirm_destructive_migrations,
         confirm_do_data_loss=confirm_do_data_loss,
+        gate_built_output=gate_built_output,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -8591,6 +8882,8 @@ async def sell_site_plan(
             pocket_id=doc.pocket_id,
             site_plan_key=tier_key,
             purchase_authorized=True,
+            # A plan sale republishes the site's content; exempt only if it was vetted.
+            machine_republish=True,
         )
         completed = True
     finally:
@@ -9022,7 +9315,13 @@ async def redeploy_site(site_id: str) -> None:
     doc = await _SiteDoc.find_one({"_id": ObjectId(site_id)})
     if doc is None or not doc.pocket_id:
         return
-    await publish_pocket(workspace_id=doc.workspace, user_id=doc.owner, pocket_id=doc.pocket_id)
+    await publish_pocket(
+        workspace_id=doc.workspace,
+        user_id=doc.owner,
+        pocket_id=doc.pocket_id,
+        # A restamp after a payment; exempt only for content that was vetted.
+        machine_republish=True,
+    )
 
 
 async def _apply_site_plan(
@@ -9385,7 +9684,7 @@ async def _publish_credits_site(
     keeps_client_bundle: bool,
     tier: Any,
     covered_by_plan: bool = False,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -9566,7 +9865,7 @@ async def _publish_pending_site(
     keeps_client_bundle: bool,
     tier: Any,
     rail: str = _CREDITS_RAIL,
-    confirm_destructive_migrations: bool = False,
+    confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
 ) -> tuple[_SiteDoc, dict[str, Any] | None]:
     """Charge-first: create a PAID-tier site as PENDING and open its checkout,
@@ -9641,7 +9940,9 @@ async def _publish_pending_site(
         "keeps_client_bundle": keeps_client_bundle,
         "name": site_name,
         # Replayed so a confirmed destructive project migration stays confirmed.
-        "confirm_destructive_migrations": confirm_destructive_migrations,
+        "confirm_destructive_migrations": _normalize_destructive_confirm(
+            confirm_destructive_migrations
+        ),
         "confirm_do_data_loss": list(confirm_do_data_loss or []),
     }
 
@@ -9888,7 +10189,11 @@ async def activate_site(
         # MT-1 — replay the authored declaration. A pending doc captured before
         # this field existed has no key and reads False (the prior behaviour).
         keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
-        confirm_destructive_migrations=bool(inputs.get("confirm_destructive_migrations")),
+        # True (the publish dialog) or the reviewed migration keys (an approval);
+        # ``bool()`` here would widen a key list into "confirm everything".
+        confirm_destructive_migrations=_normalize_destructive_confirm(
+            inputs.get("confirm_destructive_migrations")
+        ),
         confirm_do_data_loss=[str(c) for c in inputs.get("confirm_do_data_loss") or []],
         generator=_generator,
         cloudflare=_cloudflare,
@@ -10449,14 +10754,68 @@ async def get_native_artifact(
 
     ``_store`` (defaults to the filesystem artifact store) and ``_pool`` (defaults to the
     process arq pool) are injectable seams so the path is unit-testable without disk or
-    Redis."""
+    Redis.
+
+    Every answer carries the site's ``capabilities`` (``engines.site_capabilities``),
+    whichever engine lane produced it."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
-    from pocketpaw_ee.sites import generator_client
 
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
-    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+    result = await _native_artifact_for_pocket(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        pocket=pocket,
+        builder_origin=builder_origin,
+        _store=_store,
+        _pool=_pool,
+        _arm=_arm,
+    )
+    result["capabilities"] = await _pocket_capabilities(workspace_id, pocket_id, pocket)
+    return result
+
+
+async def _pocket_capabilities(
+    workspace_id: str, pocket_id: str, pocket: dict[str, Any]
+) -> dict[str, bool]:
+    """``engines.site_capabilities`` for a pocket already in hand (a wire dict).
+
+    ``has_database`` also reads the canonical Site's ``d1_database_id``. That read is
+    best-effort: a failure leaves the pocket's own signals (dynamic spec, D1 recipe)
+    to answer rather than failing the preview the flags ride on."""
+    d1_database_id = ""
+    try:
+        doc = await _canonical_site_doc(workspace_id, pocket_id)
+        d1_database_id = (getattr(doc, "d1_database_id", "") or "") if doc is not None else ""
+    except Exception:  # noqa: BLE001 — a flag must not fail the preview read
+        logger.debug("sites.capabilities: no Site read for %s", pocket_id, exc_info=True)
+    ripple_spec = pocket.get("rippleSpec")
+    return site_capabilities(
+        pocket.get("engine"),
+        has_database=site_has_database(
+            d1_database_id=d1_database_id,
+            site_meta=pocket.get("siteMeta") or pocket.get("site_meta"),
+            pattern=pocket.get("pattern"),
+            ripple_spec=ripple_spec if isinstance(ripple_spec, dict) else None,
+        ),
+    )
+
+
+async def _native_artifact_for_pocket(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    pocket: dict[str, Any],
+    builder_origin: str | None,
+    _store: Any | None,
+    _pool: Any | None,
+    _arm: Any | None,
+) -> dict[str, Any]:
+    """The engine lanes behind ``get_native_artifact`` (see its docstring), for a
+    pocket the caller has already read and authorized."""
+    from pocketpaw_ee.sites import generator_client
+    from pocketpaw_ee.sites.engines import has_native_edit_lane
 
     # NATIVE-EDIT engines only (not is_source_engine): this shadow-renders an ARMED
     # BUILD, so the engine has to be one the generator builds and arms — svelte, and
@@ -10469,6 +10828,9 @@ async def get_native_artifact(
             pocket_id=pocket_id,
             source=pocket.get("source"),
             store=_store or _default_artifact_store(),
+            site_config=await _project_site_config(
+                workspace_id, pocket_id, mint_key=_no_build_source(pocket.get("source"))
+            ),
             _pool=_pool,
         )
     # ONE origin resolver for every armed hash (the view, the pre-warm, verify,
@@ -10517,6 +10879,7 @@ async def get_native_artifact(
     # what keeps an editing session from billing a sandbox per keystroke.
     cached = store.read(pocket_id, content_hash)
     preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+    rebuild_stale = False
     if (
         cached is not None
         and preview_url is None
@@ -10531,7 +10894,8 @@ async def get_native_artifact(
         # instead of billing a sandbox on every view for files the store won't keep.
         preview_url = preview_origin.repair_preview_url(store, pocket_id, content_hash)
         if preview_url is None:
-            cached = None
+            # The rebuild must not replay that render's finished arq result.
+            cached, rebuild_stale = None, True
     if cached is not None:
         body_html, css = cached
         return {
@@ -10561,6 +10925,7 @@ async def get_native_artifact(
             content_hash=content_hash,
             engine=engine,
             keeps_client_bundle=keeps_client_bundle,
+            rebuild_stale=rebuild_stale,
             _pool=_pool,
         )
     except Exception as exc:
@@ -10593,11 +10958,22 @@ async def _project_draft_artifact(
     pocket_id: str,
     source: Any,
     store: Any,
+    site_config: dict[str, Any] | None = None,
     _pool: Any | None = None,
     _records: Any | None = None,
+    trigger: str = "draft",
+    force: bool = False,
 ) -> dict[str, Any]:
-    """A ``project`` draft: served from its sandbox build when one finished for the
-    current source, else a build is queued in the preview lane (``project_build``).
+    """A ``project`` draft: served from its build when one finished for the current
+    source, else built. ``trigger`` (``draft`` / ``agent``) is recorded on a build
+    this call starts, for the builds list. ``force`` (an explicit build request) retries
+    a stored infrastructure failure past the poll budget
+    (``build_job.enqueue_preview_build``); ``build_previous_attempt`` on a ``failed``
+    answer says that failure is an earlier attempt's, not retried. A no-build tree
+    (``project_build.is_no_build``) builds right
+    here, in-process, and answers ``built`` at once; anything else is queued in the
+    sandbox preview lane (``project_build``). ``site_config`` is the site's paw.js
+    config (:func:`_project_site_config`), applied to a build that starts now.
 
     The same response shape as every other engine plus ``preview_mode`` (``"full"``
     when the preview is the whole site, a draft Worker included; ``"static"`` when
@@ -10605,16 +10981,22 @@ async def _project_draft_artifact(
     nothing can open; ``"published"`` with the live URL (or null) for the published
     content once its drafts were purged, without a rebuild; ``None`` until a build
     finished) and the engine's ``capabilities``. No arming: a project has no
-    generator-owned anchors, so there is no builder origin in the hash."""
+    generator-owned anchors, so there is no builder origin in the hash.
+
+    A sandbox draft is source-tagged only during an edit session
+    (:func:`_project_draft_view`), so the job, record and preview may be the tagged
+    view's; publish and the published view always key on the base hash."""
     from pocketpaw_ee.sites import build_job, project_build, verify_store
     from pocketpaw_ee.sites.engines import engine_capabilities
 
     capabilities = engine_capabilities("project")
     files_source = source if isinstance(source, dict) else None
     project_build.project_files(files_source)  # 422 on a tree that cannot build
-    content_hash = project_build.project_content_hash(files_source or {})
+    base_hash = project_build.project_content_hash(files_source or {})
+    published, reopen_epoch = await _project_published_view(pocket_id, base_hash)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    content_hash, tag_input = _project_draft_view(pocket_id, files_source, base_hash, records)
     job_id = build_job._preview_job_id(pocket_id, content_hash)
-    published = await _project_published_view(pocket_id, content_hash)
     if published is not None:
         # The live site IS this content and its drafts were purged on publish: show
         # the site, never rebuild a draft of it. An edit (a new hash) builds again.
@@ -10629,8 +11011,22 @@ async def _project_draft_artifact(
             "preview_mode": project_build.PREVIEW_PUBLISHED,
             "capabilities": capabilities,
         }
-    records = _records if _records is not None else verify_store.default_verify_store()
+
+    def _served(preview_url: str | None, mode: Any) -> dict[str, Any]:
+        return {
+            "pocket_id": pocket_id,
+            "body_html": "",
+            "css": "",
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": job_id,
+            "preview_url": preview_url,
+            "preview_mode": mode,
+            "capabilities": capabilities,
+        }
+
     record = project_build.read_build_record(records, pocket_id, job_id)
+    rebuild_stale = False
     if record is not None and record.get("status") == project_build.STATUS_BUILT:
         server_only = record.get("preview_mode") == project_build.PREVIEW_SERVER_ONLY
         preview_url = (
@@ -10644,26 +11040,50 @@ async def _project_draft_artifact(
             and preview_origin.store_supports_preview(store)
             and preview_origin.preview_base_problem() is None
         )
-        # A record whose files the store evicted is rebuilt, at most once per window.
-        if not evicted or not _claim_preview_retry(pocket_id, content_hash):
-            return {
-                "pocket_id": pocket_id,
-                "body_html": "",
-                "css": "",
-                "build_status": "none",
-                "build_reason": None,
-                "build_job_id": job_id,
-                "preview_url": preview_url,
-                "preview_mode": record.get("preview_mode"),
-                "capabilities": capabilities,
-            }
+        # A record whose files the store evicted (or a publish purged) is rebuilt, at
+        # most once per window.
+        if not evicted or not _claim_preview_retry(pocket_id, content_hash, reopen_epoch):
+            return _served(preview_url, record.get("preview_mode"))
+        # arq still holds that build's success result under the same job id: free it,
+        # or the enqueue is refused and the old result answers "built" with no files.
+        rebuild_stale = True
 
+    if project_build.is_no_build(files_source):
+        built = await project_build.build_no_build_draft(
+            pocket_id,
+            content_hash,
+            files_source,
+            store=store,
+            records=records,
+            site_config=site_config,
+            trigger=trigger,
+        )
+        ok = built["status"] == project_build.STATUS_BUILT
+        return {
+            "pocket_id": pocket_id,
+            "body_html": "",
+            "css": "",
+            "build_status": "none" if ok else "failed",
+            "build_reason": built["reason"],
+            "build_job_id": built["job_id"],
+            "preview_url": (
+                preview_origin.existing_preview_url(store, pocket_id, content_hash) if ok else None
+            ),
+            "preview_mode": built["preview_mode"],
+            "capabilities": capabilities,
+        }
+
+    generator_input: dict[str, Any] = {"source": files_source, **tag_input}
+    if site_config:
+        generator_input["siteConfig"] = site_config
     try:
         enqueued = await build_job.enqueue_preview_build(
             pocket_id=pocket_id,
             content_hash=content_hash,
             engine="project",
-            generator_input={"source": files_source},
+            generator_input=generator_input,
+            force=force,
+            rebuild_stale=rebuild_stale,
             _pool_override=_pool,
         )
     except Exception as exc:
@@ -10673,12 +11093,28 @@ async def _project_draft_artifact(
             "sites.preview_build_unavailable",
             "The preview build could not be queued. Try again in a moment.",
         ) from exc
+    if enqueued.status == project_build.STATUS_BUILT:
+        # The id's job already finished. Answer from what it left: "built" with a null
+        # preview_url reads as a build in flight with nothing queued. Only a
+        # server_only build legitimately has no URL.
+        done = project_build.read_build_record(records, pocket_id, enqueued.job_id) or {}
+        mode = done.get("preview_mode")
+        if mode == project_build.PREVIEW_SERVER_ONLY:
+            return _served(None, mode)
+        preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+        if preview_url is not None:
+            return _served(preview_url, mode)
+        return {
+            **_served(None, None),
+            "build_status": "failed",
+            "build_reason": build_job.RUNG_ARTIFACT_MISSING,
+        }
     if enqueued.status == "queued":
         project_build.write_build_record(
             records,
             pocket_id,
             project_build.new_record(
-                enqueued.job_id, content_hash, "queued", reason=enqueued.reason
+                enqueued.job_id, content_hash, "queued", reason=enqueued.reason, trigger=trigger
             ),
         )
     return {
@@ -10687,6 +11123,7 @@ async def _project_draft_artifact(
         "css": "",
         "build_status": enqueued.status,
         "build_reason": enqueued.reason,
+        "build_previous_attempt": enqueued.previous_attempt,
         "build_job_id": enqueued.job_id,
         "preview_url": None,
         "preview_mode": None,
@@ -10694,20 +11131,117 @@ async def _project_draft_artifact(
     }
 
 
-async def _project_published_view(pocket_id: str, content_hash: str) -> str | None:
-    """The published URL ("" when unknown) when ``content_hash`` is the pocket's
-    published content and its drafts were purged; ``None`` otherwise (and always
-    with ``PAW_SITES_DRAFT_WORKERS`` off). Never raises."""
+def _project_draft_view(
+    pocket_id: str, source: dict[str, Any] | None, base_hash: str, records: Any
+) -> tuple[str, dict[str, Any]]:
+    """``(view hash, extra build input)`` for a project draft. A tagged copy costs a
+    second sandbox build, so a sandbox draft (``draft_tag_mode`` ``"source-tags"``) is
+    tagged only while someone edits it (``project_build.edit_session_active``): the
+    view is then ``tagged_view_hash(base)``, built tagged-only when the base already
+    built (its bundle is stored) and both otherwise, the bundle filed under the base.
+    Outside a session the base is the view, unless only a tagged build of the same
+    source exists: that one is served rather than rebuilt (tags are preview-only).
+    The no-build lane stamps in-process for free, so it is never gated. With the gate
+    off (``project_build.lazy_source_tags``) every sandbox draft builds both copies
+    under its base hash."""
+    from pocketpaw_ee.sites import build_job, project_build
+
+    if project_build.draft_tag_mode(source) != "source-tags":
+        return base_hash, {}
+    if not project_build.lazy_source_tags():
+        return base_hash, {"sourceTags": "both"}
+
+    def _built(content_hash: str) -> bool:
+        job_id = build_job._preview_job_id(pocket_id, content_hash)
+        record = project_build.read_build_record(records, pocket_id, job_id)
+        return isinstance(record, dict) and record.get("status") == project_build.STATUS_BUILT
+
+    tagged = project_build.tagged_view_hash(base_hash)
+    base_built = _built(base_hash)
+    if project_build.edit_session_active(records, pocket_id):
+        mode = "only" if base_built else "both"
+        return tagged, {"sourceTags": mode, "bundleHash": base_hash}
+    if not base_built and _built(tagged):
+        return tagged, {"sourceTags": "both", "bundleHash": base_hash}
+    return base_hash, {}
+
+
+def _no_build_source(source: Any) -> bool:
+    """True for a no-build project tree, the lane that stages in-process."""
+    from pocketpaw_ee.sites import project_build
+
+    return project_build.is_no_build(source if isinstance(source, dict) else None)
+
+
+async def _project_published_view(pocket_id: str, content_hash: str) -> tuple[str | None, str]:
+    """``(published, reopen epoch)``. ``published`` is the published URL ("" when
+    unknown) when ``content_hash`` is the pocket's published content and its drafts
+    were purged, ``None`` otherwise (and always with ``PAW_SITES_DRAFT_WORKERS`` off).
+    The epoch names the pocket's last open-draft ("" when none), so a new reopen gets
+    its own preview retry. Never raises."""
     from pocketpaw_ee.sites import draft_worker
 
     if not draft_worker.enabled():
-        return None
+        return None, ""
     try:
-        is_published, url = await draft_worker.published_view(pocket_id, content_hash)
+        is_published, url, epoch = await draft_worker.draft_view(pocket_id, content_hash)
     except Exception:  # noqa: BLE001 - an unreadable registry builds a draft as before
         logger.warning("sites.draft: published view of %s unavailable", pocket_id, exc_info=True)
+        return None, ""
+    return ((url or "") if is_published else None), epoch
+
+
+async def _project_site_config(
+    workspace_id: str, pocket_id: str, *, mint_key: bool = False
+) -> dict[str, Any] | None:
+    """The generator ``siteConfig`` a project build tags its pages with paw.js from
+    (the html engine's: capture base, site id, signed key, Turnstile sitekey), or
+    ``None`` when the pocket has no Site doc or the doc has no signed key. Publish
+    re-applies paw.js with the live identity, so a draft built without it still
+    ships it. Never raises.
+
+    ``create_draft_site`` seeds the key on every new draft, so a keyless doc is a
+    draft minted before that seeding. ``mint_key`` (the no-build lane, which stages
+    in-process and never hands the key to a sandbox) gives such a doc its key now,
+    the same ``site_key_<token>`` publish would mint and later reuse. Queued sandbox
+    builds pass ``False``: their key is scrubbed anyway (``build_job``)."""
+    try:
+        doc = await _canonical_site_doc(workspace_id, pocket_id)
+        signed_key = getattr(doc, "signed_key", "") if doc is not None else ""
+        if doc is not None and not signed_key and mint_key:
+            signed_key = await _mint_missing_signed_key(doc)
+    except Exception:  # noqa: BLE001 - a draft builds without paw.js rather than fail
+        logger.warning("sites.project: site lookup for %s failed", pocket_id, exc_info=True)
         return None
-    return (url or "") if is_published else None
+    if not signed_key:
+        return None
+    turnstile = await _turnstile_build_kwargs(workspace_id, pocket_id)
+    return _project_paw_config(str(doc.id), signed_key, turnstile.get("turnstile_site_key", ""))
+
+
+async def _mint_missing_signed_key(doc: _SiteDoc) -> str:
+    """Give a keyless Site doc its public embed key and return the stored key.
+    Compare-and-set on ``signed_key == ""``, so two concurrent previews agree on one
+    key and an existing key is never replaced (rotation stays ``rotate_signed_key``'s
+    job)."""
+    coll = _SiteDoc.get_pymongo_collection()
+    await coll.update_one(
+        {"_id": doc.id, "workspace": doc.workspace, "signed_key": {"$in": ["", None]}},
+        {"$set": {"signed_key": f"site_key_{secrets.token_urlsafe(24)}"}},
+    )
+    stored = await coll.find_one({"_id": doc.id, "workspace": doc.workspace}, {"signed_key": 1})
+    return str((stored or {}).get("signed_key") or "")
+
+
+def _project_paw_config(site_id: str, signed_key: str, turnstile_site_key: str) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "siteId": site_id,
+        "captureApiBase": _capture_base(),
+        "captureSignedKey": signed_key,
+    }
+    if turnstile_site_key:
+        config["turnstileSiteKey"] = turnstile_site_key
+    return config
 
 
 async def project_latest_build(
@@ -10725,6 +11259,8 @@ async def project_latest_build(
     if not latest or not latest.get("job_id"):
         raise NotFound("site_build", pocket_id)
     source = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+    base_hash = project_build.project_content_hash(source)
+    current = {base_hash, project_build.tagged_view_hash(base_hash)}
     return {
         "pocket_id": pocket_id,
         "job_id": latest.get("job_id"),
@@ -10733,7 +11269,40 @@ async def project_latest_build(
         "preview_mode": latest.get("preview_mode"),
         "framework": latest.get("framework"),
         "updated_at": latest.get("updated_at"),
-        "current": latest.get("content_hash") == project_build.project_content_hash(source),
+        "current": latest.get("content_hash") in current,
+    }
+
+
+async def project_builds(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    _records: Any | None = None,
+) -> dict[str, Any]:
+    """The pocket's recent project builds, newest first, ``limit`` from ``offset``:
+    ``{pocket_id, builds, total, limit, offset}``. Each build carries ``job_id``,
+    ``status``, ``reason``, ``trigger``, ``content_hash``, ``started_at``,
+    ``finished_at`` and ``updated_at``; never its log (the log route has that). Same
+    access and scoping as :func:`project_latest_build`; a pocket that never built is
+    an empty page, not a 404."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    await _project_pocket(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    builds = [
+        b
+        for b in project_build.read_build_history(records, pocket_id)
+        if project_build.job_belongs_to(str(b.get("job_id")), pocket_id)
+    ]
+    return {
+        "pocket_id": pocket_id,
+        "builds": builds[offset : offset + limit],
+        "total": len(builds),
+        "limit": limit,
+        "offset": offset,
     }
 
 
@@ -10787,18 +11356,30 @@ async def project_pocket(*, workspace_id: str, user_id: str, pocket_id: str) -> 
 
 
 async def queue_project_build(
-    *, workspace_id: str, user_id: str, pocket_id: str, _pool: Any | None = None
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    _pool: Any | None = None,
+    trigger: str = "draft",
+    force: bool = False,
 ) -> dict[str, Any]:
     """Queue the draft build of a project pocket's CURRENT source, the same lane the
     preview opens (a finished build for this source is returned, not rebuilt). Returns
     the native-artifact shape: ``build_status``, ``build_job_id``, ``preview_url``,
-    ``preview_mode``."""
+    ``preview_mode``. ``trigger`` names who asked (``draft`` / ``agent``). ``force`` only
+    for an explicit build request (``run_site_build``), never a write's verification."""
     pocket = await _project_pocket(workspace_id, user_id, pocket_id)
     return await _project_draft_artifact(
         pocket_id=pocket_id,
         source=pocket.get("source"),
         store=_default_artifact_store(),
+        site_config=await _project_site_config(
+            workspace_id, pocket_id, mint_key=_no_build_source(pocket.get("source"))
+        ),
         _pool=_pool,
+        trigger=trigger,
+        force=force,
     )
 
 
@@ -10812,17 +11393,19 @@ async def project_site_plan(*, workspace_id: str, pocket_id: str) -> tuple[str |
     return getattr(doc, "plan_tier", None), getattr(doc, "subscription_status", None)
 
 
-#: (pocket, content hash) -> monotonic time of the last attempt to give a draft a
-#: preview URL it lacked (a rebuild, or an html re-materialize). Per process, bounded.
-_preview_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+#: (pocket, content hash, reopen epoch) -> monotonic time of the last attempt to give
+#: a draft a preview URL it lacked (a rebuild, or an html re-materialize). Per process,
+#: bounded. The epoch (``draft_worker.draft_view``) changes on every open-draft, so a
+#: publish that purged the files and a new reopen are retried even inside the window.
+_preview_retry_at: OrderedDict[tuple[str, str, str], float] = OrderedDict()
 _PREVIEW_RETRY_WINDOW = 600.0
 _PREVIEW_RETRY_ENTRIES = 4096
 
 
-def _claim_preview_retry(pocket_id: str, content_hash: str) -> bool:
+def _claim_preview_retry(pocket_id: str, content_hash: str, epoch: str = "") -> bool:
     """True (and the window starts) when this draft may try again to get a preview
     URL; False while a previous attempt is inside ``_PREVIEW_RETRY_WINDOW``."""
-    key, now = (pocket_id, content_hash), time.monotonic()
+    key, now = (pocket_id, content_hash, epoch), time.monotonic()
     last = _preview_retry_at.get(key)
     if last is not None and now - last < _PREVIEW_RETRY_WINDOW:
         return False
@@ -11796,6 +12379,368 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
         )
 
 
+async def open_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """Open a draft of a published project site, so the builder's editing tools work
+    without an AI edit first.
+
+    After a publish the builder shows the LIVE site for the published content
+    (``_project_published_view``) and never builds a draft of it. This marks the
+    registry row (``draft_worker.reopen_for_editing``) so the next native-artifact read
+    of the same content goes down the normal draft path; the next publish undoes it.
+    A real reopen also ensures a draft version row ("Opened for editing"), so Submit
+    for review and History behave as after an edit; a no-op writes none (a row there
+    would show "unpublished changes" for a draft identical to live).
+
+    ``{"pocket_id", "opened", "reason"}``. ``opened`` is False (a no-op success) with a
+    ``reason``: ``already_draft`` (never published, edited since, or already open),
+    ``not_project`` or ``draft_workers_off``; ``reason`` is None when opened. 404 for
+    an unknown or another workspace's pocket, 403 without edit access. Idempotent."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import draft_worker, project_build
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if workspace_id != pocket.get("workspace"):
+        raise NotFound("pocket", pocket_id)
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You do not have access to edit this site.")
+
+    source = pocket.get("source")
+    if normalize_engine(pocket.get("engine")) != "project" or not isinstance(source, dict):
+        return {"pocket_id": pocket_id, "opened": False, "reason": "not_project"}
+    if not draft_worker.enabled():
+        return {"pocket_id": pocket_id, "opened": False, "reason": "draft_workers_off"}
+    content_hash = project_build.project_content_hash(source)
+    try:
+        opened = await draft_worker.reopen_for_editing(pocket_id, content_hash)
+    except Exception as exc:
+        logger.exception("sites.draft: could not open a draft of %s", pocket_id)
+        raise CloudError(
+            503,
+            "sites.open_draft_unavailable",
+            "The draft could not be opened. Try again in a moment.",
+        ) from exc
+    if not opened:
+        return {"pocket_id": pocket_id, "opened": False, "reason": "already_draft"}
+    await _ensure_pocket_draft(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+    return {"pocket_id": pocket_id, "opened": True, "reason": None}
+
+
+_DISCARD_REASON = "Discarded by owner"
+_DISCARD_SNAPSHOT_LABEL = "Discarded changes"
+#: How many version rows (newest first) Discard scans for the content that is live.
+_DISCARD_SCAN_LIMIT = 100
+
+
+def source_content_hash(source: Mapping[str, Any]) -> str:
+    """A content hash of a source map alone (no engine or generator terms), so the
+    same files hash the same across a generator upgrade. ``Site.live_source_hash``
+    stores it for what a live deploy shipped."""
+    payload = json.dumps(dict(source), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _live_unknown() -> ConflictError:
+    return ConflictError(
+        "sites.discard_live_unknown",
+        "The live version of this site can't be confirmed, so nothing was discarded. "
+        "Publish the site once more and Discard will work again.",
+    )
+
+
+async def _discard_target(
+    *, workspace_id: str, pocket_id: str, engine: str | None, rows: list[Any]
+) -> Any:
+    """The version row whose content is PROVABLY what is live, or raise.
+
+    Proof is the hash the last live deploy recorded on the Site
+    (``live_source_hash``): the newest row whose content hashes to it, published rows
+    first. A site deployed before that field existed falls back, for a project, to the
+    draft registry's ``published_hash`` against the published row (that hash carries
+    the generator version, so it only matches when nothing was upgraded since).
+    Anything else is 409 ``sites.discard_live_unknown``: a published pointer moves
+    before the deploy and its version write is best effort, so it alone proves
+    nothing."""
+    site = await _canonical_site_doc(workspace_id, pocket_id)
+    live_hash = (getattr(site, "live_source_hash", "") or "") if site and site.deployed else ""
+    ordered = [r for r in rows if r.status == "published"] + [
+        r for r in rows if r.status != "published"
+    ]
+    if live_hash:
+        for row in ordered[:_DISCARD_SCAN_LIMIT]:
+            content = row.content if isinstance(row.content, dict) else {}
+            if content and source_content_hash(content) == live_hash:
+                return row
+        raise _live_unknown()
+
+    from pocketpaw_ee.sites import draft_worker, project_build
+
+    published = next((r for r in rows if r.status == "published"), None)
+    if published is not None and normalize_engine(engine) == "project" and published.content:
+        try:
+            rec = await draft_worker.default_registry().get(pocket_id)
+        except Exception:  # noqa: BLE001 - no registry, no proof
+            rec = None
+        if rec is not None and rec.published_hash == project_build.project_content_hash(
+            published.content
+        ):
+            return published
+    raise _live_unknown()
+
+
+async def discard_pocket_draft(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> dict[str, Any]:
+    """Throw away a pocket's unpublished changes: the builder's Discard.
+
+    Backs ``POST /sites/by-pocket/{pocket_id}/discard-draft``. The draft lives in
+    ``pocket.source`` (what native-artifact builds and publish deploys), so this puts
+    ``source`` back to the content that is LIVE, proven by :func:`_discard_target`.
+
+    Order, each step failing closed before the source is touched:
+      1. auth (404 / 403), engine (422 ``sites.discard_unsupported`` for ripple), a
+         published version in this workspace (409 ``sites.discard_nothing_live``), and
+         the provably-live target (409 ``sites.discard_live_unknown``);
+      2. reject every pending publish review of the pocket (503
+         ``sites.discard_unavailable`` if one can't be rejected), so no stale approval
+         can publish a draft this discards;
+      3. snapshot the current source as its own version ("Discarded changes", marked
+         discarded below), so the work can be restored from version history;
+      4. write the target with a single conditional update (409
+         ``sites.discard_conflict`` if anything wrote the source since step 1);
+      5. mark the drafts above the published pointer discarded, purge a project's
+         drafts the way a publish does (ends an open-draft), and audit.
+
+    There is no per-pocket publish lock to take; the conditional write and
+    ``versions.publish`` refusing discarded rows are what make a racing publish safe.
+
+    ``{pocket_id, restored, discarded_versions, rejected_reviews,
+    published_version_no}``; ``restored`` is False when the source already matched
+    (idempotent)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import draft_worker, project_build
+    from pocketpaw_ee.versions import service as versions_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if workspace_id != pocket.get("workspace"):
+        raise NotFound("pocket", pocket_id)
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You do not have access to edit this site.")
+    engine = pocket.get("engine")
+    if not is_source_engine(engine):
+        raise ValidationError(
+            "sites.discard_unsupported",
+            "Discard isn't available for this kind of site. Ask the agent to undo the change.",
+        )
+
+    rows = [
+        r
+        for r in await versions_service.list_versions(
+            scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
+        )
+        if r.workspace_id == workspace_id
+    ]
+    published = next((r for r in rows if r.status == "published"), None)
+    if published is None:
+        raise ConflictError(
+            "sites.discard_nothing_live",
+            "This site hasn't been published yet, so there is no live version to go back to.",
+        )
+    target = await _discard_target(
+        workspace_id=workspace_id, pocket_id=pocket_id, engine=engine, rows=rows
+    )
+    live = dict(target.content)
+
+    rejected = await _reject_pending_publish_reviews(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+
+    current = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+    restored = current != live
+    if restored:
+        # Not best effort: a discard that can't keep a copy of what it replaces
+        # doesn't happen.
+        await versions_service.write_draft(
+            scope_type=_VERSION_SCOPE_TYPE,
+            scope_id=pocket_id,
+            workspace_id=workspace_id,
+            content=dict(current),
+            author=user_id,
+            label=_DISCARD_SNAPSHOT_LABEL,
+        )
+        await pockets_service.restore_published_source(
+            pocket_id, user_id, expected_source=dict(current), source=live
+        )
+
+    discarded = await versions_service.discard_all_drafts(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, workspace_id=workspace_id
+    )
+
+    if draft_worker.enabled() and normalize_engine(engine) == "project":
+        # The same purge a publish runs, with the published hash and url the row
+        # already remembers: it clears ``reopened_hash`` and drops the draft Worker of
+        # the discarded edit, so the restored content reads as the published view.
+        # Awaited (not scheduled) so the builder's reload right after sees it.
+        try:
+            rec = await draft_worker.default_registry().get(pocket_id)
+            if rec is not None and (rec.published_hash or rec.published_url):
+                await draft_worker.purge_pocket_drafts(
+                    pocket_id,
+                    workspace_id=workspace_id,
+                    reason="discarded",
+                    published_hash=rec.published_hash or project_build.project_content_hash(live),
+                    published_url=rec.published_url,
+                )
+        except Exception:  # noqa: BLE001 - the source is already back; the sweeper retries
+            logger.warning(
+                "sites.draft: drafts of %s not purged after a discard", pocket_id, exc_info=True
+            )
+
+    await _audit_discard(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        metadata={
+            "restored": restored,
+            "discarded_versions": discarded,
+            "rejected_reviews": rejected,
+            "restored_version_no": target.version_no,
+        },
+    )
+    return {
+        "pocket_id": pocket_id,
+        "restored": restored,
+        "discarded_versions": discarded,
+        "rejected_reviews": rejected,
+        "published_version_no": target.version_no,
+    }
+
+
+async def _audit_discard(
+    *, workspace_id: str, user_id: str, pocket_id: str, metadata: dict[str, Any]
+) -> None:
+    """``sites.draft_discarded`` in the workspace audit log. Best effort: the discard
+    already happened, and a missing audit row must not report it as failed."""
+    try:
+        from pocketpaw_ee.cloud.audit import service as audit_service
+
+        await audit_service.record(
+            workspace_id,
+            user_id,
+            "sites.draft_discarded",
+            target_type="pocket",
+            target_id=pocket_id,
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: discard of %s not audited", pocket_id, exc_info=True)
+
+
+async def _reject_pending_publish_reviews(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> int:
+    """Reject every pending publish review (``_artifact_change`` card) of the pocket,
+    so a card filed before a discard cannot later approve a discarded draft. Fails
+    CLOSED: any list or reject failure raises 503 ``sites.discard_unavailable``
+    before the discard touches the source. Returns how many were rejected."""
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.versions.instinct_executor import artifact_change_blob
+
+    unavailable = CloudError(
+        503,
+        "sites.discard_unavailable",
+        "A pending publish review of this site couldn't be closed, so nothing was "
+        "discarded. Try again in a moment.",
+    )
+    try:
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        pending = await store.pending(
+            pocket_id=pocket_id, workspace_id=workspace_id, scope_type=_VERSION_SCOPE_TYPE
+        )
+    except Exception as exc:
+        logger.warning("sites: could not list publish reviews of %s", pocket_id, exc_info=True)
+        raise unavailable from exc
+    rejected = 0
+    for action in pending:
+        blob = artifact_change_blob(action)
+        if blob is None or str(blob.get("scope_id") or "") != pocket_id:
+            continue
+        if str(blob.get("workspace") or blob.get("workspace_id") or "") != workspace_id:
+            continue
+        try:
+            done = await store.reject(action.id, reason=_DISCARD_REASON, rejector=user_id)
+        except Exception as exc:
+            logger.warning("sites: could not reject review %s", action.id, exc_info=True)
+            raise unavailable from exc
+        if done is None:
+            raise unavailable
+        rejected += 1
+    return rejected
+
+
+async def _project_pocket_for_editing(
+    workspace_id: str, user_id: str, pocket_id: str
+) -> dict[str, Any]:
+    """:func:`_project_pocket` plus edit access (403 without it)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await _project_pocket(workspace_id, user_id, pocket_id)
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You cannot edit this site.")
+    return pocket
+
+
+async def start_project_edit_session(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    _store: Any | None = None,
+    _pool: Any | None = None,
+    _records: Any | None = None,
+) -> dict[str, Any]:
+    """Start (or renew) a visual-edit session on a project site's draft and answer the
+    draft for it. While the session lasts (``project_build.EDIT_SESSION_TTL_SECONDS``)
+    every draft build of the pocket is source-tagged, so the first call queues the
+    tagged copy of the current source when only the untagged one was built. The
+    builder calls this when a select / design tool turns on, and again before the
+    session lapses while it stays on.
+
+    The native-artifact shape plus ``editing`` and ``expires_at`` (ISO 8601). 404 for
+    an unknown or another workspace's pocket, 403 without edit access, 422 for a site
+    that is not a project."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    pocket = await _project_pocket_for_editing(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    until = project_build.mark_edit_session(records, pocket_id)
+    source = pocket.get("source")
+    artifact = await _project_draft_artifact(
+        pocket_id=pocket_id,
+        source=source,
+        store=_store or _default_artifact_store(),
+        site_config=await _project_site_config(
+            workspace_id, pocket_id, mint_key=_no_build_source(source)
+        ),
+        _pool=_pool,
+        _records=records,
+    )
+    expires_at = datetime.fromtimestamp(until, UTC).isoformat()
+    return {**artifact, "editing": True, "expires_at": expires_at}
+
+
+async def end_project_edit_session(
+    *, workspace_id: str, user_id: str, pocket_id: str, _records: Any | None = None
+) -> dict[str, Any]:
+    """End the pocket's edit session: later draft builds go back to untagged only.
+    Idempotent. Same 404 / 403 / 422 as :func:`start_project_edit_session`."""
+    from pocketpaw_ee.sites import project_build, verify_store
+
+    await _project_pocket_for_editing(workspace_id, user_id, pocket_id)
+    records = _records if _records is not None else verify_store.default_verify_store()
+    project_build.end_edit_session(records, pocket_id)
+    return {"pocket_id": pocket_id, "editing": False}
+
+
 async def preview_pocket(
     *,
     workspace_id: str,
@@ -12036,6 +12981,12 @@ async def _dynamic_pocket_objects(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
+    return _dynamic_objects_of(pocket)
+
+
+def _dynamic_objects_of(pocket: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """``(content_envelope, objects)`` of a pocket already read, or raise
+    ValidationError("sites.not_dynamic") when it is not a dynamic site."""
     pattern = pocket.get("pattern")
     content = _dynamic_content_envelope(pocket)
     if not _is_dynamic(pattern, content):
@@ -12046,6 +12997,39 @@ async def _dynamic_pocket_objects(
     return content, _dynamic_objects(content)
 
 
+# The reason a project site's data reads unavailable before its first publish: the
+# d1-drizzle recipe is applied, but the database is created on publish.
+_DATA_NOT_PUBLISHED = "not_published"
+
+
+def _is_project_pocket(pocket: dict[str, Any]) -> bool:
+    return normalize_engine(pocket.get("engine")) == "project"
+
+
+async def _project_database_id(workspace_id: str, pocket_id: str, pocket: dict[str, Any]) -> str:
+    """The real D1 id a ``project`` site's data lives in, or "" before publish creates it.
+
+    Raises ValidationError("sites.not_dynamic") when the site has no database at all
+    (``engines.site_has_database`` over the Site's D1 id and the pocket's recipes), the
+    same answer a static site gets. A stored id equal to the legacy derived placeholder
+    was never created on Cloudflare (``binding_provisioner`` replaces it), so it reads
+    as "" too. The Site read is workspace-filtered."""
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
+    stored = ((getattr(doc, "d1_database_id", "") or "") if doc is not None else "").strip()
+    site_meta = pocket.get("siteMeta") or pocket.get("site_meta")
+    if not site_has_database(d1_database_id=stored, site_meta=site_meta):
+        raise ValidationError("sites.not_dynamic", "This site has no database to read.")
+    if not stored or stored == _derive_d1_database_id(workspace_id, pocket_id):
+        return ""
+    return stored
+
+
+def _clamp_rows(limit: int | None) -> int:
+    """The row count one table read returns: the caller's ``limit`` up to the cap."""
+    cap = _data_row_limit()
+    return min(limit, cap) if limit and limit > 0 else cap
+
+
 def _table_columns(obj: dict[str, Any]) -> list[str]:
     """The declared column names of a spec ``objects`` table (DS-3). ``fields`` is
     a {column: type} map; an absent / malformed ``fields`` yields no columns."""
@@ -12054,9 +13038,17 @@ def _table_columns(obj: dict[str, Any]) -> list[str]:
 
 
 async def list_site_data_tables(
-    *, workspace_id: str, user_id: str, pocket_id: str
+    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None = None
 ) -> SiteDataTablesResponse:
-    """List a dynamic site's tables for the operator data-view (DS-3).
+    """List a dynamic or project site's tables for the operator data-view (DS-3).
+
+    A ``project`` site (engine ``project`` with a D1, the d1-drizzle recipe) has no
+    declared ``objects``: its tables are introspected from the live database
+    (``project_data.describe_tables``). Before its first publish the database does
+    not exist yet, so it answers ``available=False`` / ``reason="not_published"``
+    with no tables; local mode answers ``live_on_cloudflare_only`` with no tables. A
+    project without a database is ``sites.not_dynamic``, like a static site. The
+    rest of this docstring is the dynamic lane.
 
     Backs ``GET /sites/by-pocket/{pocket_id}/data``. The table LIST is always read
     from the pocket spec's ``objects`` (the declared D1 tables), so it is populated
@@ -12073,9 +13065,14 @@ async def list_site_data_tables(
     store). A missing / access-denied pocket surfaces as 404 / 403 via the pockets
     service. Tenant-scoped: the pockets read scopes on ``user_id``; the D1 id (when
     a live read happens) is derived per (workspace, pocket)."""
-    _spec, objects = await _dynamic_pocket_objects(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
-    )
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if _is_project_pocket(pocket):
+        return await _list_project_data_tables(
+            workspace_id=workspace_id, pocket_id=pocket_id, pocket=pocket, cf=_cloudflare
+        )
+    _spec, objects = _dynamic_objects_of(pocket)
     tables = [
         SiteDataTableInfo(
             name=obj["name"],
@@ -12093,15 +13090,49 @@ async def list_site_data_tables(
     )
 
 
+async def _list_project_data_tables(
+    *, workspace_id: str, pocket_id: str, pocket: dict[str, Any], cf: Any | None
+) -> SiteDataTablesResponse:
+    """The project lane of ``list_site_data_tables``: tables introspected from D1."""
+    from pocketpaw_ee.sites import project_data
+
+    db_id = await _project_database_id(workspace_id, pocket_id, pocket)
+    if _local_mode() and cf is None:
+        return SiteDataTablesResponse(
+            pocket_id=pocket_id, available=False, reason=_DATA_UNAVAILABLE_LOCAL
+        )
+    if not db_id:
+        return SiteDataTablesResponse(
+            pocket_id=pocket_id, available=False, reason=_DATA_NOT_PUBLISHED
+        )
+    described = await project_data.describe_tables(cf or _cf_client(), db_id)
+    return SiteDataTablesResponse(
+        pocket_id=pocket_id,
+        available=True,
+        reason="",
+        tables=[SiteDataTableInfo(**t) for t in described],
+    )
+
+
 async def read_site_data_table(
     *,
     workspace_id: str,
     user_id: str,
     pocket_id: str,
     table: str,
+    limit: int | None = None,
+    offset: int = 0,
     _cloudflare: Any | None = None,
 ) -> SiteDataRowsResponse:
-    """Read the rows of ONE table of a dynamic site's D1 (DS-3).
+    """Read the rows of ONE table of a dynamic or project site's D1 (DS-3).
+
+    Rows are capped at ``limit`` (itself capped by ``_data_row_limit()``) starting at
+    ``offset``. On every lane, an auth table's credential columns read ``•••``
+    (``project_data.mask_rows``). A ``project`` site validates ``table`` against the
+    tables its database actually has (``project_data.read_table``) and takes its
+    columns from ``PRAGMA table_info``; before publish it answers ``available=False``
+    / ``reason="not_published"``, in local mode ``live_on_cloudflare_only``, both
+    with no columns. The rest of this docstring is the dynamic lane.
 
     Backs ``GET /sites/by-pocket/{pocket_id}/data/{table}``. The flow:
       1. resolve the pocket's declared ``objects`` (a non-dynamic pocket → 400);
@@ -12126,9 +13157,27 @@ async def read_site_data_table(
     read filters on ``workspace`` — a foreign workspace cannot read another
     tenant's data. ``_cloudflare`` is injectable so the path is unit-testable
     without a live D1."""
-    _spec, objects = await _dynamic_pocket_objects(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
-    )
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import project_data
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if _is_project_pocket(pocket):
+        db_id = await _project_database_id(workspace_id, pocket_id, pocket)
+        local = _local_mode() and _cloudflare is None
+        if local or not db_id:
+            return SiteDataRowsResponse(
+                pocket_id=pocket_id,
+                table=table,
+                available=False,
+                reason=_DATA_UNAVAILABLE_LOCAL if local else _DATA_NOT_PUBLISHED,
+            )
+        columns, rows = await project_data.read_table(
+            _cloudflare or _cf_client(), db_id, table, limit=_clamp_rows(limit), offset=offset
+        )
+        return SiteDataRowsResponse(
+            pocket_id=pocket_id, table=table, available=True, reason="", columns=columns, rows=rows
+        )
+    _spec, objects = _dynamic_objects_of(pocket)
 
     # SQL-safety gate: the requested table MUST be one of the spec's declared
     # object names. An unknown table is a 404 — never reaches a query, never
@@ -12158,22 +13207,23 @@ async def read_site_data_table(
     db_id = stored_db_id or _derive_d1_database_id(workspace_id, pocket_id)
 
     cf = _cloudflare or _cf_client()
-    # ``table`` is whitelisted above (it equals a declared object name), so it is
-    # safe to embed as the FROM identifier — SQLite/D1 cannot bind an identifier as
-    # a placeholder. The LIMIT VALUE binds through ``params``.
-    limit = _data_row_limit()
-    rows = await cf.query_d1(
-        database_id=db_id,
-        sql=f"SELECT * FROM {table} LIMIT ?",  # noqa: S608 — table is whitelisted, value is bound
-        params=[limit],
-    )
+    # ``table`` is whitelisted above (it equals a declared object name) AND quoted, so
+    # a name like ``order`` or one carrying a quote reads as an identifier — SQLite/D1
+    # cannot bind an identifier as a placeholder. The LIMIT VALUE binds via ``params``.
+    ident = project_data.quote_ident(table)
+    sql = f"SELECT * FROM {ident} LIMIT ?"  # noqa: S608 — table is whitelisted + quoted
+    params: list[Any] = [_clamp_rows(limit)]
+    if offset > 0:
+        sql += " OFFSET ?"
+        params.append(offset)
+    rows = await cf.query_d1(database_id=db_id, sql=sql, params=params)
     return SiteDataRowsResponse(
         pocket_id=pocket_id,
         table=table,
         available=True,
         reason="",
         columns=columns,
-        rows=rows,
+        rows=project_data.mask_rows(table, rows),
     )
 
 
@@ -12285,7 +13335,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # getattr — the same reason the paid-grant branch further up is written out
     # rather than short-circuited.
     _status_renewal = doc.renewal_date if doc is not None else None
-    _status_renewal_iso = _status_renewal.isoformat() if _status_renewal is not None else None
+    _status_renewal_iso = utc_iso(_status_renewal)
 
     # The plan's DISPLAY name for the same copy. Best-effort: a name that will not
     # resolve is a phrasing problem on one line, not a reason to fail a status read
@@ -12305,6 +13355,13 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     pattern = patterns.get(pocket_id) or ""
     engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
     engine = engines.get(pocket_id) or ""
+    capabilities = (
+        await _capabilities_for_pockets(
+            workspace_id,
+            engines,
+            {pocket_id: (getattr(doc, "d1_database_id", "") or "") if doc is not None else ""},
+        )
+    ).get(pocket_id)
 
     # PP-2: verification of the CURRENT source, counts only (contract §6). The summary
     # never raises and never carries a message — see verify.status_summary.
@@ -12314,6 +13371,14 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     _verification = SiteVerificationSummary(
         **(await _verify.status_summary(workspace_id=workspace_id, pocket_id=pocket_id))
     )
+
+    # Is the agent run that created this site still building it? Self-healed here
+    # (lookups only when the row is generating/waiting); None for a live site.
+    from pocketpaw_ee.sites import generation as _generation
+
+    if doc is not None:
+        await _generation.resolve(workspace_id, [doc])
+    _gen, _gen_session = _generation.wire_fields(doc) if not is_live else (None, None)
 
     return SiteStatusResponse(
         pocket_id=pocket_id,
@@ -12325,9 +13390,10 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         # the address the latest build actually serves at, not a stale ``url=None``
         # dupe. None when the pocket has no deployed site.
         url=(doc.url or None) if doc is not None else None,
-        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        deployed_at=utc_iso(deployed_at),
         pattern=pattern,
         engine=engine,
+        capabilities=capabilities,
         # SC-1: the same screenshot the list row carries, so a by-pocket status
         # read can show the page too. None when there is no deployed site, no
         # capture has landed yet, or the doc predates the field.
@@ -12349,6 +13415,8 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         build_status=getattr(doc, "build_status", "none") if doc is not None else "none",
         build_reason=getattr(doc, "build_reason", None) if doc is not None else None,
         build_job_id=getattr(doc, "build_job_id", None) if doc is not None else None,
+        generation=_gen,
+        generation_session_id=_gen_session,
         # The billing state the Billing tab has always asked this read for and
         # never received. Read off the same ``doc``, so it costs no extra query.
         #
@@ -12373,11 +13441,61 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     )
 
 
+async def _destructive_review(
+    *, workspace_id: str, pocket_id: str, content: Any, cloudflare: Any | None
+) -> tuple[list[dict[str, str]], str]:
+    """``(findings, check)`` for a review card: the draft's pending project migrations
+    that would delete rows the site's D1 holds (``project_d1.find_destructive``).
+
+    ``check`` is "none" (no migrations, or no database created yet), "ok" (checked;
+    ``findings`` may be empty) or "failed" (could not check). A failed check records
+    nothing, so an approve confirms nothing and a destructive migration is refused at
+    deploy time instead of slipping through unseen. The Site read is workspace-scoped."""
+    from pocketpaw_ee.sites import project_d1
+
+    try:
+        migrations = project_d1.migrations_from_source(content if isinstance(content, dict) else {})
+    except ValidationError:
+        return [], "failed"
+    if not migrations:
+        return [], "none"
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
+    db_id = ((getattr(doc, "d1_database_id", "") or "") if doc is not None else "").strip()
+    if not db_id or db_id == _derive_d1_database_id(workspace_id, pocket_id):
+        return [], "none"
+    try:
+        cf = cloudflare or (None if _local_mode() else _cf_client())
+        if cf is None:
+            return [], "failed"
+        return await project_d1.find_destructive(cf, db_id, migrations), "ok"
+    except Exception:  # noqa: BLE001 - a review card still files; the deploy re-checks
+        logger.warning(
+            "sites.request_publish: could not check pocket %s for destructive migrations",
+            pocket_id,
+            exc_info=True,
+        )
+        return [], "failed"
+
+
+def _reviewed_content_hash(pocket: dict[str, Any] | None) -> str:
+    """``verify.publish_content_hash`` of a pocket, "" when it cannot be read."""
+    if pocket is None:
+        return ""
+    from pocketpaw_ee.sites import verify
+
+    try:
+        return verify.publish_content_hash(pocket)
+    except Exception:  # noqa: BLE001 - the approve then checks the draft head instead
+        logger.warning("sites.publish: no content hash for %s", pocket.get("id"), exc_info=True)
+        return ""
+
+
 async def request_publish_pocket(
     *,
     workspace_id: str,
     user_id: str,
     pocket_id: str,
+    _cloudflare: Any | None = None,
 ) -> Any:
     """Submit a pocket's current draft for human review (BP-4 Part C).
 
@@ -12472,6 +13590,47 @@ async def request_publish_pocket(
         "correlation_id": None,
         "proposed_event_id": None,
     }
+    # A project draft whose migrations would delete stored rows: recorded here so the
+    # Tray can show them, and pinned on approve (``instinct.router``) so an edit
+    # cannot widen them. Only an individual approve turns these keys into the
+    # migrator's confirm (``versions.instinct_executor``).
+    destructive, destructive_check = await _destructive_review(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        content=draft.content,
+        cloudflare=_cloudflare,
+    )
+    blob["destructive_migrations"] = destructive
+    blob["destructive_check"] = destructive_check
+    # What the publish gate would refuse, worded for the owner, so the card says it
+    # before anyone approves. The approve checks again (the draft may change); only an
+    # individual approve with ``confirm_placeholders`` publishes past it.
+    from pocketpaw_ee.sites import publish_gate
+
+    gated_pocket, findings, _skipped = await publish_gate.pocket_check(
+        pocket_id=pocket_id, user_id=user_id
+    )
+    blob["publish_findings"] = findings
+    # The content this card reviews. The approve refuses the card once the pocket holds
+    # anything else (``versions.instinct_executor``), so an edit after the review is
+    # never shipped under it. "" (unreadable, or an engine with no content hash) falls
+    # back to the draft-head check there.
+    blob["reviewed_content_hash"] = _reviewed_content_hash(gated_pocket)
+    description = (
+        "Take the current draft of this site live. Approving merges the "
+        "reviewed version and deploys it."
+    )
+    if findings:
+        description += " NOT READY YET: " + " ".join(f["message"] for f in findings[:10])
+        if len(findings) > 10:
+            description += f" (and {len(findings) - 10} more)"
+    if destructive:
+        lost = ", ".join(sorted({d["table"] for d in destructive}))
+        description += (
+            f" WARNING: approving also runs migrations that permanently delete data "
+            f"this site holds (tables: {lost}). "
+            + " ".join(f"{d['migration']}: {d['statement']}" for d in destructive)
+        )
 
     # ISO: scope the store to the caller's workspace (this can run on an HTTP
     # path with no ``current_workspace`` ContextVar) so the publish proposal
@@ -12479,12 +13638,18 @@ async def request_publish_pocket(
     store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
-        title="Publish site changes",
-        description=(
-            "Take the current draft of this site live. Approving merges the "
-            "reviewed version and deploys it."
+        title="Publish site changes"
+        + (" (deletes data)" if destructive else "")
+        + (" (needs fixes)" if findings else ""),
+        description=description,
+        recommendation=(
+            "Check the data the migrations delete, then approve this card on its own."
+            if destructive
+            else "Fix what the card lists and ask again. To take it live as it is, approve "
+            "this card on its own: it then shows what is blocking and a Publish anyway button."
+            if findings
+            else "Review the draft, then approve to publish."
         ),
-        recommendation="Review the draft, then approve to publish.",
         trigger=ActionTrigger(
             type="user",
             source="request-publish",
@@ -12532,14 +13697,53 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     pocket_ids = [doc.pocket_id for doc in docs]
     patterns = await pockets_service.patterns_for_pockets(workspace_id, pocket_ids)
     engines = await pockets_service.engines_for_pockets(workspace_id, pocket_ids)
-    return [
-        _to_response(
+    capabilities = await _capabilities_for_pockets(
+        workspace_id,
+        engines,
+        {doc.pocket_id: getattr(doc, "d1_database_id", "") or "" for doc in docs},
+    )
+    # Self-heal the ``generation`` flag of rows still generating/waiting: one batched
+    # lookup for all of them, nothing at all when no row is.
+    from pocketpaw_ee.sites import generation as _generation
+
+    await _generation.resolve(workspace_id, docs)
+    responses: list[SiteResponse] = []
+    for doc in docs:
+        resp = _to_response(
             doc,
             patterns.get(doc.pocket_id) or "",
             engines.get(doc.pocket_id) or "",
+            capabilities.get(doc.pocket_id),
         )
-        for doc in docs
-    ]
+        resp.generation, resp.generation_session_id = _generation.wire_fields(doc)
+        responses.append(resp)
+    return responses
+
+
+async def _capabilities_for_pockets(
+    workspace_id: str,
+    engines: dict[str, str | None],
+    d1_database_ids: dict[str, str],
+) -> dict[str, dict[str, bool]]:
+    """``engines.site_capabilities`` for every pocket ``engines_for_pockets`` resolved,
+    with ``has_database`` from the Site's own D1 id and the pocket's database inputs
+    (ONE extra projected read for the whole batch). A pocket that did not resolve is
+    absent, so its response reads ``capabilities: None`` like its ``engine: ""``."""
+    if not engines:
+        return {}
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    inputs = await pockets_service.site_database_inputs_for_pockets(workspace_id, list(engines))
+    return {
+        pocket_id: site_capabilities(
+            engine,
+            has_database=site_has_database(
+                d1_database_id=d1_database_ids.get(pocket_id),
+                **inputs.get(pocket_id, {}),
+            ),
+        )
+        for pocket_id, engine in engines.items()
+    }
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:
@@ -12734,25 +13938,32 @@ async def version_history(*, workspace_id: str, pocket_id: str) -> list[Any]:
 async def revert_pocket_version(
     *, workspace_id: str, user_id: str, pocket_id: str, version_no: int
 ) -> Any:
-    """Revert a pocket's site to a prior version by ordinal (P2b-backend).
+    """Revert a pocket's site to a prior version by ordinal: the History page's Revert.
 
-    Backs ``POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert``.
-    Revert is FORWARD-MOVING: it writes a NEW draft (on the main branch) whose
-    content is a snapshot of the target version's content, then the normal
-    review/publish flow applies (the operator can request-publish that draft and
-    take the reverted content live through the merge gate). It never mutates
-    history — the version log stays append-only and the revert is its own
-    auditable lineage step.
+    Backs ``POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert``. The
+    site IS ``pocket.source`` (``rippleSpec`` on ripple): native-artifact, the
+    publish gate, publish and the agent read it. So a revert writes the target
+    version's content there first (``pockets_service.restore_version_content``, a
+    compare-and-set on the content read below: 409 ``sites.revert_conflict`` when an
+    edit landed meanwhile, and that edit stays), then records the revert as a NEW
+    draft row on main (``versions.revert``: forward-moving, history stays
+    append-only). A project site whose reverted source is the published content
+    is reopened like ``open_pocket_draft``, so the builder builds the reverted draft
+    instead of showing the live site.
 
-    The router carries the human-friendly ``version_no`` (the timeline ordinal the
-    UI shows); the versions ``revert`` keys on the durable ``version_id``, so this
-    resolves the ordinal → the row via the SAME tenant-scoped, main-branch log
-    ``version_history`` reads. A version_no the pocket does not have (or one under
-    another workspace — the rows are pre-filtered on ``workspace_id``) raises
-    ``ValueError`` (the router maps it to a 404). Returns the new draft
-    ``ArtifactVersion``.
+    404 (``NotFound``) for an unknown or another workspace's pocket, 403 without edit
+    access (checked by the content write, before any row is recorded). A
+    ``version_no`` the pocket does not have in this workspace raises ``ValueError``
+    (the router maps it to a 404). Returns the new draft ``ArtifactVersion``.
     """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.versions import service as versions_service
+
+    wire = await pockets_service.get(pocket_id, user_id)
+    if wire.get("workspace") != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    engine = wire.get("engine")
+    current = wire.get("source") if is_source_engine(engine) else wire.get("rippleSpec")
 
     rows = await versions_service.list_versions(
         scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
@@ -12763,14 +13974,40 @@ async def revert_pocket_version(
     )
     if target is None:
         raise ValueError(f"no version v{version_no} for pocket {pocket_id} — cannot revert")
+    content = dict(target.content) if isinstance(target.content, dict) else {}
 
-    return await versions_service.revert(
+    await pockets_service.restore_version_content(
+        pocket_id,
+        user_id,
+        expected=dict(current) if isinstance(current, dict) else None,
+        content=content,
+    )
+    row = await versions_service.revert(
         scope_type=_VERSION_SCOPE_TYPE,
         scope_id=pocket_id,
         workspace_id=workspace_id,
         version_id=str(target.id),
         author=user_id,
     )
+    if normalize_engine(engine) == "project":
+        await _reopen_reverted_draft(pocket_id, content)
+    return row
+
+
+async def _reopen_reverted_draft(pocket_id: str, source: dict[str, Any]) -> None:
+    """Take a reverted project site out of the published view (the registry mark
+    ``open_pocket_draft`` sets), so native-artifact builds the draft the revert
+    recorded. A no-op when the reverted source is not the published content. Best
+    effort: the source is already reverted, and a failed mark leaves the builder on
+    the live site until the next edit."""
+    from pocketpaw_ee.sites import draft_worker, project_build
+
+    if not draft_worker.enabled():
+        return
+    try:
+        await draft_worker.reopen_for_editing(pocket_id, project_build.project_content_hash(source))
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.draft: reverted draft of %s not reopened", pocket_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -12795,14 +14032,15 @@ def _export_response(doc: _SiteExportDoc) -> SiteExportResponse:
         size_bytes=doc.size_bytes,
         table_counts=dict(doc.table_counts or {}),
         lead_count=doc.lead_count,
+        database_dump=getattr(doc, "database_dump", "") or "",
         # ``createdAt``, not ``created_at``. ``TimestampedDocument`` declares the
         # camelCase field and nothing aliases it, so the snake_case spelling this
         # line carried since the export shipped raised ``AttributeError`` on EVERY
         # call — which meant ``POST /sites/{id}/export`` answered 500 after doing all
         # its work, and the delete lane's forced export could never satisfy its own
         # gate. Nothing caught it because no test had ever built an export response.
-        created_at=doc.createdAt.isoformat() if doc.createdAt else None,
-        expires_at=doc.expires_at.isoformat() if doc.expires_at else None,
+        created_at=utc_iso(doc.createdAt),
+        expires_at=utc_iso(doc.expires_at),
     )
 
 
@@ -12840,6 +14078,7 @@ async def create_site_export(
 
     tables: dict[str, list[dict[str, Any]]] = {}
     leads: list[dict[str, Any]] = []
+    database: dict[str, Any] | None = None
     try:
         _spec, objects = await _dynamic_pocket_objects(
             workspace_id=workspace_id, user_id=user_id, pocket_id=doc.pocket_id
@@ -12868,12 +14107,22 @@ async def create_site_export(
         if getattr(exc, "code", "") != "sites.not_dynamic":
             await _fail_export(export, exc, site_id)
             raise
+        # ...unless the site has its OWN database (a project site): no spec declares
+        # its tables, so the whole D1 is dumped as SQL. Without this the export read
+        # "ready" with no data and the delete then dropped every row.
+        try:
+            database = await _project_database_dump(doc, _cloudflare)
+        except Exception as dump_exc:
+            await _fail_export(export, dump_exc, site_id)
+            raise _export_error(dump_exc) from dump_exc
     except Exception as exc:
         await _fail_export(export, exc, site_id)
         raise _export_error(exc) from exc
 
     try:
-        leads = await collect_leads(workspace_id=workspace_id, site_id=site_id, lead_model=_LeadDoc)
+        leads = await collect_leads(
+            workspace_id=workspace_id, site_id=lead_site_id(doc), lead_model=_LeadDoc
+        )
         payload = render_bundle(
             site={
                 "id": site_id,
@@ -12885,6 +14134,7 @@ async def create_site_export(
             },
             tables=tables,
             leads=leads,
+            database=database,
         )
         key = export_key(workspace_id, str(export.id))
         size = await store_export(adapter=_export_adapter(), key=key, payload=payload)
@@ -12897,9 +14147,31 @@ async def create_site_export(
     export.size_bytes = size
     export.table_counts = {name: len(rows) for name, rows in tables.items()}
     export.lead_count = len(leads)
+    export.database_dump = "sql" if database is not None else ""
     export.expires_at = datetime.now(UTC) + timedelta(days=retention_days())
     await export.save()
     return _export_response(export)
+
+
+async def _project_database_dump(doc: _SiteDoc, cloudflare: Any | None) -> dict[str, Any] | None:
+    """``{format: "sql", database_id, sql}`` for a site holding a D1 that Cloudflare
+    actually created, or None when it has none (no id, or the legacy derived
+    placeholder that was never created). Raises ``ExportUnavailable`` when the dump
+    cannot be taken; the id comes from the tenant-scoped Site doc, never a caller."""
+    db_id = (getattr(doc, "d1_database_id", "") or "").strip()
+    if not db_id or db_id == _derive_d1_database_id(doc.workspace, doc.pocket_id):
+        return None
+    cf = cloudflare or (None if _local_mode() else _cf_client())
+    if cf is None:
+        raise ExportUnavailable(
+            "This site's database cannot be read from this deployment, so its data "
+            "cannot be exported."
+        )
+    try:
+        sql = await cf.export_d1_sql(db_id)
+    except Exception as exc:  # noqa: BLE001 - re-raised as the honest failure
+        raise ExportUnavailable("Could not export this site's database from Cloudflare.") from exc
+    return {"format": "sql", "database_id": db_id, "sql": sql}
 
 
 def _export_error(exc: Exception) -> Exception:
@@ -13432,6 +14704,22 @@ class _TransferDeps:
         )
         return bool(getattr(result, "modified_count", 0) or 0)
 
+    @staticmethod
+    async def move_secrets(*, pocket_id: str, destination_workspace_id: str) -> int:
+        """Re-key the site's per-site secrets (``site_secrets.move_for_pocket``).
+        Values are never read or decrypted here; the tokens move as stored."""
+        from pocketpaw_ee.site_ai import service as site_ai_service
+        from pocketpaw_ee.sites import site_secrets
+
+        moved = await site_secrets.move_for_pocket(
+            pocket_id=pocket_id, destination_workspace_id=destination_workspace_id
+        )
+        # The site's AI settings, presets and budget move with it (its AI usage
+        # history and transcripts do not; see ``site_ai.service.move_for_pocket``).
+        return moved + await site_ai_service.move_for_pocket(
+            pocket_id=pocket_id, destination_workspace_id=destination_workspace_id
+        )
+
 
 # The delete lifecycle (sites lifecycle wave 1)
 # ---------------------------------------------------------------------------
@@ -13602,18 +14890,21 @@ async def purge_site_records(*, workspace_id: str, site_id: str) -> int:
         import, not to the site an import eventually became — so there is no query
         that could select this site's.
     """
+    # "" names no one site (a draft, or a lead filed before connected sites had an
+    # id), so a purge on it would take every such row in the workspace.
+    if not site_id:
+        return 0
     removed = 0
     leads = await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).delete()
     removed += getattr(leads, "deleted_count", 0) or 0
     # The per-minute capture counters. They carry a 120s TTL and would expire on their
     # own, but a site being destroyed should not leave rows behind that name it.
-    # ``scope_id`` is the site id for the overall scope and ``"{site_id}:{rate_key}"``
-    # for the per-IP one, so one anchored prefix selects both and nothing else — an
-    # unanchored match would also select a different site whose id merely contains
-    # this one.
-    counters = await _SiteRateCounterDoc.find(
-        {"scope_id": {"$regex": f"^{re.escape(site_id)}(:|$)"}}
-    ).delete()
+    # ``scope_id`` is ``"{workspace}:{site_id}"`` for the overall scope and
+    # ``"{workspace}:{site_id}:{rate_key}"`` for the per-IP one (``leads.service``), so
+    # one anchored prefix selects both and nothing else — an unanchored match would
+    # also select a different site whose id merely contains this one.
+    prefix = f"{re.escape(workspace_id)}:{re.escape(site_id)}"
+    counters = await _SiteRateCounterDoc.find({"scope_id": {"$regex": f"^{prefix}(:|$)"}}).delete()
     removed += getattr(counters, "deleted_count", 0) or 0
     return removed
 
@@ -13636,7 +14927,7 @@ async def delete_site_document(site: _SiteDoc) -> None:
 
 
 async def start_site_delete(
-    *, workspace_id: str, user_id: str, site_id: str
+    *, workspace_id: str, user_id: str, site_id: str, force: bool = False
 ) -> SiteDeleteQueuedResponse:
     """Queue the destruction of one site. OWNER ONLY. Answers before it is done.
 
@@ -13664,7 +14955,11 @@ async def start_site_delete(
         )
         raise Forbidden("site.not_owner", "Only the site's owner can delete it.")
 
-    job_id = await enqueue_site_delete(site)
+    job_id = await enqueue_site_delete(site) if not force else None
+    if force:
+        # The owner asked to delete even if the data export fails. Without it a failed
+        # export stays a hard stop.
+        job_id = await enqueue_site_delete(site, force=True)
     if job_id is None:
         # Another attempt holds the slot. NOT an error: the site is already being
         # deleted, which is what this caller asked for, so report the in-flight

@@ -611,7 +611,12 @@ def _fixer(runner: FakeRunner, launch: Path) -> CloudTaskDispatcher:
 
 
 def _briefs(runner: FakeRunner) -> list[str]:
-    return [a[-1] for a, _ in runner.calls if "--cloud" in a]
+    """Launch briefs; a release's stop message (``-p --cloud``) is not one."""
+    return [a[-1] for a, _ in runner.calls if "--cloud" in a and "-p" not in a]
+
+
+def _stops(runner: FakeRunner) -> list[list[str]]:
+    return [a for a, _ in runner.calls if "-p" in a and a[-1] == cloud_station._STOP_TEXT]
 
 
 async def test_conflicting_pr_gets_one_rebase_fixer_then_merges(store, dirs, stages):
@@ -1218,10 +1223,17 @@ async def test_two_prs_on_one_repo_share_one_nudge_per_interval(store, dirs):
 
     await asyncio.gather(d.run(first, workspace_id=WS), d.run(second, workspace_id=WS))
 
-    times = runner.dispatched
+    times = list(runner.dispatched)
     assert times and all(b - a >= 300 for a, b in zip(times, times[1:]))
+    # The interleave above seldom puts both PRs due in one interval, so drive the
+    # gate directly: both PRs due at the same poll, for two intervals.
+    for _ in range(2):
+        await d.sleep(300)
+        for r in (first, second):
+            await d._nudge(store, r, SLUG, launch)
+    assert runner.dispatched[len(times) :] == [d.clock() - 300, d.clock()]
     blobs = [(await store.get_action(r)).parameters["_code_change"] for r in (first, second)]
-    assert sum(len(b.get("lane_nudges") or []) for b in blobs) == len(times)
+    assert sum(len(b.get("lane_nudges") or []) for b in blobs) == len(runner.dispatched)
     assert all(b["cloud"]["pr"] in {9, 10} for b in blobs)
 
 
@@ -1360,6 +1372,9 @@ async def test_a_silent_worker_is_relaunched_once_then_released(store, dirs, mon
     (again,) = cc["relaunches"]
     assert again["session_url"] == CLOUD_URL and again["at"] <= time.time()
     assert "headless_state" not in cc and "headless_error" not in cc
+    # The release stops the newest session, the relaunched one, once.
+    (stop,) = _stops(runner)
+    assert stop[-2] == CLOUD_URL.rsplit("/", 1)[-1] and cc["stopped"]["session_url"] == CLOUD_URL
     assert ("running", "cloud") in updates and ("rejected", "done") in updates
     # The line moved: held while the worker was out, due once released, and the
     # task's sighting still open (only a landed task resolves one).

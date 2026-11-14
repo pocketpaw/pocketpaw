@@ -440,6 +440,8 @@ async def create_pay_link(
     from pocketpaw_ee.cloud.billing import service as billing_service
     from pocketpaw_ee.sites import service as sites_service
 
+    # Closed payments refuse a reused link too, not only a fresh checkout.
+    billing_service.require_payments_open()
     doc, reusable, token = await sites_service.reserve_client_pay_link(
         workspace_id=workspace_id,
         site_id=body.site_id,

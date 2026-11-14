@@ -15,7 +15,13 @@ The image can be overridden with the ``DAYTONA_SANDBOX_IMAGE`` env var
 (e.g. ``DAYTONA_SANDBOX_IMAGE=node:22``), or set to ``"standard"`` to
 explicitly use the pre-built environment below.
 
-Added: 2026-06-25
+Daytona builds this image server-side on create and caches the result by
+dockerfile. A build that is cancelled mid-way (its box deleted while still
+building) is cached as ``BUILD_FAILED: context canceled``, and every later
+create of the same dockerfile then fails in well under a second, with no
+snapshot in the dashboard to delete. The last layer carries ``PAW_IMAGE_REV``
+for that case: bump ``PAW_DAYTONA_IMAGE_REV`` (or ``IMAGE_REV``) and the next
+create builds a fresh image.
 """
 
 from __future__ import annotations
@@ -32,6 +38,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ENV_IMAGE = "DAYTONA_SANDBOX_IMAGE"
+_ENV_IMAGE_REV = "PAW_DAYTONA_IMAGE_REV"
+
+#: Bumped when Daytona has cached a failed build of the image (see module header).
+IMAGE_REV = "2"
+
+
+def image_rev() -> str:
+    """``PAW_DAYTONA_IMAGE_REV`` when set, else :data:`IMAGE_REV`."""
+    return os.environ.get(_ENV_IMAGE_REV, "").strip() or IMAGE_REV
 
 
 def sandbox_image_override() -> str | None:
@@ -130,6 +145,8 @@ def build_paw_dev_image() -> Image:
             "apt-get clean && rm -rf /var/lib/apt/lists/*",
         )
         .workdir("/home/daytona")
+        # Last on purpose: a rev bump changes only this layer (see module header).
+        .env({"PAW_IMAGE_REV": image_rev()})
     )
 
     logger.debug("Built Paw dev image dockerfile:\n%s", img.dockerfile())

@@ -205,7 +205,7 @@ async def test_rebuild_mode_queues_a_brief_and_mints_nothing(beanie_test_db, mon
 
 
 @pytest.mark.asyncio
-async def test_default_mode_still_mirrors(beanie_test_db, monkeypatch):
+async def test_default_mode_still_mirrors(beanie_test_db, monkeypatch, _fake_static_starter):
     """The shipped client posts only ``url``. It must keep getting a site, not a
     brief — the default flips in the PR that ships the picker, not before."""
     from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
@@ -366,8 +366,8 @@ async def test_capture_is_tenant_scoped(beanie_test_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_a_ready_brief_routes_to_the_brief_driven_preamble(beanie_test_db, monkeypatch):
     """The whole point of a rebuild. With a brief and no pocket, the create run
-    gets _frontend_preamble — which walks the brief and routes to the svelte
-    create tool — instead of the preamble that asks the user what to build."""
+    gets _frontend_preamble — which walks the brief and starts a project from a
+    template — instead of the preamble that asks the user what to build."""
     from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
     from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
     from pocketpaw_ee.cloud.surface.handlers.sites import build_preamble
@@ -382,7 +382,8 @@ async def test_a_ready_brief_routes_to_the_brief_driven_preamble(beanie_test_db,
     pre = await build_preamble("ws_owner", "u", SurfaceMeta(engine="svelte", brief_id=str(doc.id)))
     assert "rohitk06.test" in pre.text
     assert "Rohit Kushwaha" in pre.text
-    assert "create_svelte_site" in pre.text
+    assert "start_site_from_template" in pre.text
+    assert "create_svelte_site" not in pre.text
     # It read live state, so it answers a content key, exactly as refine does.
     assert pre.cache_key
 

@@ -23,8 +23,8 @@
   {
     "label": "the crashed run emits its usage AFTER the error frame — the run loop stops reading at the error, so the payload is discarded and the bill is zero",
     "file": "src/pocketpaw/agents/pydantic_ai.py",
-    "find": "            snapshot = _usage_snapshot()\n            if snapshot is not None:\n                yield snapshot\n            yield AgentEvent(type=\"error\", content=self._explain_error(exc))",
-    "replace": "            yield AgentEvent(type=\"error\", content=self._explain_error(exc))\n            snapshot = _usage_snapshot()\n            if snapshot is not None:\n                yield snapshot",
+    "find": "            snapshot = _usage_snapshot()\n            if snapshot is not None:\n                yield snapshot\n            per_run_limit = max_requests is not None or total_tokens_limit is not None\n            yield AgentEvent(\n                type=\"error\", content=self._explain_error(exc, per_run_limit=per_run_limit)\n            )",
+    "replace": "            per_run_limit = max_requests is not None or total_tokens_limit is not None\n            yield AgentEvent(\n                type=\"error\", content=self._explain_error(exc, per_run_limit=per_run_limit)\n            )\n            snapshot = _usage_snapshot()\n            if snapshot is not None:\n                yield snapshot",
     "tests": [
       "tests/test_pydantic_ai_backend.py::test_a_run_that_dies_mid_response_still_bills_that_response"
     ]

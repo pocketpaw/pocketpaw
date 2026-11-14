@@ -15,17 +15,18 @@
 #
 # Every link / unlink / connect / reconnect emits ``site.integration_changed``
 # {pocket_id, provider, status}. Linking also mints the site's ``PAW_GATEWAY_TOKEN``
-# secret (once) so a project Worker gets it as a secret_text binding on deploy.
+# secret (once) so a project Worker gets it as a secret_text binding on deploy; every
+# Worker deploy re-checks it (``ensure_gateway_token_if_linked``).
 #
 # Settings are validated against the provider's ``settings_fields`` (settings.py).
 # On link, on enable, on a settings change, and for every bound site after a
 # reconnect, the provider's ``site_setup`` hook runs (idempotent; it may write
 # readonly settings that pass their field's check; stored with an atomic $set).
-# A failure is stored as ``setup_error`` and the site reads ``setup_required``;
-# it never fails the request. The gateway also stores one (``mark_setup_error``)
-# when a handler finds the provider-side setup gone (a deleted sheet); a later
-# successful call clears it (``clear_setup_error``). ``claim_binding_lease``
-# serialises provider writes that must not interleave (the vault's lease pattern).
+# A failure is stored as ``setup_error`` (``setup_failed``, or an ``ActionRefused``'s)
+# and the site reads ``setup_required``; it never fails the request. The gateway also
+# stores one (``mark_setup_error``) when a handler finds the provider-side setup gone
+# (a deleted sheet); a later successful call clears it (``clear_setup_error``).
+# ``claim_binding_lease`` serialises provider writes that must not interleave.
 #
 # Status (``binding_status``), first match wins: disabled (has actions, none on),
 # needs_connection / needs_reconnect (connect kinds), setup_required (a setup
@@ -39,6 +40,14 @@
 #
 # Unlinking a site, or purging it, runs the provider's optional ``site_teardown``
 # hook (best effort) for state the provider created elsewhere (a Turnstile widget).
+#
+# A PUT that changes a remote select (``options_source="remote"``) must pick from
+# the provider's live list (field_options.py); unreachable is a 502, never accepted.
+# A select with ``depends_on`` loads its list against the PUT's new value of those
+# settings, or on the options route against draft query values checked the same
+# way (``_with_drafts``); neither touches the stored settings until a PUT passes.
+# Moving a binding to another connection (PUT or the OAuth callback) drops its
+# stored remote values. ``site_bindable = False`` providers (Figma) never link.
 
 from __future__ import annotations
 
@@ -46,15 +55,22 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.integrations import field_options, vault
 from pocketpaw_ee.integrations import settings as settings_rules
-from pocketpaw_ee.integrations import vault
 from pocketpaw_ee.integrations.dto import ProviderView, SiteIntegrationPut, SiteIntegrationView
 from pocketpaw_ee.integrations.providers import all_providers, get_provider
-from pocketpaw_ee.integrations.providers.base import IntegrationProvider, SetupContext
+from pocketpaw_ee.integrations.providers.base import (
+    ActionRefused,
+    IntegrationProvider,
+    SettingOption,
+    SettingsField,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +113,18 @@ async def require_edit(workspace_id: str, user_id: str, pocket_id: str):
     return doc
 
 
-async def require_owner(workspace_id: str, user_id: str, pocket_id: str):
+async def require_owner(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    *,
+    action: str = "sites.integration.export",
+):
+    """The pocket, when ``user_id`` owns it; else a ``sites.not_owner`` 403, audited
+    under ``action`` (what the caller was trying to do)."""
     doc = await pocket_in_workspace(workspace_id, pocket_id)
     if doc.owner != user_id:
-        _deny(user_id, workspace_id, pocket_id, "sites.integration.export", "sites.not_owner")
+        _deny(user_id, workspace_id, pocket_id, action, "sites.not_owner")
         raise Forbidden("sites.not_owner", "Only the site owner can do that.")
     return doc
 
@@ -127,6 +151,17 @@ def provider_or_404(provider_id: str) -> IntegrationProvider:
     return provider
 
 
+def site_provider_or_404(provider_id: str) -> IntegrationProvider:
+    """``provider_or_404`` for a site binding: a workspace-only provider
+    (``site_bindable = False``, Figma) can never be linked to a site."""
+    provider = provider_or_404(provider_id)
+    if not getattr(provider, "site_bindable", True):
+        raise ValidationError(
+            "integrations.not_site_bindable", f"{provider.name} is not used by a site."
+        )
+    return provider
+
+
 # ------------------------------------------------------------------- views
 
 
@@ -149,6 +184,24 @@ def provider_view(provider: IntegrationProvider) -> ProviderView:
         ],
         settings_fields=settings_rules.field_views(provider),
         requires_connection=provider.kind == "connect",
+        site_bindable=bool(getattr(provider, "site_bindable", True)),
+        per_member=bool(getattr(provider, "per_member", False)),
+        connect_params=[
+            {
+                "key": p.key,
+                "label": p.label,
+                "placeholder": p.placeholder,
+                "type": p.type,
+                "required": p.required,
+                "options": (
+                    [{"value": o.value, "label": o.label} for o in p.options]
+                    if p.type == "select"
+                    else None
+                ),
+                "help": p.help or None,
+            }
+            for p in getattr(provider, "connect_params", ())
+        ],
     )
 
 
@@ -199,17 +252,12 @@ async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | Non
     hook = getattr(provider, "site_setup", None)
     if hook is None or not _setup_due(binding, provider, conn):
         return
-    ctx = SetupContext(
+    ctx = field_options.setup_context(
         workspace_id=binding.workspace,
         pocket_id=binding.pocket_id,
         user_id=user_id,
         provider=provider.id,
-        connection=conn,
-        get_token=(
-            (lambda rejected="": vault.get_valid_token(conn, rejected=rejected))
-            if conn is not None
-            else None
-        ),
+        conn=conn,
     )
     try:
         written = await hook(binding, ctx) or {}
@@ -219,6 +267,8 @@ async def run_setup(binding: Any, provider: IntegrationProvider, conn: Any | Non
     except Exception as exc:  # noqa: BLE001 - a setup failure is a status, not a crash
         logger.info("integrations: %s site_setup failed: %s", provider.id, type(exc).__name__)
         settings, error = dict(binding.settings or {}), "setup_failed"
+        if isinstance(exc, ActionRefused) and exc.code == "setup_required":
+            error = exc.setup_error[:80]
     update: dict[str, Any] = {}
     current = dict(binding.settings or {})
     for key, value in settings.items():
@@ -307,6 +357,141 @@ async def list_for_pocket(
     return [await to_view(r) for r in sorted(rows, key=lambda r: r.provider) if r.provider in known]
 
 
+async def options_for_field(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    provider_id: str,
+    key: str,
+    drafts: Mapping[str, str] | None = None,
+) -> list[SettingOption]:
+    """``GET .../integrations/{provider}/fields/{key}/options``: a select's choices.
+
+    A static select answers its declared options; a remote one asks the provider
+    (cached). Unknown, hidden or non-select fields are a 404. ``drafts`` (the
+    query string) may carry unsaved values for the field's ``depends_on`` keys;
+    other keys are ignored. Each draft must pass its own field's check, so a
+    draft remote parent must be one of that parent's options (422
+    ``invalid_settings``). Drafts only shape this load; nothing is stored."""
+    provider = provider_or_404(provider_id)
+    await require_edit(workspace_id, user_id, pocket_id)
+    spec = settings_rules.field(provider, key)
+    if spec is None or spec.hidden or spec.type != "select":
+        raise NotFound("integration_field", key)
+    if not settings_rules.is_remote_select(spec):
+        return list(spec.options)
+    row = await _row(workspace_id, pocket_id, provider.id)
+    conn = await connection_for(row) if row is not None else None
+    binding = row
+    if spec.depends_on and drafts and any(dep in drafts for dep in spec.depends_on):
+        binding = await _with_drafts(
+            row, provider, spec, drafts, workspace_id, pocket_id, user_id, conn
+        )
+    return await field_options.load(
+        provider,
+        spec,
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        binding=binding,
+        conn=conn,
+    )
+
+
+def _pending(row: Any, settings: dict[str, Any]) -> Any:
+    """``row`` with ``settings`` swapped in, for a provider hook only (never saved)."""
+    if row is None:
+        return SimpleNamespace(settings=settings)
+    return row.model_copy(update={"settings": settings})
+
+
+async def _with_drafts(
+    row: Any,
+    provider: IntegrationProvider,
+    spec: SettingsField,
+    drafts: Mapping[str, str],
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    conn: Any | None,
+) -> Any:
+    """The binding as the provider should see it with ``spec``'s draft parents
+    applied, each checked like a PUT would (a remote parent against its own
+    cached list, loaded with the drafts already accepted)."""
+    pending = dict(getattr(row, "settings", None) or {})
+    for dep in spec.depends_on:
+        if dep not in drafts:
+            continue
+        raw = drafts[dep]
+        if not isinstance(raw, str) or not raw.strip():
+            pending.pop(dep, None)
+            continue
+        if raw.strip() == pending.get(dep):
+            continue  # the saved value, checked when it was stored
+        parent = settings_rules.field(provider, dep)
+        if parent is None:
+            raise ValidationError(settings_rules.INVALID, f"Unknown setting {dep!r}.")
+        allowed = None
+        if settings_rules.is_remote_select(parent):
+            options = await field_options.load(
+                provider,
+                parent,
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                user_id=user_id,
+                binding=_pending(row, dict(pending)),
+                conn=conn,
+            )
+            allowed = {o.value for o in options}
+        try:
+            pending[dep] = settings_rules.check_value(parent, raw, allowed)
+        except ValueError as exc:
+            raise ValidationError(settings_rules.INVALID, str(exc)) from None
+    return _pending(row, pending)
+
+
+async def _remote_allowed(
+    row: Any,
+    provider: IntegrationProvider,
+    keys: list[str],
+    user_id: str,
+    incoming: dict[str, Any] | None = None,
+) -> dict[str, set[str]]:
+    """The live option values of each remote select a PUT changes (409 / 502 on failure)."""
+    if not keys:
+        return {}
+    conn = await connection_for(row)
+    allowed: dict[str, set[str]] = {}
+    for key in keys:
+        spec = settings_rules.field(provider, key)
+        if spec is None:
+            continue
+        binding = row
+        if spec.depends_on and incoming:
+            # Load against the PUT's value of the settings this list depends on.
+            pending = dict(row.settings or {})
+            for dep in spec.depends_on:
+                if dep in incoming:
+                    value = incoming[dep]
+                    if isinstance(value, str) and value.strip():
+                        pending[dep] = value.strip()
+                    else:
+                        pending.pop(dep, None)
+            binding = row.model_copy(update={"settings": pending})
+        options = await field_options.load(
+            provider,
+            spec,
+            workspace_id=row.workspace,
+            pocket_id=row.pocket_id,
+            user_id=user_id,
+            binding=binding,
+            conn=conn,
+        )
+        allowed[key] = {o.value for o in options}
+    return allowed
+
+
 # ------------------------------------------------------------------ writes
 
 
@@ -365,7 +550,7 @@ async def upsert(
     is_admin: bool = False,
 ) -> SiteIntegrationView:
     """``PUT /sites/by-pocket/{pocket_id}/integrations/{provider}``."""
-    provider = provider_or_404(provider_id)
+    provider = site_provider_or_404(provider_id)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     if row is None:
@@ -386,12 +571,21 @@ async def upsert(
             await _link_connection(
                 workspace_id, provider, body.connection_id, user_id=user_id, is_admin=is_admin
             )
-        setup = setup or (body.connection_id or None) != row.connection_id
+        relinked = (body.connection_id or None) != row.connection_id
+        setup = setup or relinked
         row.connection_id = body.connection_id or None
+        if relinked:
+            row.settings = settings_rules.drop_remote(provider, dict(row.settings or {}))
     if body.settings is not None:
-        merged = _check_settings(
-            settings_rules.merge_put(provider, body.settings, dict(row.settings or {}))
+        current = dict(row.settings or {})
+        remote = await _remote_allowed(
+            row,
+            provider,
+            settings_rules.remote_keys_to_check(provider, body.settings, current),
+            user_id,
+            body.settings,
         )
+        merged = _check_settings(settings_rules.merge_put(provider, body.settings, current, remote))
         setup = setup or merged != dict(row.settings or {})
         row.settings = merged
     if body.enabled_actions is not None:
@@ -408,7 +602,7 @@ async def upsert(
 
 async def link_connection(*, workspace_id: str, user_id: str, pocket_id: str, conn: Any):
     """The OAuth callback's link step: bind ``conn`` to the site (create if needed)."""
-    provider = provider_or_404(conn.provider)
+    provider = site_provider_or_404(conn.provider)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     if row is None:
@@ -419,8 +613,11 @@ async def link_connection(*, workspace_id: str, user_id: str, pocket_id: str, co
             enabled_actions=list(provider.actions),
             created_by=user_id,
         )
+    before = dict(row.settings or {})
+    if row.connection_id != str(conn.id):
+        row.settings = settings_rules.drop_remote(provider, before)
     row.connection_id = str(conn.id)
-    await _persist(row, None, "connection_id")
+    await _persist(row, before, "connection_id", "settings")
     await ensure_gateway_token(workspace_id, pocket_id)
     await run_setup(row, provider, conn, user_id)
     view = await to_view(row)
@@ -433,7 +630,7 @@ async def request_from_agent(
 ) -> SiteIntegrationView:
     """``connect_site_integration``: make sure a binding exists (needs_connection for
     a connect provider with no grant yet) and record why the agent wants it."""
-    provider = provider_or_404(provider_id)
+    provider = site_provider_or_404(provider_id)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     created = row is None
@@ -493,6 +690,39 @@ async def ensure_gateway_token(workspace_id: str, pocket_id: str) -> None:
         )
     except Exception:  # noqa: BLE001
         logger.warning("integrations: could not mint the gateway token", exc_info=True)
+
+
+def platform_vars(site: Any) -> dict[str, str]:
+    """The plain-text vars a Worker holding ``PAW_GATEWAY_TOKEN`` needs to use it:
+    ``PAW_API_BASE`` (the public API, ending in /api/v1) and ``PAW_SITE_ID``. Read by
+    paw-sites' ``pawCall``, the social sign-in and the owner sign-in routes."""
+    from pocketpaw_ee.integrations import oauth
+
+    return {"PAW_API_BASE": f"{oauth.callback_base()}/api/v1", "PAW_SITE_ID": str(site.id)}
+
+
+async def ensure_gateway_token_if_linked(workspace_id: str, pocket_id: str) -> bool:
+    """Before a site's Worker deploys: make sure a site with any linked integration
+    has its ``PAW_GATEWAY_TOKEN`` (a link whose mint failed, or one made before the
+    token existed, gets it now), so ``site_secrets.secrets_for_deploy`` binds it.
+    True when the site has a linked integration. Never raises.
+
+    Only a deployed Worker can read the token. Generated workers (ripple, svelte,
+    react) run no author server code, and an assets-only Worker (a no-build
+    project) has no code at all: those sites reach the gateway from the browser,
+    through paw.js and the public site key."""
+    if not workspace_id or not pocket_id:
+        return False
+    try:
+        doc = _doc()
+        linked = await doc.find_one(doc.workspace == workspace_id, doc.pocket_id == pocket_id)
+    except Exception:  # noqa: BLE001 - a deploy never fails on this lookup
+        logger.warning("integrations: binding lookup before deploy failed", exc_info=True)
+        return False
+    if linked is None:
+        return False
+    await ensure_gateway_token(workspace_id, pocket_id)
+    return True
 
 
 # -------------------------------------------------- connection fan-out

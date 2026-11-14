@@ -198,6 +198,17 @@ def _accepts_image_attachments_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_isolated_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``isolated`` in its signature? The Claude SDK backend
+    does: an isolated run adds nothing of the deployment's to the system prompt
+    (no connectors block, no bundled skills). Withheld from every other backend,
+    whose prompt is already exactly what ``AgentPool`` assembled."""
+    try:
+        return "isolated" in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _accepts_tools_enabled_kwarg(func: Any) -> bool:
     """Does ``func`` name ``tools_enabled`` in its signature?
 
@@ -233,6 +244,20 @@ def _accepts_exclusive_tools_kwarg(func: Any) -> bool:
         return "exclusive_tools" in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
+
+
+def _accepts_run_limits_kwarg(func: Any) -> bool:
+    """Does ``func`` name both ``max_requests`` and ``total_tokens_limit``?
+
+    The per-run usage limits a platform-funded free run carries. Only
+    ``pydantic_ai`` declares them. The pool refuses a limited run on a backend
+    that does not, because a limit dropped on the floor is no limit.
+    """
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+    return "max_requests" in params and "total_tokens_limit" in params
 
 
 def _accepts_turn_context_kwarg(func: Any) -> bool:

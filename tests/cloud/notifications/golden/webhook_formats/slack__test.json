@@ -1,0 +1,34 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "text": "Test notification",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "elements": [
+        {
+          "text": "Bright Smile · Paw",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "context"
+    },
+    {
+      "elements": [
+        {
+          "text": {
+            "text": "Open in Paw",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "Test notification · Bright Smile"
+}

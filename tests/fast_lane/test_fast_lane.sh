@@ -41,6 +41,8 @@ check() {
 check "happy path" "eligible|150|2|11" . "$BASE_FILES" .
 check "deny path hit" "not-eligible|touches protected paths: .github/workflows/ci.yml" \
   . $'.github/workflows/ci.yml\nsrc/x.py' .
+check "lane script is protected" "not-eligible|touches protected paths: scripts/fast-lane.sh" \
+  . 'scripts/fast-lane.sh' .
 check "deny path, case-insensitive substring" "not-eligible|touches protected paths: src/AuthHelpers.py" \
   . 'src/AuthHelpers.py' .
 check "too big (lines)" "not-eligible|too big: 401 lines" '.additions = 401 | .deletions = 0' "$BASE_FILES" .

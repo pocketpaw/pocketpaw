@@ -1,14 +1,16 @@
 # ee/pocketpaw_ee/integrations/providers/oauth_http.py: outbound HTTP for OAuth providers.
 #
 # The small shared layer the real connect providers (google_sheets, hubspot,
-# zoho_crm) use:
+# zoho_crm, airtable) use:
 #   * ``client()``          one ``httpx.AsyncClient`` per call; tests swap
 #                           ``_transport`` for an ``httpx.MockTransport``
 #   * ``token_request()``   form POST to a token endpoint; a dead grant
 #                           (``invalid_grant`` / ``BAD_REFRESH_TOKEN`` /
 #                           ``invalid_code``) raises ``InvalidGrant`` so the vault
 #                           flips needs_reconnect. An ``error`` body is a failure
-#                           even on a 200 (Zoho answers errors that way)
+#                           even on a 200 (Zoho answers errors that way).
+#                           ``headers`` adds request headers (Airtable's Basic
+#                           client auth)
 #   * ``authed()``          an API call with the site's token (``auth_scheme``
 #                           defaults to ``Bearer``; Zoho wants ``Zoho-oauthtoken``);
 #                           a 401 refreshes once through ``get_token(rejected=...)``
@@ -79,11 +81,15 @@ def _json(resp: httpx.Response) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-async def token_request(url: str, data: dict[str, str], *, provider: str) -> dict[str, Any]:
+async def token_request(
+    url: str, data: dict[str, str], *, provider: str, headers: dict[str, str] | None = None
+) -> dict[str, Any]:
     """POST a token request; the JSON answer, or InvalidGrant / ProviderError."""
     try:
         async with client() as http:
-            resp = await http.post(url, data=data, headers={"accept": "application/json"})
+            resp = await http.post(
+                url, data=data, headers={"accept": "application/json", **(headers or {})}
+            )
     except httpx.HTTPError as exc:
         raise ProviderError(
             f"{provider}: token endpoint unreachable ({type(exc).__name__})"

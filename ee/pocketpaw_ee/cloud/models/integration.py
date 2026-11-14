@@ -17,6 +17,10 @@
 #     ``SiteSecret``: an agent links an integration while it builds, before a publish
 #     mints a Site.
 #   * Money is ISO 4217 minor units (``amount_minor``), never floats.
+#   * ``SiteOrder.refunds`` / ``refund_version`` / ``provider_refunded_minor`` are
+#     written only by targeted updates (``integrations.refunds`` and the webhook
+#     ingest), never by saving a loaded order, so concurrent writers can't drop
+#     each other's refund entries.
 
 from __future__ import annotations
 
@@ -105,6 +109,21 @@ class SiteOrderItem(BaseModel):
     amount_minor: int = 0
 
 
+class SiteOrderRefund(BaseModel):
+    """One owner refund on an order (``integrations.refunds``). ``id`` is ours and
+    is the provider's idempotency key; ``client_key`` is the owner's."""
+
+    id: str
+    client_key: str = ""
+    amount_minor: int = 0
+    # reserved (sent, no answer yet) | pending (accepted, settling) | succeeded | failed
+    status: str = "reserved"
+    external_id: str = ""
+    created_by: str = ""
+    created_at: datetime | None = None
+    error: str = ""
+
+
 class SiteOrder(TimestampedDocument):
     """An order reported by a provider webhook. Amounts are ISO 4217 minor units."""
 
@@ -118,6 +137,18 @@ class SiteOrder(TimestampedDocument):
     currency: str = ""
     customer_email: str | None = None
     items: list[SiteOrderItem] = Field(default_factory=list)
+    # The provider account the payment landed on (Stripe acct_, Razorpay acc_):
+    # a refund must go through a connection to that same account.
+    account_ref: str = ""
+    # The provider's payment id when it differs from ``external_id`` (Razorpay
+    # orders are keyed by order id; refunds need the payment id).
+    payment_ref: str = ""
+    # Refunds: the owner's (``refunds``) and the cumulative total the provider last
+    # reported (``provider_refunded_minor``, which includes the owner's and any made
+    # in the provider's dashboard). ``refund_version`` pins concurrent reservations.
+    refunds: list[SiteOrderRefund] = Field(default_factory=list)
+    provider_refunded_minor: int = 0
+    refund_version: int = 0
 
     class Settings:
         name = "site_orders"

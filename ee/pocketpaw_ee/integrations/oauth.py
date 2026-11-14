@@ -5,17 +5,23 @@
 #   start_resume    POST /integrations/connections/{id}/resume -> {authorize_url}
 #                   the same /start URL, to the provider's ``resume_url`` (an
 #                   unfinished setup) or, for needs_reconnect, its authorize_url
+#                   (either start: a ``ProviderError`` from the provider's hook
+#                   is 502 ``provider_error``, generic message, state dropped)
 #   redeem_ticket   GET  /integrations/{provider}/start?t   -> cookie + 302 to provider
 #   finish_callback GET  /integrations/{provider}/callback?code&state -> HTML page
 #
 # ``state`` lives in the single-use server-side store ``cloud.auth._oauth_state``
 # (namespace ``integrations``) with workspace, user, provider, optional pocket_id,
 # for a resume the connection id, and, for providers that support it, the PKCE
-# S256 verifier. Its TTL is the provider's ``state_ttl_seconds`` when it sets one
-# (Stripe onboarding can take an hour), else the store default; the browser
-# cookie lives as long. The callback trusts only that payload, never its own query
-# string beyond ``code``, ``state`` and the keys a provider declares in
-# ``callback_params`` (handed to its ``complete``, which validates them). A resume
+# S256 verifier, and the provider's checked ``connect_params`` (``params``: what
+# the owner typed before Connect, e.g. a Shopify shop; a resume takes them from
+# ``connection.meta["connect_params"]``). Its TTL is the provider's
+# ``state_ttl_seconds`` when it sets one (Stripe onboarding can take an hour),
+# else the store default; the browser cookie lives as long. The callback trusts
+# only that payload, never its own query string beyond ``code``, ``state`` and
+# the keys a provider declares in ``callback_params`` (handed to its
+# ``complete``, which validates them); a provider with ``verify_callback`` also
+# checks the full (signed) query against the state's params. A resume
 # updates its own connection row in place (a different provider account is
 # refused) and re-runs ``site_setup`` for every site bound to it. A provider's
 # authorize_url may be sync or async.
@@ -48,6 +54,7 @@ import json
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlencode
 
@@ -111,6 +118,37 @@ async def _resolve(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
 
 
+async def _provider_url(provider: Any, state: str, call: Any) -> Any:
+    """Await a provider's authorize_url / resume_url. A ``ProviderError`` (the
+    provider refused or is down) drops the state and becomes 502 ``provider_error``
+    with a generic message: the provider's own text never reaches the owner, and
+    only its type (plus Stripe-style ``<status>`` when the message leads with one)
+    is logged."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+    from pocketpaw_ee.integrations.providers.base import ProviderError
+
+    try:
+        return await _resolve(call())
+    except ProviderError as exc:
+        status = next((w for w in str(exc).split() if w.isdigit() and len(w) == 3), "-")
+        logger.warning(
+            "integrations: %s connect start failed: %s (status %s)",
+            provider.id,
+            type(exc).__name__,
+            status,
+        )
+        try:
+            await _oauth_state.consume(STATE_NAMESPACE, state)
+        except CloudError:
+            pass
+        raise CloudError(
+            502,
+            "provider_error",
+            f"Couldn't start connecting to {provider.name}. Try again, or contact "
+            "support if it keeps happening.",
+        ) from None
+
+
 def message_origins() -> list[str]:
     """Where the callback page may post its result. Each is an origin we serve."""
     from pocketpaw.api.cors import BUILTIN_ORIGINS
@@ -154,12 +192,42 @@ async def _issue_state(provider: Any, payload: dict[str, Any]) -> tuple[str, str
     return state, challenge
 
 
+def checked_params(provider: Any, params: Any) -> dict[str, str]:
+    """The provider's connect params from a request (or a stored connection), checked.
+    Refuses params for a provider that declares none."""
+    params = dict(params or {})
+    if not getattr(provider, "connect_params", ()):
+        if params:
+            raise ValidationError(
+                "integrations.invalid_connect_params", f"{provider.name} needs nothing typed in."
+            )
+        return {}
+    try:
+        return provider.check_connect_params(params)
+    except ValueError as exc:
+        raise ValidationError("integrations.invalid_connect_params", str(exc)) from None
+
+
+def params_kwargs(provider: Any, params: Any) -> dict[str, Any]:
+    """``{"params": ...}`` for a provider declaring connect params, else nothing, so
+    providers without them keep their plain hook signatures."""
+    return {"params": dict(params or {})} if getattr(provider, "connect_params", ()) else {}
+
+
 async def start_connect(
-    *, workspace_id: str, user_id: str, provider_id: str, pocket_id: str | None
+    *,
+    workspace_id: str,
+    user_id: str,
+    provider_id: str,
+    pocket_id: str | None,
+    params: dict[str, str] | None = None,
 ) -> str:
     """Issue single-use state + a one-time start ticket; return our /start URL."""
     provider = bindings.provider_or_404(provider_id)
     _connectable(provider)
+    checked = checked_params(provider, params)
+    if not getattr(provider, "site_bindable", True):
+        pocket_id = None  # a workspace-only grant (Figma) is never linked to a site
     if pocket_id:
         await bindings.require_edit(workspace_id, user_id, pocket_id)
     state, challenge = await _issue_state(
@@ -169,10 +237,18 @@ async def start_connect(
             "user_id": user_id,
             "provider": provider.id,
             "pocket_id": pocket_id or "",
+            "params": checked,
         },
     )
-    provider_url = await _resolve(
-        provider.authorize_url(state, redirect_uri(provider.id), code_challenge=challenge)
+    provider_url = await _provider_url(
+        provider,
+        state,
+        lambda: provider.authorize_url(
+            state,
+            redirect_uri(provider.id),
+            code_challenge=challenge,
+            **params_kwargs(provider, checked),
+        ),
     )
     return await _ticket_url(provider.id, state, user_id, provider_url)
 
@@ -194,6 +270,9 @@ async def start_resume(
     vault.ensure_not_revoked(conn)
     provider = bindings.provider_or_404(conn.provider)
     _connectable(provider)
+    checked: dict[str, str] = {}
+    if getattr(provider, "connect_params", ()):
+        checked = checked_params(provider, (conn.meta or {}).get("connect_params"))
     state, challenge = await _issue_state(
         provider,
         {
@@ -202,15 +281,25 @@ async def start_resume(
             "provider": provider.id,
             "pocket_id": "",
             "connection_id": str(conn.id),
+            "params": checked,
         },
     )
     hook = getattr(provider, "resume_url", None)
     provider_url = None
     if hook is not None:
-        provider_url = await _resolve(hook(conn, state, redirect_uri(provider.id)))
+        provider_url = await _provider_url(
+            provider, state, lambda: hook(conn, state, redirect_uri(provider.id))
+        )
     if not provider_url and conn.status == "needs_reconnect":
-        provider_url = await _resolve(
-            provider.authorize_url(state, redirect_uri(provider.id), code_challenge=challenge)
+        provider_url = await _provider_url(
+            provider,
+            state,
+            lambda: provider.authorize_url(
+                state,
+                redirect_uri(provider.id),
+                code_challenge=challenge,
+                **params_kwargs(provider, checked),
+            ),
         )
     if not provider_url:
         try:
@@ -270,10 +359,11 @@ async def finish_callback(
     code: str,
     state: str,
     cookie: str | None = None,
-    params: dict[str, str] | None = None,
+    query: Mapping[str, str] | list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Check the browser cookie, redeem state, finish the grant, store it, link the
-    site. Returns the message for the opener."""
+    site. ``query`` is the full callback query (``callback_params``, ``verify_callback``).
+    Returns the message for the opener."""
     from pocketpaw_ee.cloud.auth import _oauth_state
 
     message: dict[str, Any] = {
@@ -298,12 +388,21 @@ async def finish_callback(
     if not code:
         message["error"] = "access_denied"
         return message
+    connect = payload.get("params") or {}
     try:
         provider = bindings.provider_or_404(provider_id)
-        extra: dict[str, Any] = {}
+        pairs = list(query.items()) if isinstance(query, Mapping) else list(query or [])
+        verify = getattr(provider, "verify_callback", None)
+        # Fail closed: only a literal True passes (an async verify would return a truthy coroutine).
+        if verify is not None and verify(pairs, dict(connect)) is not True:
+            logger.warning("integrations: %s callback failed verification", provider_id)
+            message["error"] = "invalid_callback"
+            return message
+        extra: dict[str, Any] = params_kwargs(provider, connect)
         wanted = tuple(getattr(provider, "callback_params", ()) or ())
         if wanted:
-            extra["callback_params"] = {k: str((params or {}).get(k) or "") for k in wanted}
+            given = dict(pairs)
+            extra["callback_params"] = {k: str(given.get(k) or "") for k in wanted}
         grant = await provider.complete(
             code, redirect_uri(provider_id), code_verifier=payload.get("code_verifier"), **extra
         )

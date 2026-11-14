@@ -44,7 +44,9 @@ pytestmark = pytest.mark.asyncio
 
 def _enforce(monkeypatch, *, on: bool) -> None:
     """Point the guard's ``get_settings`` at a stub carrying the flag posture."""
-    monkeypatch.setattr(guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
+    monkeypatch.setattr(
+        guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on, credits_enforced=False)
+    )
 
 
 async def _make_workspace(plan: str, *, slug: str) -> str:

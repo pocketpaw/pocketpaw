@@ -276,3 +276,103 @@ async def test_reject_clears_all_accumulated_drafts(
     published = await versions.get_published(scope_type="pocket", scope_id=POCKET)
     assert published is not None
     assert str(published.id) == str(live.id)
+
+
+# ── a stale review card never ships unreviewed content (D5) ─────────────────────
+
+
+def _html_pocket(index: str) -> dict:
+    return {"id": POCKET, "name": "Site", "engine": "html", "source": {"index.html": index}}
+
+
+def _install_pocket(monkeypatch, doc: dict) -> None:
+    async def _get(_pid: str, _uid: str) -> dict:
+        return doc
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.service.get", _get)
+
+
+def _deploys(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+
+    async def _fake_publish_pocket(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(id="site-1")
+
+    monkeypatch.setattr("pocketpaw_ee.sites.service.publish_pocket", _fake_publish_pocket)
+    return calls
+
+
+async def test_approve_refuses_a_card_whose_content_changed_since_review(
+    beanie_test_db, versions_journal, monkeypatch
+) -> None:
+    """The card was filed for one content; the pocket now holds another (an edit after
+    the review). Nothing is promoted, nothing deploys, and the Action fails with a
+    clear stale-review error so the owner files a new review."""
+    from pocketpaw_ee.sites import verify
+
+    store = _FakeStore()
+    _install_workspace_store(monkeypatch, store)
+    deploys = _deploys(monkeypatch)
+    reviewed = _html_pocket("<p>reviewed</p>")
+    _install_pocket(monkeypatch, _html_pocket("<p>edited after the review</p>"))
+    cand = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content=reviewed["source"]
+    )
+    action = _action(str(cand.id))
+    blob = action.parameters["_artifact_change"]
+    blob["reviewed_content_hash"] = verify.publish_content_hash(reviewed)
+
+    await executor.execute_approved_change(action)
+
+    assert deploys == []
+    assert "sites.publish_review_stale" in store.failed["act-1"]
+    assert "act-1" not in store.executed
+    assert await versions.get_published(scope_type="pocket", scope_id=POCKET) is None
+    stale = action.parameters["_artifact_change"]["publish_stale"]
+    assert stale["code"] == "sites.publish_review_stale"
+
+
+async def test_approve_deploys_a_card_whose_content_is_unchanged(
+    beanie_test_db, versions_journal, monkeypatch
+) -> None:
+    from pocketpaw_ee.sites import verify
+
+    store = _FakeStore()
+    _install_workspace_store(monkeypatch, store)
+    deploys = _deploys(monkeypatch)
+    doc = _html_pocket("<p>reviewed</p>")
+    _install_pocket(monkeypatch, doc)
+    cand = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content=doc["source"]
+    )
+    action = _action(str(cand.id))
+    action.parameters["_artifact_change"]["reviewed_content_hash"] = verify.publish_content_hash(
+        doc
+    )
+
+    await executor.execute_approved_change(action)
+
+    assert len(deploys) == 1 and "act-1" in store.executed
+
+
+async def test_approve_refuses_a_legacy_card_whose_draft_was_superseded(
+    beanie_test_db, versions_journal, monkeypatch
+) -> None:
+    """A card filed before content hashes were recorded: a newer draft above its
+    ``to_version_id`` means the content changed since the review."""
+    store = _FakeStore()
+    _install_workspace_store(monkeypatch, store)
+    deploys = _deploys(monkeypatch)
+    old = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "reviewed"}
+    )
+    await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "newer edit"}
+    )
+
+    await executor.execute_approved_change(_action(str(old.id)))
+
+    assert deploys == []
+    assert "sites.publish_review_stale" in store.failed["act-1"]
+    assert await versions.get_published(scope_type="pocket", scope_id=POCKET) is None

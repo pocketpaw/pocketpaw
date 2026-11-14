@@ -84,6 +84,9 @@ All routes under `/api/v1/livekit/*` require an active enterprise license, user 
 | `POST /livekit/rooms/{group_id}/invite` | Create a guest invite link. An `emails` list inside the `display_name` JSON becomes the invite's server-side allow-list and is removed from `display_name` |
 | `GET /livekit/invites/{token}` | Public. Validate an invite for the join page. Returns `requires_email` (bool); the allow-list itself is never returned |
 | `POST /livekit/invites/{token}/join` | Public. Join as a guest with `display_name` and, when `requires_email` is true, `email` (checked trimmed and case-insensitively; otherwise 403 `meeting_invite.email_not_allowed`). A guest link never starts a call: if no one other than the call-bot is in the room, join returns 403 `meeting_invite.call_ended` |
+| `POST /livekit/rooms/{group_id}/ask` | Ask Paw a typed question (`question`, 1-500 chars). 202 `{ask_id}`; the answer is spoken in the call and posted to the group chat. See [Ask Paw](#ask-paw) |
+| `POST /livekit/rooms/{group_id}/ask/listen` | Push-to-talk. `{phase: "start"}` returns 202 `{ask_id}` and opens a capture window on the caller's mic; `{phase: "end", ask_id}` closes it and answers what was said |
+| `POST /livekit/rooms/{group_id}/ask/stop` | Silence Paw and free the call's question slot. Any member may stop it. 200 `{ok: true}` |
 
 Events fire on the realtime bus:
 
@@ -97,6 +100,45 @@ Starting a call goes through the workspace plan's daily call-time budget, whethe
 A guest invite link never starts a call. Guests of a scheduled meeting can join only after a member has joined the call; until then the join page gets `meeting_invite.call_ended`.
 
 Ending a call closes every in-progress LiveKit meeting row for that room. If a scheduled meeting started while an instant call was already running in the same group, both rows end together, and the daily call budget counts the overlapping time once.
+
+## Ask Paw
+
+Members can ask the call bot a question during the call and hear the answer out loud. The bot answers from what has been said in the call so far, then from the workspace knowledge base (`workspace:<id>` scope only, never a member's `user:` scope) and workspace-shared memory facts (facts attributed to one member are skipped). Answers are 2-4 short spoken sentences, voiced by Deepgram TTS (`aura-2-andromeda-en`) on the bot's own microphone track; the call bot's token can publish microphone audio only. Each answered question is also posted to the group chat as `**Q (Name):** ... **Paw:** ...`.
+
+Errors use the usual `{"error": {"code", "message"}}` envelope:
+
+| Status | Code | When |
+|--------|------|------|
+| 403 | `livekit.room_forbidden` | Not a member of the group in this workspace (guests included) |
+| 403 | `livekit.assistant_unavailable` | The bot is off for this workspace (unpaid early access) |
+| 409 | `livekit.assistant_offline` | No call bot is in the call (`PUBSUB NUMSUB livekit:bot:cmd:{group_id}` is 0); checked on `/ask` and `/ask/listen` start |
+| 409 | `livekit.assistant_busy` | Another question is being answered in this call |
+| 409 | `livekit.assistant_ask_mismatch` | `listen` `end` from anyone but the asker, or with an `ask_id` that no longer holds the call (stopped, or the 25s push-to-talk watchdog fired) |
+| 429 | `livekit.assistant_rate_limited` | More than 10 asks a minute from one member |
+| 503 | `livekit.assistant_offline` | Redis is unreachable |
+
+Progress is the realtime event `call.assistant_state`, sent to the group's members. Every ask ends with exactly one `idle`: after the answer has finished playing in the call, after `error`, after `/ask/stop` (whose `idle` names the member who stopped it), after a missed spoken question, after a push-to-talk nobody ended (25s watchdog), when a step after taking the slot fails (then 503), and when the lock is lost mid-answer.
+
+```json
+{ "group_id": "...", "state": "listening | thinking | speaking | idle | error",
+  "ask_id": "...", "asked_by": "<user id>", "asked_by_name": "...",
+  "question": "... or null", "answer": "... or null", "error": "... or null" }
+```
+
+The API process and the bot subprocess talk only through Redis:
+
+| Key / channel | Written by | Contents |
+|---------------|-----------|----------|
+| `livekit:transcript:{group_id}` (list, 6h TTL) | bot | One JSON `{identity, speaker, text, ts}` per final transcript segment; cleared when the bot starts |
+| `livekit:progressive:{group_id}` (list) | bot | 5-minute summaries; Ask Paw reads them without deleting |
+| `livekit:bot:cmd:{group_id}` (pub/sub) | API | `say {ask_id, text}`, `say_end`, `stop`, `listen_start {ask_id, identity}`, `listen_end {ask_id, identity}` |
+| `livekit:ask:q:{ask_id}` (list, 120s TTL) | bot | The words the asker spoke during the listen window ("" if none, or if the window was open 20s without an `end`). Only the asker's own mic is captured |
+| `livekit:ask:lock:{group_id}` (string, 120s TTL, restarted when answering begins) | API | The `ask_id` answering right now; one question per call |
+| `livekit:ask:asker:{ask_id}` (string, 120s TTL) | API | The member who asked; only they can end their push-to-talk |
+| `livekit:ask:listening:{ask_id}` (string) | API | Present while push-to-talk is open; `listen` `end` and the watchdog race to delete it, and only the winner proceeds |
+| `livekit:ask:done:{ask_id}` (list, 120s TTL) | bot | Pushed when an answer's audio has played out or was cut by `stop`; the API waits on it (bounded, at most 45s) before `idle` |
+| `livekit:ask:stopped:{ask_id}` (string, 120s TTL) | API | Set by `/ask/stop` so an answer running in another web process ends without a second `idle` |
+| `livekit:ask:rate:{user_id}` (counter, 60s window, set with its TTL in one transaction) | API | Per-member ask count |
 
 ## Instant Meetings
 

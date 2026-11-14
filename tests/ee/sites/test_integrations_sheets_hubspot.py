@@ -666,9 +666,9 @@ async def test_hubspot_connect_create_and_upsert(beanie_test_db, fakes):
         )
     conn = await IntegrationConnection.find_one(IntegrationConnection.provider == "hubspot")
     assert conn.account_ref == "4242" and conn.account_label == "acme.hubspot.com"
-    assert created.json() == {"ok": True, "result": {"status": "created"}}, created.text
-    assert updated.json() == {"ok": True, "result": {"status": "updated"}}, updated.text
-    assert unchanged.json() == {"ok": True, "result": {"status": "exists"}}, unchanged.text
+    assert created.json() == {"ok": True, "result": {"status": "ok"}}, created.text
+    assert updated.json() == {"ok": True, "result": {"status": "ok"}}, updated.text
+    assert unchanged.json() == {"ok": True, "result": {"status": "ok"}}, unchanged.text
     # A public caller filled the empty company and overwrote nothing.
     assert hub.contacts["ada@example.com"] == {
         "email": "ada@example.com",

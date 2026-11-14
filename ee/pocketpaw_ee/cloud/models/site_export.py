@@ -1,8 +1,6 @@
 # ee/pocketpaw_ee/cloud/models/site_export.py — the data a site's owner keeps when
 # the site itself is destroyed. Workspace-scoped.
 #
-# Created 2026-09-08 (sites lifecycle wave 1 chunk 2, feat/sites-delete-export).
-#
 # WHY THIS IS ITS OWN COLLECTION AND NOT A FIELD ON THE SITE. The delete cascade
 # ends by deleting the Site document, so anything recorded ON that document dies
 # with it — including a pointer to the export. That would orphan the export at the
@@ -65,6 +63,9 @@ class SiteExport(TimestampedDocument):
     # re-reading a D1 that is about to be deleted.
     table_counts: dict[str, int] = Field(default_factory=dict)
     lead_count: int = 0
+    # "sql" when the bundle carries a full SQL dump of the site's own D1 (a project
+    # site, whose tables are its own and not declared in a spec); "" otherwise.
+    database_dump: str = ""
 
     # ── Retention ────────────────────────────────────────────────────────
     # We are storing a customer's data after they asked us to delete their site,

@@ -36,6 +36,7 @@ import logging
 import re
 from typing import Any
 
+from pocketpaw_ee.agent.mcp_servers.anatomy_film import validate_anatomy_film
 from pocketpaw_ee.agent.mcp_servers.ripple_beats import RIPPLE_BEATS_BRIEF, validate_ripple_beats
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,10 @@ def validate_motion_graphic(html: Any, fps: Any) -> tuple[dict | None, str | Non
     ripple_error = validate_ripple_beats(html)
     if ripple_error is not None:
         return None, ripple_error
+
+    film_error = validate_anatomy_film(html, duration)
+    if film_error is not None:
+        return None, film_error
 
     width, height = dims["data-width"], dims["data-height"]
     return {
@@ -497,10 +502,13 @@ def _edit_timeline_parameters() -> dict[str, Any]:
                 "animDurationMs, animDirection — a preset sets the whole look and "
                 "any field passed with it wins. Caption styles are a DIFFERENT set "
                 "(plain|boxed|outlined). "
-                "Look: set_transform {clipId, x?, y?, scale?, rotation?, opacity?} "
+                "Look: set_transform {clipId, x?, y?, scale?, rotation?, opacity?, "
+                "flipX?, flipY?} (flips are true/false mirrors) "
                 "where x/y are offsets from frame CENTRE; add_keyframe {clipId, "
                 "prop, atMs, value?, ease?} and clear_keyframes {clipId, prop, "
-                "atMs?} where prop is x|y|scale|rotation|opacity|volume|fx and atMs is "
+                "atMs?} where prop is x|y|scale|rotation|opacity|volume|fx|fx.<effect>|"
+                "frame.<x|y|w|h|radius|border|shadow>, "
+                "ease is linear|easeIn|easeOut|easeInOut|hold|back|elastic|bounce, and atMs is "
                 "TIMELINE time inside the clip — pin two values to animate. "
                 "zoom_clip {clipId, focusX?, focusY?, scale?, atMs?, inMs?, holdMs?, "
                 "outMs?, ease?} pushes in on a point and (when outMs > 0) comes back "
@@ -508,20 +516,55 @@ def _edit_timeline_parameters() -> dict[str, Any]:
                 "0,0 = top-left) and the whole in+hold+out window must fit inside "
                 "the clip. Use it rather than hand-keying scale — it keeps the point "
                 "centred as the frame grows. "
+                "set_layout {clipId, layout?, x?, y?, w?, h?, radius?, border?, "
+                "borderColor?, shadow?, atMs?, durationMs?, ease?, off?} draws a video "
+                "or image clip into a box: layout full|pip-br|pip-bl|pip-tr|pip-tl|"
+                "split-left|split-right|split-top|split-bottom|screen-card|side-cam|"
+                "circle-cam, fields over it (x/y box centre and w/h size as canvas "
+                "fractions, radius/border/shadow 0..1). The picture is cover-cropped "
+                "into the box. With atMs it ANIMATES there from wherever it is at "
+                "that moment over durationMs (default 500) — 'go full screen at 8s' "
+                "is set_layout layout full atMs 8000. Without atMs, layout full or "
+                "off:true takes the frame off. Lanes later in the lane list draw on "
+                "top, so the clip that should cover the screen must sit on a higher "
+                "lane (or fade the other one out). set_project {backdrop: {colors: "
+                "[#rrggbb, #rrggbb], angle 0..360} | null} paints a gradient behind "
+                "everything. "
                 "set_chroma {clipId, color?, similarity?, smoothness?, spill?, off?} "
                 "keys a solid background out of a video or image clip (green screen): "
                 "color is #rrggbb or 'auto' (detected from the frame's edges), the "
                 "rest are 0-1, off:true removes it. A lower lane shows through. "
-                "set_effects {clipId, preset?, exposure?, contrast?, temperature?, "
-                "tint?, saturation?, glow?, vignette?, spotlight?, rays?, sweep?, "
-                "leak?, grain?, aberration?, flicker?, off?} lights and grades a "
-                "video or image clip: preset golden-hour|moody|neon-glow|spotlight|"
-                "dreamy|none sets the look and passed fields override it; exposure "
-                "-2..2, contrast/temperature/tint/saturation -1..1, the rest 0..1; "
+                "set_effects {clipId, preset?, <effect fields>, off?} grades, lights "
+                "and stylises a video or image clip: preset golden-hour|moody|"
+                "neon-glow|spotlight|dreamy|noir|faded-film|super-8|teal-orange|"
+                "sunset-duotone|camcorder|arcade-crt|glitch-pop|handheld-8bit|"
+                "comic-print|riso-zine|pencil|blueprint|terminal|miniature|"
+                "dream-haze|none sets the look and passed fields override it. "
+                "set_track_effects {track, <same fields>, off?} puts them on a "
+                "whole lane (every video/image clip on it, under each clip's own). "
+                "Scalars: exposure -2..2; contrast, temperature, tint, "
+                "saturation, highlights, shadows -1..1; glow, halation, vignette, "
+                "grain, grainSize, grainColor, aberration, rgbShift, flicker, "
+                "sharpen, mono (black & white), sepia, posterize, threshold, "
+                "pixelate, scanlines, curvature (CRT screen bend), glitch, vhs, "
+                "jpeg (damaged JPEG), dither, halftone, halftoneSize, riso, hatch, "
+                "sketch (pencil), ascii, asciiSize, paper, ripple, heat, reeded "
+                "(ribbed glass), zoomBlur, spinBlur, motionBlur, tiltShift, "
+                "streaks (anamorphic), starburst 0..1; swirl, bulge (negative "
+                "pinches), tiltFocus -1..1; motionAngle -180..180. Groups: "
                 "spotlight {x,y,radius,intensity}, rays {x,y,intensity,length}, "
                 "sweep {angle -180..180, width, intensity}, leak {intensity, hue "
-                "0..360}, each null to remove; off:true clears all. Keyframe "
-                "prop fx (0-1) ramps the overall strength. "
+                "0..360}, levels {black, white, gamma 0.1..10}, colorMap {colors: "
+                "2-4 #rrggbb darkest first, intensity} (duotone / gradient map), "
+                "curves {master|r|g|b: [[x,y],...] 2-16 points 0..1}, hsl "
+                "{red|orange|yellow|green|aqua|blue|purple|magenta: {hue, "
+                "saturation, lightness -1..1}}. null removes one; off:true clears "
+                "all. set_shake {clipId, intensity?, speed?, rotation?, off?} "
+                "adds handheld camera shake (each 0..1) on top of any zoom or "
+                "keyframes; off:true removes it. Keyframe "
+                "prop fx (0-1) ramps the overall strength; prop fx.<scalar> "
+                "(e.g. fx.glitch, fx.vignette) animates one effect within its "
+                "range. "
                 "To arrange NEW clips end to end, omit both atMs and after — each "
                 "appends after the last on its lane. `after` anchors to a clip "
                 "ALREADY on the timeline; a clip created in this same batch has no "

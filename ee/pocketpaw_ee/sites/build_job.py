@@ -54,7 +54,21 @@
 # flight. A build that already FINISHED and left the store empty is reported as failed,
 # with its reason — not as a build that is still coming. Re-enqueueing there instead
 # would put a polling client in a rebuild loop, one sandbox per build duration, on inputs
-# that just failed.
+# that just failed. The exception is a result the site did not cause: an aborted job, an
+# infrastructure failure (``sandbox_unavailable:*``: capacity stayed full, no sandbox), or
+# a job that raised. That result is freed and the render queued again, a bounded number of
+# times per render per hour per sandbox image rev (:func:`_clear_retryable_result`);
+# otherwise a full org would pin every render that hit it to "capacity full" for the
+# hour, long after a slot freed. That budget stops POLL loops, so an explicit build
+# (``force``: the agent's ``run_site_build``) clears an infra result without spending it,
+# at most once per pocket per :data:`FORCE_GUARD_SECONDS`.
+#
+# A JOB THAT RAISED IS REPORTED FOR WHAT IT RAISED (:func:`raised_job_reason`): arq's own
+# timeout, arq refusing a run past ``max_tries`` (only capacity ``Retry``s spend tries), a
+# sandbox the job never got (:class:`SandboxUnavailableError`), a supersede (only when
+# :func:`was_superseded`; any other cancel is :data:`JOB_CANCELLED_REASON`), or our own
+# crash (:data:`RUNG_JOB_CRASHED`). Each read of one logs its class and a redacted message once,
+# and both jobs log their traceback before re-raising (:func:`_logs_its_raise`).
 #
 # WHICH ENGINES ARRIVE HERE IS DECIDED IN ``service.build_runs_async``, not here, and it is
 # react-only today. The reason is the artifact, not the queue: an adapter-cloudflare build
@@ -86,10 +100,11 @@
 #      registry job shares ONE budget: ``jobs.domain.job_timeout_seconds()``
 #      (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s). A build needs
 #      :func:`site_build_job_timeout_seconds` — the widest per-engine build budget plus
-#      ``run_build``'s own exec slack plus the phases that sit outside the sandbox —
-#      which is 1020s at today's defaults, i.e. ALREADY over the shared 900s. An arq
-#      cancellation at 900s kills the job before the in-sandbox ``timeout(1)`` fires, so
-#      the sentinel is never written and a healthy-but-slow build classifies as
+#      ``run_build``'s own exec slack plus the phases that sit outside the sandbox plus
+#      the bounded memory-admission wait — 1290s at today's defaults, i.e. ALREADY
+#      over the shared 900s. An arq cancellation at 900s kills the job before the
+#      in-sandbox ``timeout(1)`` fires, so the sentinel is never written and a
+#      healthy-but-slow build classifies as
 #      ``infra_lost``: exactly the mis-report ``daytona_build``'s evidence design exists
 #      to prevent. A dedicated ``arq.worker.func(timeout=...)`` derived from the same env
 #      knob keeps the two coupled, which no registry job can do.
@@ -200,7 +215,7 @@
 #   * A newly accepted preview / html-verify job ABORTS the pocket's previous one
 #     (:func:`_supersede_previous_job`, a per-pocket Redis pointer; the worker sets
 #     ``allow_abort_jobs``). A render whose job was aborted is re-queued, not read as
-#     failed, when its source comes back (:func:`_clear_aborted_result`).
+#     failed, when its source comes back (:func:`_clear_retryable_result`).
 #   * Each job logs its queue wait and its build / browser elapsed ms
 #     (``sites.verify: layer=…``).
 #   * Its result gains ``layers`` ({build, browser}), ``diagnostics`` ({errors, warnings})
@@ -225,7 +240,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -237,10 +254,10 @@ from typing import Any
 
 from arq.constants import result_key_prefix
 from arq.jobs import Job, JobStatus
-from arq.worker import Retry
+from arq.worker import JobExecutionFailed, Retry
 
 from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
-from pocketpaw_ee.sites import capacity
+from pocketpaw_ee.sites import admission, capacity
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.build_state import BuildStatus, settle
 from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
@@ -250,6 +267,8 @@ from pocketpaw_ee.sites.daytona_runner import (
     run_build,
 )
 from pocketpaw_ee.sites.engines import needs_node_build, normalize_engine, static_output_rel
+from pocketpaw_ee.sites.publish_gate import PublishBlocked
+from pocketpaw_ee.sites.sandbox_reaper import label_value
 from pocketpaw_ee.sites.verify_diagnostics import finalize, parse_build_stderr
 
 logger = logging.getLogger(__name__)
@@ -341,6 +360,8 @@ RUNG_SCAFFOLD_EMPTY = "scaffold_empty"
 #: ``run_build`` raised rather than returning a verdict: Daytona unconfigured, or the
 #: sandbox could not be created. Nothing ran, so it is ours and retryable.
 RUNG_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+#: Daytona's build of the box image failed; every create fails until it changes.
+IMAGE_BUILD_FAILED_REASON = f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.IMAGE_BUILD_FAILED_CAUSE}"
 #: The classification cleared the build and the download delivered no bytes. Distinct
 #: from the sentinel's ``artifact_empty`` because this one is a property of the TRANSFER,
 #: so it is worth another attempt.
@@ -363,6 +384,44 @@ RUNG_DEPLOY_FAILED = "deploy_failed"
 #: raised. Its own rung for the same reason :data:`RUNG_DEPLOY_FAILED` is: the user's
 #: build compiled, so naming this a build failure would send them to debug working code.
 RUNG_PREVIEW_UNREADABLE = "preview_unreadable"
+#: A preview / html-verify job raised something we did not plan for: a bug on our side.
+#: Not ``sandbox_unavailable`` (we may well have had one) and never the site's fault, so
+#: it is budgeted like any raise and its user-facing sentence says so
+#: (``capacity.JOB_CRASHED_REASON``).
+RUNG_JOB_CRASHED = "job_crashed"
+#: A job cancelled by something other than a newer edit: arq aborting it on a stale
+#: abort mark, a worker shutdown or deploy. Budgeted like any raise (``raised``).
+JOB_CANCELLED_REASON = f"{RUNG_JOB_CRASHED}:cancelled"
+
+
+class SandboxUnavailableError(RuntimeError):
+    """A preview / html-verify job's sandbox step raised for a reason other than
+    capacity (Daytona unconfigured or refusing, a box that never started, a failed
+    upload). Raised ``from`` the original so the worker log keeps it; its own message is
+    the original's class and redacted text, because arq stores it in Redis. Read back as
+    ``sandbox_unavailable:no_sandbox`` (:func:`raised_job_reason`)."""
+
+    @classmethod
+    def wrapping(cls, exc: BaseException) -> SandboxUnavailableError:
+        """The wrapper for ``exc``: :class:`SandboxImageBuildFailedError` when Daytona's
+        image build failed (logged at ERROR here, once per job, since only the job's
+        raise wraps), else this class."""
+        message = f"{type(exc).__name__}: {capacity.redact(str(exc), cap=_RAISED_LOG_CAP)}"
+        if not capacity.is_image_build_failed(exc):
+            return cls(message)
+        logger.error(
+            "sites: Daytona's build of the sandbox image failed and is cached, so every "
+            "create fails until the image changes. Fix: bump PAW_DAYTONA_IMAGE_REV and "
+            "restart the web service and the worker. (%s)",
+            message,
+        )
+        return SandboxImageBuildFailedError(message)
+
+
+class SandboxImageBuildFailedError(SandboxUnavailableError):
+    """A create failed because Daytona's (cached) build of the box image failed
+    (``SandboxState.BUILD_FAILED``). A subclass, so it survives arq's pickle into Redis
+    and reads back as ``sandbox_unavailable:image_build_failed``, which is not retried."""
 
 
 @dataclass(frozen=True)
@@ -459,7 +518,14 @@ def site_build_job_timeout_seconds() -> int:
     which a deploy does anyway.
     """
     widest = max(resolve_build_timeout_seconds(engine) for engine in BUILDABLE_ENGINES)
-    return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS
+    # Plus the longest ``admission.memory_lease`` wait, which runs before the build's
+    # clock: an arq timeout that ate into the build budget would lose the sentinel.
+    # ALWAYS added, whether or not admission is on. The arq registrations evaluate this
+    # once at import while callers evaluate it later; making it depend on the admission
+    # env var lets the two disagree inside one process (a test, or a worker whose env
+    # changed). With admission off it only raises the ceiling on a wedged job.
+    admission_wait = math.ceil(admission.MAX_WAIT_SECONDS)
+    return widest + EXEC_TIMEOUT_SLACK_SECONDS + OUT_OF_SANDBOX_MARGIN_SECONDS + admission_wait
 
 
 def site_preview_job_timeout_seconds() -> int:
@@ -666,6 +732,8 @@ async def run_site_build(
                 timeout_seconds=timeout_seconds,
                 client=_client,
                 artifact_rel=artifact_rel,
+                labels=sandbox_labels(ctx, str(getattr(site, "pocket_id", "") or "")),
+                **_publish_lease_hooks(ctx, site),
             )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
@@ -705,6 +773,23 @@ async def run_site_build(
                 deployer=_deployer,
                 output_rel=artifact_rel,
             )
+        except PublishBlocked as refusal:
+            # The publish gate refused the built tree. Not a crash and not retryable:
+            # nothing deployed, and the owner reads the findings on the build status.
+            from pocketpaw_ee.sites import publish_gate
+
+            logger.info("sites.build: publish gate refused site %s after a clean build", site_id)
+            publish_gate.record_blocked(str(deploy_inputs.get("pocket_id") or ""), refusal.details)
+            await _record(
+                site,
+                _settlement(
+                    RUNG_DEPLOY_FAILED,
+                    "publish_blocked",
+                    retryable=False,
+                    attempts_left=attempts_left,
+                ),
+            )
+            return
         except Exception:
             # The build worked and the deploy did not, so this is NOT a build failure —
             # but from the publisher's side nothing went live, and the row is the only
@@ -724,6 +809,22 @@ async def run_site_build(
             raise
 
     await _record(site, settlement)
+
+
+def _publish_lease_hooks(ctx: Any, site: Any) -> dict[str, Any]:
+    """``run_build``'s admission hooks for a publish: while the build waits for a memory
+    lease the Site row reads ``queued`` / ``waiting_for_capacity`` (clock re-stamped, so
+    the wait never reads as stale), then ``building`` once admitted. Both writes are
+    conditional on the row still naming this job, so a newer publish is never clobbered."""
+    job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+
+    async def on_wait() -> None:
+        await sites_service.mark_build_waiting(site, job_id=job_id, reason=capacity.WAITING_REASON)
+
+    async def on_admit() -> None:
+        await sites_service.mark_build_admitted(site, job_id=job_id)
+
+    return {"on_lease_wait": on_wait, "on_lease_admit": on_admit}
 
 
 async def _publish_capacity_wait(ctx: Any, site: Any, site_id: str, attempts_left: int) -> None:
@@ -1065,11 +1166,16 @@ class PreviewBuildEnqueue:
     ``reason`` is populated on ``failed`` only, and carries a RUNG — never stderr. The
     same rule ``Site.build_reason`` follows, for the same reason: this value crosses to a
     client, and a build's error text is the user's own content.
+
+    ``previous_attempt`` is ``True`` when that ``failed`` is a stored infrastructure
+    result this call did not retry (budget spent, a forced retry inside its guard, a
+    sticky image failure without force): an earlier attempt's outcome, not this one's.
     """
 
     job_id: str
     status: str
     reason: str | None = None
+    previous_attempt: bool = False
 
 
 def _preview_job_id(pocket_id: str, content_hash: str) -> str:
@@ -1089,6 +1195,95 @@ def _preview_job_id(pocket_id: str, content_hash: str) -> str:
     return f"site-preview-{pocket_id}-{content_hash}"
 
 
+#: How much of a raised job's message reaches a log line.
+_RAISED_LOG_CAP = 300
+#: arq's ``JobExecutionFailed`` text when a job is picked up past ``max_tries``.
+_MAX_TRIES_TEXT = "retries exceeded"
+#: (job id, finish time) pairs whose raise was already logged by this process.
+_LOGGED_RAISES: dict[tuple[str, Any], None] = {}
+_LOGGED_RAISES_CAP = 1024
+
+
+def raised_job_reason(exc: BaseException | None, *, superseded: bool = False) -> str:
+    """The ``"<rung>:<cause>"`` for a preview / html-verify job that RAISED ``exc``.
+
+    * ``TimeoutError`` (arq's ``asyncio.wait_for`` hit the function timeout) →
+      ``timed_out:job_timeout``.
+    * ``JobExecutionFailed("max N retries exceeded")`` → ``sandbox_unavailable:capacity``.
+      Only a capacity ``Retry`` spends a try on these functions, so arq refusing the
+      next pickup is a capacity wait that ran out (a worker restart mid-wait re-runs
+      the job and spends one more, which is how the last try never gets to settle).
+    * :class:`SandboxImageBuildFailedError` → ``sandbox_unavailable:image_build_failed``.
+    * any other :class:`SandboxUnavailableError` → ``sandbox_unavailable:no_sandbox``.
+    * ``CancelledError`` → :data:`SUPERSEDED_REASON` only when ``superseded`` (the
+      caller checked :func:`was_superseded`), else :data:`JOB_CANCELLED_REASON`.
+    * anything else → ``job_crashed:unhandled_exception``.
+    """
+    if isinstance(exc, asyncio.CancelledError):
+        return SUPERSEDED_REASON if superseded else JOB_CANCELLED_REASON
+    if isinstance(exc, TimeoutError):
+        return capacity.JOB_TIMEOUT_REASON
+    if isinstance(exc, JobExecutionFailed) and _MAX_TRIES_TEXT in str(exc):
+        return f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}"
+    if isinstance(exc, SandboxImageBuildFailedError):
+        return IMAGE_BUILD_FAILED_REASON
+    if isinstance(exc, SandboxUnavailableError):
+        return f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.NO_SANDBOX_CAUSE}"
+    return capacity.JOB_CRASHED_REASON
+
+
+def _log_raised_result(job_id: str, info: Any, *, superseded: bool = False) -> None:
+    """WARNING, once per job result in this process, naming what a failed job raised:
+    class and redacted, capped message. The worker's traceback is in the worker log
+    (:func:`_logs_its_raise`); this line is what the API side sees."""
+    key = (job_id, getattr(info, "finish_time", None))
+    if key in _LOGGED_RAISES:
+        return
+    if len(_LOGGED_RAISES) >= _LOGGED_RAISES_CAP:
+        _LOGGED_RAISES.pop(next(iter(_LOGGED_RAISES)))
+    _LOGGED_RAISES[key] = None
+    exc = info.result
+    logger.warning(
+        "sites.preview: job %s raised %s (reported as %s): %s",
+        job_id,
+        type(exc).__name__,
+        raised_job_reason(exc, superseded=superseded),
+        capacity.redact(str(exc), cap=_RAISED_LOG_CAP),
+    )
+
+
+def _logs_its_raise(lane: str) -> Any:
+    """Log a job's unexpected raise with its traceback before arq records it.
+
+    arq stores the exception and logs it on its own logger, which our log pipeline does
+    not surface, so a crash used to be visible nowhere. ``Retry`` (a capacity wait),
+    cancellation (an abort, arq's timeout, a worker shutdown) and
+    :class:`SandboxUnavailableError` (already logged where it is raised) pass through.
+
+    arq's timeout reaches the body as a cancellation, so a ``TimeoutError`` escaping it is
+    OUR code's (an SDK call or await with its own deadline). It is re-raised as a
+    ``RuntimeError`` from the original, so ``timed_out:job_timeout`` only ever means
+    arq's limit and this reads as ``job_crashed``."""
+
+    def wrap(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def run(ctx: Any, pocket_id: str, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(ctx, pocket_id, *args, **kwargs)
+            except (Retry, SandboxUnavailableError):
+                raise
+            except Exception as exc:
+                job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+                logger.exception("sites.%s: job %s for pocket %s crashed", lane, job_id, pocket_id)
+                if isinstance(exc, TimeoutError):
+                    raise RuntimeError("the job body raised TimeoutError") from exc
+                raise
+
+        return run
+
+    return wrap
+
+
 async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]:
     """Read a REFUSED enqueue: is that id an in-flight build, or one that already ended?
 
@@ -1098,6 +1293,8 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
     Three answers, and the middle one is why this function exists at all:
 
       * still queued / running → ``building``. The polling case, and the common one.
+        A running job still waiting for a memory lease (``admission.is_waiting``) reads
+        ``queued`` / ``waiting_for_capacity``, the same as one deferred for capacity.
       * COMPLETE → the store missed, so whatever that job did it did not leave a usable
         artifact: report ``failed`` with its rung. Reporting ``building`` here would spin
         a client forever on a build that is over; re-enqueueing would rebuild identical
@@ -1111,16 +1308,20 @@ async def _preview_job_outcome(pool: Any, job_id: str) -> tuple[str, str | None]
         # Nothing on this lane enqueues with a delay, so a deferred job is one that
         # ``preview_capacity_outcome`` put back to wait for a Daytona slot.
         return "queued", capacity.WAITING_REASON
+    if status is JobStatus.in_progress and await admission.is_waiting(pool, label_value(job_id)):
+        # Running, but still queued for room in the sites memory budget.
+        return "queued", capacity.WAITING_REASON
     if status is not JobStatus.complete:
         return "building", None
     info = await job.result_info()
     if info is None:
         return "building", None
     if not info.success:
-        # The job raised. ``run_site_preview_build`` only re-raises for a sandbox it
-        # never reached, and the exception text can name paths, so the rung is all that
-        # travels.
-        return "failed", f"{RUNG_SANDBOX_UNAVAILABLE}:job_raised"
+        # The job raised. Report what it raised; the exception text can name paths, so
+        # only the rung travels, and the class + redacted text go to the log.
+        superseded = await _result_superseded(pool, job_id, info)
+        _log_raised_result(job_id, info, superseded=superseded)
+        return "failed", raised_job_reason(info.result, superseded=superseded)
     result = info.result
     if isinstance(result, dict):
         return str(result.get("status") or "failed"), result.get("reason")
@@ -1283,6 +1484,7 @@ def _scaffold_error_entry(exc: BaseException) -> dict[str, Any]:
     return {"layer": "build", "code": "scaffold_failed", "message": type(exc).__name__}
 
 
+@_logs_its_raise("preview")
 async def run_site_preview_build(
     ctx: dict[str, Any],
     pocket_id: str,
@@ -1326,10 +1528,11 @@ async def run_site_preview_build(
     store (tests).
 
     NEVER RAISES FOR A BUILD OUTCOME, matching the publish job: a failed build, a timeout
-    and a lost sandbox are results. It DOES re-raise when the sandbox could not be reached
-    at all, after the settlement is already lost to the raise — the worker log is where
-    that condition belongs, and ``_preview_job_outcome`` maps the failed job back to the
-    ``sandbox_unavailable`` rung.
+    and a lost sandbox are results. It DOES raise :class:`SandboxUnavailableError` when
+    the sandbox could not be reached at all — the worker log is where that condition
+    belongs, and ``_preview_job_outcome`` maps it back to ``sandbox_unavailable:no_sandbox``.
+    Any other raise is logged with its traceback (:func:`_logs_its_raise`) and read back
+    as ``job_crashed`` (:func:`raised_job_reason`).
     """
     if normalize_engine(engine) == "project":
         # The project engine has no scaffold and its own bundle/record shape.
@@ -1431,12 +1634,13 @@ async def run_site_preview_build(
                 image=browser_check.verify_image(),
                 after_build=_after_build,
                 on_artifact=_on_artifact,
+                labels=sandbox_labels(ctx, pocket_id),
             )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
                 return await preview_capacity_outcome(ctx, pocket_id, content_hash, lane="preview")
             logger.exception("sites.preview: no sandbox for pocket %s", pocket_id)
-            raise
+            raise SandboxUnavailableError.wrapping(exc) from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1503,6 +1707,7 @@ async def run_site_preview_build(
     return {"status": "built", "reason": settlement.reason, **report}
 
 
+@_logs_its_raise("verify")
 async def run_site_html_verify(
     ctx: dict[str, Any],
     pocket_id: str,
@@ -1521,8 +1726,9 @@ async def run_site_html_verify(
     ``paw.dependencies.json``), upload it to a fresh sandbox, run the harness, tear the
     sandbox down (``browser_check.run_standalone``).
 
-    Re-raises when no sandbox could be created, like the preview job, so a waiting
-    verify reads ``sandbox_unavailable`` off the failed job.
+    Raises :class:`SandboxUnavailableError` when no sandbox could be created, like the
+    preview job, so a waiting verify reads ``sandbox_unavailable:no_sandbox`` off the
+    failed job.
     """
     from pocketpaw_ee.sites import browser_check
 
@@ -1550,14 +1756,19 @@ async def run_site_html_verify(
         if not files:
             return {"status": "failed", "reason": f"{RUNG_SCAFFOLD_EMPTY}:no_files_generated"}
         try:
-            browser = await standalone(files, static_rel=static_output_rel("html"), client=_client)
+            browser = await standalone(
+                files,
+                static_rel=static_output_rel("html"),
+                client=_client,
+                labels=sandbox_labels(ctx, pocket_id),
+            )
         except Exception as exc:
             if capacity.is_capacity_error(exc):
                 return await preview_capacity_outcome(
                     ctx, pocket_id, content_hash, lane="html_verify"
                 )
             logger.exception("sites.verify: no sandbox for html pocket %s", pocket_id)
-            raise
+            raise SandboxUnavailableError.wrapping(exc) from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1569,6 +1780,18 @@ async def run_site_html_verify(
     )
     _write_sandbox_report(pocket_id, content_hash, report, _verify_store)
     return {"status": "checked", "reason": f"browser:{browser.status}", **report}
+
+
+def sandbox_labels(ctx: Any, pocket_id: str) -> dict[str, str]:
+    """Daytona labels naming the pocket and arq job a sandbox belongs to.
+
+    ``paw_job`` lets a re-run of the same job delete the box its first attempt left
+    (``sandbox_reaper.delete_job_leftovers``), and lets an operator map a box in the
+    Daytona console back to a job. Empty values are left out.
+    """
+    job_id = ctx.get("job_id") if isinstance(ctx, dict) else None
+    labels = {"paw_pocket": pocket_id, "paw_job": str(job_id or "")}
+    return {k: v for k, v in labels.items() if v}
 
 
 def _log_queue_wait(lane: str, pocket_id: str, ctx: Any) -> None:
@@ -1597,6 +1820,9 @@ SUPERSEDED_REASON = "superseded"
 _CURRENT_JOB_KEY = "paw:sites:preview-current:{pocket_id}"
 #: Long enough to outlive any job on this lane; the key is only a supersede pointer.
 _CURRENT_JOB_TTL_SECONDS = 3600
+#: Set by :func:`_supersede_previous_job` on the job it aborted (value: the pocket id),
+#: so a stored ``CancelledError`` can tell a real supersede from any other cancel.
+_SUPERSEDED_JOB_KEY = "paw:sites:preview-superseded:{job_id}"
 
 
 async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str | None:
@@ -1620,6 +1846,15 @@ async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str
         previous = previous.decode("utf-8", "replace")
     if not previous or previous == job_id:
         return None
+    # The record goes in BEFORE the abort: the worker can cancel the job inside the
+    # abort's wait, and a reader then must already find it. It is only read for a
+    # stored CancelledError, so a record for an abort that never lands is harmless.
+    try:
+        await pool.set(
+            _SUPERSEDED_JOB_KEY.format(job_id=previous), pocket_id, ex=_CURRENT_JOB_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("sites.preview: no supersede record for %s", previous, exc_info=True)
     try:
         await Job(previous, pool, _queue_name=SITE_BUILD_QUEUE_NAME).abort(timeout=0.01)
     except TimeoutError:
@@ -1634,6 +1869,32 @@ async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str
         job_id,
     )
     return previous
+
+
+def _text(value: Any) -> str:
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
+
+
+async def was_superseded(pool: Any, job_id: str) -> bool:
+    """True only when :func:`_supersede_previous_job` aborted ``job_id`` AND the job is
+    not its pocket's current one again (an undo can bring a render back, and arq can then
+    abort the new run before start on the stale mark). Any other cancel (a worker
+    shutdown, a deploy) is not a newer edit. Never raises; unreadable reads False."""
+    try:
+        pocket_id = _text(await pool.get(_SUPERSEDED_JOB_KEY.format(job_id=job_id)))
+        if not pocket_id:
+            return False
+        current = _text(await pool.get(_CURRENT_JOB_KEY.format(pocket_id=pocket_id)))
+    except Exception:  # noqa: BLE001
+        return False
+    return current != job_id
+
+
+async def _result_superseded(pool: Any, job_id: str, info: Any) -> bool:
+    """:func:`was_superseded` for a stored result that is a ``CancelledError``."""
+    if info.success or not isinstance(info.result, asyncio.CancelledError):
+        return False
+    return await was_superseded(pool, job_id)
 
 
 async def _preview_superseded(ctx: Any, pocket_id: str) -> bool:
@@ -1699,18 +1960,175 @@ async def preview_capacity_outcome(
     return {"status": "failed", "reason": reason, **report}
 
 
-async def _clear_aborted_result(pool: Any, job_id: str) -> bool:
-    """Free a job id whose last run was ABORTED (superseded), so the same render can be
-    queued again — an undo back to that source must build, not read "failed" for the
-    hour arq keeps the result. ``True`` when a result was cleared. Never raises."""
+#: How many times one job id's stored result may be cleared and re-queued in a window,
+#: per kind (:func:`_retry_kind`). A job that RAISED may be a deterministic fault (a code
+#: bug, a bad verify image, a Daytona 4xx, an arq timeout the site's build causes), so it
+#: gets two more tries. A settled ``sandbox_unavailable:*`` gets three: under a full org
+#: each new job already waits through the capacity budget, and the cap stops a
+#: permanently broken Daytona config from looping. Spent → the failure is reported.
+RETRY_LIMITS: dict[str, int] = {"raised": 2, "sandbox_unavailable": 3}
+#: The window the per-id retry counter lives for: arq's result lifetime, so a render
+#: that is still failing an hour later gets a fresh budget.
+RETRY_WINDOW_SECONDS = 3600
+_RETRY_COUNTER_PREFIX = "sites:preview-retry:"
+#: An explicit build clears an infra result at most once per pocket in this window
+#: (:func:`_claim_forced_retry`), so an agent calling it in a loop cannot open a sandbox
+#: create per call when the failure settles in under a second.
+FORCE_GUARD_SECONDS = 15
+_FORCE_GUARD_PREFIX = "sites:preview-force:"
+
+
+def _retry_kind(info: Any, *, superseded: bool = False) -> str | None:
+    """Which retry rule a stored result falls under, or ``None`` for none (sticky).
+
+      * ``"aborted"``: superseded by a newer edit (a ``CancelledError`` the caller found
+        :func:`was_superseded`). The source came back to this render (an undo), so it is
+        wanted after all. Not budgeted: an abort only happens when another job took the
+        pocket.
+      * ``"raised"``: the job raised anything else (a crash, arq's timeout, a sandbox it
+        never got, a cancel nothing superseded). Budgeted (:data:`RETRY_LIMITS`).
+      * ``"sandbox_unavailable"``: it settled ``failed`` under that rung (capacity stayed
+        full, no sandbox, generator missing), or arq refused it past ``max_tries`` after
+        capacity retries (read as ``sandbox_unavailable:capacity``). The site never ran.
+        Budgeted.
+
+    ``sandbox_unavailable:image_build_failed``, raised or settled, is sticky: Daytona has
+    cached a failed build of the box image, so a retry fails the same way at once (only
+    an explicit build retries it, :func:`_forced_kind`). Anything else, above all a
+    failure of the site's own code (``build_failed``, ``scaffold_failed``, …), is sticky:
+    rebuilding identical inputs would fail again."""
+    if not info.success:
+        if isinstance(info.result, asyncio.CancelledError) and superseded:
+            return "aborted"
+        reason = raised_job_reason(info.result)
+        if reason == IMAGE_BUILD_FAILED_REASON:
+            return None
+        if reason == f"{RUNG_SANDBOX_UNAVAILABLE}:{capacity.CAPACITY_CAUSE}":
+            return "sandbox_unavailable"
+        return "raised"
+    result = info.result
+    if not isinstance(result, dict) or result.get("status") != "failed":
+        return None
+    reason = str(result.get("reason") or "")
+    if reason == IMAGE_BUILD_FAILED_REASON:
+        return None
+    if reason.split(":", 1)[0] == RUNG_SANDBOX_UNAVAILABLE:
+        return "sandbox_unavailable"
+    return None
+
+
+def _forced_kind(info: Any, *, superseded: bool = False) -> str | None:
+    """:func:`_retry_kind`, plus ``image_build_failed``, which only an explicit build
+    retries: the cached image may have been fixed since (a rev bump, a Daytona fix)."""
+    kind = _retry_kind(info, superseded=superseded)
+    if kind is not None:
+        return kind
+    reason = (
+        raised_job_reason(info.result)
+        if not info.success
+        else info.result.get("reason")
+        if isinstance(info.result, dict)
+        else None
+    )
+    return "image_build_failed" if reason == IMAGE_BUILD_FAILED_REASON else None
+
+
+def _retry_counter_key(job_id: str) -> str:
+    """The retry counter for ``job_id`` under the current sandbox image rev, so a rev bump
+    (the fix for a bad cached image) starts every render on a fresh budget."""
+    from pocketpaw_ee.cloud.daytona.image import image_rev
+
+    return f"{_RETRY_COUNTER_PREFIX}{image_rev()}:{job_id}"
+
+
+async def _claim_forced_retry(pool: Any, pocket_id: str) -> bool:
+    """Take the pocket's forced-retry slot (Redis ``SET NX EX`` for
+    :data:`FORCE_GUARD_SECONDS`). ``False`` inside the window or when the pool cannot do
+    it, which the caller reads as "do not force", like :func:`_spend_retry`."""
     try:
-        info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
-        if info is None or info.success or not isinstance(info.result, asyncio.CancelledError):
-            return False
-        await pool.delete(result_key_prefix + job_id)
+        key = _FORCE_GUARD_PREFIX + pocket_id
+        return bool(await pool.set(key, "1", nx=True, ex=FORCE_GUARD_SECONDS))
     except Exception:  # noqa: BLE001
         return False
-    return True
+
+
+async def _spend_retry(pool: Any, job_id: str, kind: str) -> bool:
+    """Count one clear of ``job_id`` (Redis INCR, TTL :data:`RETRY_WINDOW_SECONDS` set on
+    the first) and say whether it is within :data:`RETRY_LIMITS`. Raises when the pool
+    has no counter, which the caller reads as "do not retry"."""
+    key = _retry_counter_key(job_id)
+    count = int(await pool.incr(key))
+    if count == 1:
+        await pool.expire(key, RETRY_WINDOW_SECONDS)
+    return count <= RETRY_LIMITS[kind]
+
+
+async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
+    """Free a job id whose stored result is retryable (:func:`_retry_kind`), so the same
+    render can be queued again instead of reading "failed" for the hour arq keeps the
+    result. ``True`` when a result was cleared. Never raises.
+
+    No loop follows from this. Only a COMPLETE job leaves a result, so a render that is
+    queued, deferred for capacity or running is never cleared, and arq refuses a second
+    job with the same id: every poll while the new job waits attaches to it. And the
+    budgeted kinds are capped per id per window (:func:`_spend_retry`); without a Redis
+    counter they are not retried at all. Past the cap the failure is reported as is."""
+    cleared, _kept = await _clear_or_keep(pool, job_id)
+    return cleared
+
+
+async def _clear_or_keep(
+    pool: Any, job_id: str, *, force_pocket: str | None = None, stale_success: bool = False
+) -> tuple[bool, bool]:
+    """:func:`_clear_retryable_result` for the preview lane: ``(cleared, kept)``, where
+    ``kept`` means an infrastructure result stayed (the caller replays an earlier attempt).
+
+    ``force_pocket`` (an explicit build) clears any :func:`_forced_kind` result without
+    spending the budget, once per pocket per guard window (:func:`_claim_forced_retry`);
+    inside the window, or when the guard is unavailable, the budget rule applies as usual.
+
+    ``stale_success`` (the caller found that render's preview files gone, e.g. purged on
+    publish) clears a SUCCESSFUL ``built`` result too: it describes files that no longer
+    exist, so replaying it would answer ``built`` with nothing to open. The caller bounds
+    how often it asks (``service._claim_preview_retry``).
+    """
+    try:
+        info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
+        if (
+            stale_success
+            and info is not None
+            and info.success
+            and isinstance(info.result, dict)
+            and info.result.get("status") == "built"
+        ):
+            logger.info("sites.preview: %s built files are gone; clearing its result", job_id)
+            await pool.delete(result_key_prefix + job_id)
+            return True, False
+        sup = info is not None and await _result_superseded(pool, job_id, info)
+        kind = None if info is None else _retry_kind(info, superseded=sup)
+        forced = (
+            None if info is None or force_pocket is None else _forced_kind(info, superseded=sup)
+        )
+        if forced not in (None, "aborted") and await _claim_forced_retry(pool, force_pocket):
+            if not info.success:
+                _log_raised_result(job_id, info, superseded=sup)
+            logger.info("sites.preview: explicit build clears %s result for %s", forced, job_id)
+            await pool.delete(result_key_prefix + job_id)
+            return True, False
+        if kind is None:
+            return False, info is not None and _forced_kind(info, superseded=sup) is not None
+        if not info.success and kind != "aborted":
+            _log_raised_result(job_id, info, superseded=sup)
+        if kind != "aborted" and not await _spend_retry(pool, job_id, kind):
+            last = type(info.result).__name__ if not info.success else info.result.get("reason")
+            logger.warning(
+                "sites.preview: %s retry budget spent for %s (last: %s)", kind, job_id, last
+            )
+            return False, True
+        await pool.delete(result_key_prefix + job_id)
+    except Exception:  # noqa: BLE001
+        return False, False
+    return True, False
 
 
 def html_verify_job_id(pocket_id: str, content_hash: str) -> str:
@@ -1744,7 +2162,9 @@ async def enqueue_html_verify(
         )
 
     job = await _enqueue()
-    if job is None and await _clear_aborted_result(pool, job_id):
+    # Same retry rule as the preview lane: an aborted or infrastructure-failed result is
+    # freed and queued again; anything else attaches to the job that owns the id.
+    if job is None and await _clear_retryable_result(pool, job_id):
         job = await _enqueue()
     if job is None:
         return PreviewBuildEnqueue(job_id=job_id, status="building")
@@ -1760,20 +2180,27 @@ async def wait_for_preview_result(
     ``arq.jobs.Job.result`` on :data:`SITE_BUILD_QUEUE_NAME`: raises ``TimeoutError``
     when the job does not finish inside ``timeout`` (the job keeps running and its report
     lands in ``verify_store`` for the next call), and re-raises the job's own exception
-    when the job failed — which for this lane means no sandbox could be created. Looked up
+    when the job failed (:func:`raised_job_reason` names it). Looked up
     on the module by ``verify`` so a test can substitute it without faking arq's Redis.
     """
     job = Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME)
     try:
         result = await job.result(timeout=timeout, poll_delay=poll_delay)
     except asyncio.CancelledError:
-        # arq re-raises an ABORTED job's CancelledError here. That job was superseded
-        # by a newer edit of the pocket; it is not this task being cancelled, which
-        # ``cancelling()`` tells apart (a real cancellation still propagates).
+        # arq re-raises a cancelled job's CancelledError here; it is not this task being
+        # cancelled, which ``cancelling()`` tells apart (a real cancellation still
+        # propagates). Superseded only when a newer edit really replaced the job.
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise
-        return _superseded_result()
+        if await was_superseded(pool, job_id):
+            return _superseded_result()
+        cancelled = {"status": "unverified", "reason": JOB_CANCELLED_REASON}
+        return {
+            "status": "failed",
+            "reason": JOB_CANCELLED_REASON,
+            "layers": {"build": cancelled, "browser": cancelled},
+        }
     if isinstance(result, dict):
         return result
     return {"status": "failed", "reason": "preview_result_unreadable"}
@@ -1786,9 +2213,17 @@ async def enqueue_preview_build(
     engine: str,
     generator_input: dict[str, Any],
     timeout_seconds: int | None = None,
+    force: bool = False,
+    rebuild_stale: bool = False,
     _pool_override: Any = None,
 ) -> PreviewBuildEnqueue:
     """Queue a preview build for one render, or report the one already running.
+
+    ``force`` marks an EXPLICIT build request (the agent's ``run_site_build``), never a
+    poll or a write-triggered verify: a stored infrastructure failure is retried even past
+    the poll budget (:func:`_clear_or_keep`). The site's own failures stay sticky.
+    ``rebuild_stale`` says the caller found this render built but its preview files gone:
+    a stored success result is freed and the build queued again.
 
     No claim write, because there is no row to claim: the deterministic job id IS the
     single-flight guard (see :func:`_preview_job_id`). arq refuses a duplicate id by
@@ -1826,10 +2261,19 @@ async def enqueue_preview_build(
         )
 
     job = await _enqueue()
-    # A render whose last job was aborted as superseded is queued again, not reported
-    # as failed: the source came back to it (an undo), so it is wanted after all.
-    if job is None and await _clear_aborted_result(pool, job_id):
-        job = await _enqueue()
+    # A render whose last job was aborted as superseded, or failed for infrastructure
+    # (``sandbox_unavailable:*``), is queued again rather than reported failed: the site
+    # was never at fault. A failure of the site's own code stays sticky below.
+    kept = False
+    if job is None:
+        cleared, kept = await _clear_or_keep(
+            pool,
+            job_id,
+            force_pocket=pocket_id if force else None,
+            stale_success=rebuild_stale,
+        )
+        if cleared:
+            job = await _enqueue()
     if job is None:
         status, reason = await _preview_job_outcome(pool, job_id)
         logger.info(
@@ -1838,7 +2282,12 @@ async def enqueue_preview_build(
             content_hash[:12],
             status,
         )
-        return PreviewBuildEnqueue(job_id=job_id, status=status, reason=reason)
+        return PreviewBuildEnqueue(
+            job_id=job_id,
+            status=status,
+            reason=reason,
+            previous_attempt=kept and status == "failed",
+        )
 
     logger.info(
         "sites.preview: queued build %s for pocket %s (%ds budget)", job_id, pocket_id, timeout
@@ -1850,6 +2299,7 @@ async def enqueue_preview_build(
 __all__ = [
     "ARQ_FUNCTION_NAME",
     "BUILDABLE_ENGINES",
+    "FORCE_GUARD_SECONDS",
     "HTML_VERIFY_ARQ_FUNCTION_NAME",
     "OUT_OF_SANDBOX_MARGIN_SECONDS",
     "PREVIEW_ARQ_FUNCTION_NAME",
@@ -1857,18 +2307,24 @@ __all__ = [
     "RUNG_ENGINE_NOT_BUILDABLE",
     "RUNG_DEPLOY_FAILED",
     "RUNG_ENQUEUE_FAILED",
+    "RUNG_JOB_CRASHED",
     "RUNG_PREVIEW_UNREADABLE",
+    "IMAGE_BUILD_FAILED_REASON",
+    "JOB_CANCELLED_REASON",
     "RUNG_SANDBOX_UNAVAILABLE",
     "RUNG_SCAFFOLD_EMPTY",
     "RUNG_SCAFFOLD_FAILED",
     "SKIPPED_TREE_DIRS",
     "BuildSettlement",
     "PreviewBuildEnqueue",
+    "SandboxImageBuildFailedError",
+    "SandboxUnavailableError",
     "enqueue_html_verify",
     "enqueue_preview_build",
     "html_verify_job_id",
     "enqueue_site_build",
     "is_buildable_engine",
+    "raised_job_reason",
     "read_generated_tree",
     "resolve_build_settlement",
     "run_site_build",
@@ -1878,4 +2334,5 @@ __all__ = [
     "site_build_job_timeout_seconds",
     "site_preview_job_timeout_seconds",
     "wait_for_preview_result",
+    "was_superseded",
 ]

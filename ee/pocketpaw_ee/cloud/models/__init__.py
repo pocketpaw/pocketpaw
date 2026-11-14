@@ -280,6 +280,7 @@ from pocketpaw_ee.cloud.models.integration import (
     SiteOrder,
 )
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
+from pocketpaw_ee.cloud.models.launch_controls import LaunchControlsDoc
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
@@ -317,12 +318,26 @@ from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
+from pocketpaw_ee.cloud.models.site_ai import (
+    SiteAiBudgetDoc,
+    SiteAiCallDoc,
+    SiteAiCounterDoc,
+    SiteAiPresetDoc,
+    SiteAiSettingsDoc,
+    SiteAiTranscriptDoc,
+)
+from pocketpaw_ee.cloud.models.site_dashboard import (
+    SiteDashboard,
+    SiteDashboardJob,
+    SiteDashboardRevision,
+)
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_do_teardown import SiteDoTeardown
 from pocketpaw_ee.cloud.models.site_draft_worker import SiteDraftWorker
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea
@@ -338,6 +353,7 @@ from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
+from pocketpaw_ee.cloud.models.waitlist import WaitlistEntry
 from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
@@ -515,6 +531,12 @@ __all__ = [
     "SiteExport",
     "SiteDomain",
     "SiteOriginClaim",
+    "SiteAiBudgetDoc",
+    "SiteAiCallDoc",
+    "SiteAiCounterDoc",
+    "SiteAiPresetDoc",
+    "SiteAiSettingsDoc",
+    "SiteAiTranscriptDoc",
     "SiteRateCounter",
     "SiteSecret",
     "IntegrationConnection",
@@ -694,6 +716,14 @@ def get_all_documents():
         # concierge crawl reads it before fetching anyone's pages.
         SiteOriginClaim,
         SiteRateCounter,
+        # Site AI apps (settings, presets, budget, per-call reservations, spend
+        # counters). Only ``pocketpaw_ee.site_ai`` touches them.
+        SiteAiSettingsDoc,
+        SiteAiPresetDoc,
+        SiteAiBudgetDoc,
+        SiteAiCallDoc,
+        SiteAiCounterDoc,
+        SiteAiTranscriptDoc,
         # Per-site secrets (encrypted at rest). Only ``sites.site_secrets`` touches it.
         SiteSecret,
         # Sites integrations (vault, bindings, orders, webhook dedupe, newsletter).
@@ -712,6 +742,18 @@ def get_all_documents():
         # VS-4 — an address a renamed site gave up, held 30 days for its old
         # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
         ReleasedSlug,
+        # A renamed site's old address, 301ing to its current one until the hold
+        # ends. Only ``pocketpaw_ee.sites.slug_redirect`` reads/writes it.
+        SiteRedirect,
+        # A site's AI dashboards, their revisions and generation jobs. Only
+        # ``pocketpaw_ee.sites.dashboard_service`` touches them.
+        SiteDashboard,
+        SiteDashboardRevision,
+        SiteDashboardJob,
+        # Early-access launch switches (singleton) and the paused-signup waitlist.
+        # Only ``ee.cloud.launch_controls`` and ``ee.cloud.early_access`` touch them.
+        LaunchControlsDoc,
+        WaitlistEntry,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
         # ``ee.cloud.growth.service`` imports this doc directly (import-linter

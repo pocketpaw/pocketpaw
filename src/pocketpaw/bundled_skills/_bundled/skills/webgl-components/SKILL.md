@@ -6,25 +6,20 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 # WebGL Components
 
 <!--
-  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): constraint 2
-  rewritten. svelte and react sites declare `three` / `ogl` / `gsap` through
-  set_site_dependencies and import them client-side; get_effect returns an
-  effect's `needs` as `dependencies` there. Only a dynamic svelte site is still
-  dependency-free.
-
-  Updated: 2026-09-06 (feat/fx-skill-amendments): constraint 2 no longer says
-  libraries are impossible everywhere. It now sends the agent to the paw-fx
-  registry first (search_effects / get_effect) and carves out the html engine,
-  which has no build step and so ships vendored dependencies as written. The
-  svelte / react half of the rule (generator-owned package.json, dependency-free
-  effects only, hand-written GLSL otherwise) is unchanged, and so is constraint 1
-  (the static-site client-bundle prune).
+  Vendored from flornkm/skills (MIT). The PocketPaw note below is local: it says
+  where client JS runs on each Paw Sites engine and how a library gets declared,
+  and defers to pocketpaw-design-taste 2.C for when a canvas is worth it.
 -->
 
 > **PocketPaw note (read this first).** Vendored from
 > [flornkm/skills](https://github.com/flornkm/skills) (MIT) and true as written for
-> app UI. Two PocketPaw constraints come first and override anything below:
+> app UI. These PocketPaw constraints come first and override anything below:
 >
+> 0. **New sites are project sites.** A repo started from a paw-sites template
+>    runs its client JS normally. A library such as `three`, `ogl` or `gsap` goes
+>    in the template's `package.json`; build the scene client-side (`onMount`,
+>    `useEffect`, or a client-only island) over markup that already paints. Points
+>    1 and 2 below apply only to older single-engine sites reached on refine.
 > 1. **A Paw Site KEEPS its client bundle by default.** `keepsClientBundle`
 >    resolves from `sites_keep_client_bundle_default`, which is True, so the
 >    generator emits `csr = true` and `onMount`, `use:` actions,

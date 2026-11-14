@@ -1,9 +1,11 @@
 # tests/cloud/pockets/test_duplicate_site.py — duplicating a site pocket.
 #
-# ``pockets.service.duplicate_pocket`` copies exactly five authored fields
-# (engine, pattern, rippleSpec, source, keeps_client_bundle) into a new site
-# pocket the caller owns, through ``copy_site_snapshot``. These tests pin, per
-# site track, that the copy is faithful and independent, that the copy gets its
+# ``pockets.service.duplicate_pocket`` copies exactly the authored fields
+# (engine, pattern, rippleSpec, source, keeps_client_bundle, and the project part
+# of site_meta) into a new site pocket the caller owns, through
+# ``copy_site_snapshot``. These tests pin, per site track, that the copy is
+# faithful and independent, that only ``site_meta.project``'s template, framework
+# and recipes cross, that the copy gets its
 # own draft Site row and nothing else rides along (no sharing, no connectors),
 # that a private site stays private, that the copy is never less source-gated
 # than a new pocket (source stamp OR create-time stamp), that a successful copy
@@ -33,7 +35,7 @@ OTHER_WS = "w2"
 OWNER = "u1"
 STRANGER = "u2"
 
-SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle")
+SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle", "site_meta")
 
 SVELTE_SOURCE = {
     "src/routes/+page.svelte": "<h1>Bakery</h1>\n",
@@ -60,6 +62,14 @@ SITES = {
     "react": dict(engine="react", pattern="landing", source=REACT_SOURCE, keeps_client_bundle=True),
     "dynamic": dict(engine="svelte", pattern="dynamic", source=DYNAMIC_SOURCE),
     "ripple": dict(engine="ripple", pattern="landing", rippleSpec=RIPPLE_SPEC),
+    "project": dict(
+        engine="project",
+        pattern="landing",
+        source={"package.json": "{}", "src/index.ts": "export default {};\n"},
+        site_meta={
+            "project": {"template": "astro", "framework": "astro", "recipes": ["d1-drizzle"]}
+        },
+    ),
 }
 
 
@@ -125,6 +135,42 @@ async def test_copy_is_faithful_per_track(track: str) -> None:
     assert len(sites) == 1
     assert sites[0].pocket_id == wire["_id"]
     assert sites[0].deployed is False
+
+
+@pytest.mark.asyncio
+async def test_copy_carries_only_the_project_part_of_site_meta() -> None:
+    """A project copy keeps its starter and recipes; anything else stored under
+    ``site_meta`` (a site-specific id, a secret) never crosses."""
+    src = await _site(
+        engine="project",
+        source={"package.json": "{}"},
+        site_meta={
+            "project": {
+                "template": "next",
+                "framework": "next",
+                "recipes": ["better-auth", 7],
+                "d1_database_id": "db-of-the-original",
+            },
+            "secret_ref": "sk_live_original",
+        },
+    )
+
+    wire = await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+
+    copy = await PocketDoc.get(wire["_id"])
+    assert copy.site_meta == {
+        "project": {"template": "next", "framework": "next", "recipes": ["better-auth"]}
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site_meta", [None, {}, {"other": 1}, {"project": "astro"}])
+async def test_a_site_without_a_project_part_copies_no_site_meta(site_meta: Any) -> None:
+    src = await _site(engine="svelte", source=SVELTE_SOURCE, site_meta=site_meta)
+
+    wire = await pockets_service.duplicate_pocket(WS, OWNER, str(src.id), {})
+
+    assert (await PocketDoc.get(wire["_id"])).site_meta is None
 
 
 @pytest.mark.asyncio

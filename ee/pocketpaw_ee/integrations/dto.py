@@ -1,6 +1,6 @@
 # ee/pocketpaw_ee/integrations/dto.py: the wire shapes of the integrations API.
 #
-# Pinned by the Wave 0 wire contract and its Wave 1 addendum
+# Pinned by the Wave 0 wire contract and its Wave 1 / Wave 2 addenda
 # (docs/design/drafts/2026-10-13-sites-integrations.md in paw-workspace):
 # paw-enterprise and paw-sites' paw.js build against these field names and enum
 # values, so rename nothing; changes are additive. No view carries a token.
@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 SiteIntegrationStatus = Literal[
     "connected", "needs_connection", "needs_reconnect", "setup_required", "disabled"
@@ -44,6 +44,25 @@ class SettingsFieldView(BaseModel):
     multi: bool = False
     allowed_hosts: list[str] | None = None
     max_length: int | None = None
+    # "remote": the select's options load from
+    # GET /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options.
+    options_source: Literal["static", "remote"] = "static"
+    # Settings this remote select's options depend on: reload them when those change.
+    depends_on: list[str] | None = None
+
+
+class ConnectParamView(BaseModel):
+    """A value the owner gives before Connect (a Shopify shop domain typed in, a
+    Stripe account country picked from ``options``); the client sends it back as
+    ``ConnectBody.params[key]``, omitting an optional one left empty."""
+
+    key: str
+    label: str
+    placeholder: str = ""
+    type: Literal["text", "select"] = "text"
+    required: bool = True
+    options: list[SettingOptionView] | None = None
+    help: str | None = None
 
 
 class ProviderView(BaseModel):
@@ -57,6 +76,14 @@ class ProviderView(BaseModel):
     settings_fields: list[SettingsFieldView] = Field(default_factory=list)
     # False for builtin and embed kinds: nothing to connect, just link and configure.
     requires_connection: bool = False
+    # Asked for before Connect; empty for every provider that needs nothing.
+    connect_params: list[ConnectParamView] = Field(default_factory=list)
+    # False for a workspace-only grant no site may link (Figma): never offer it on
+    # a site's integrations list.
+    site_bindable: bool = True
+    # True when each member connects their own account and only its creator may
+    # use a grant (Figma): a teammate's connection is never "yours".
+    per_member: bool = False
 
 
 class ConnectionView(BaseModel):
@@ -69,6 +96,9 @@ class ConnectionView(BaseModel):
     site_count: int = 0
     # Owner-facing, e.g. "Finish setting up your Stripe account"; null when fine.
     attention: str | None = None
+    # Who connected it, and whether that is the requesting user.
+    created_by: str | None = None
+    mine: bool = False
 
 
 class SiteIntegrationView(BaseModel):
@@ -87,6 +117,14 @@ class OrderItemView(BaseModel):
     amount_minor: int
 
 
+class OrderRefundView(BaseModel):
+    id: str
+    amount_minor: int
+    # reserved (no answer from the provider yet) | pending | succeeded | failed
+    status: Literal["reserved", "pending", "succeeded", "failed"]
+    created_at: datetime | None = None
+
+
 class OrderView(BaseModel):
     id: str
     provider: str
@@ -97,6 +135,23 @@ class OrderView(BaseModel):
     customer_email: str | None = None
     items: list[OrderItemView] = Field(default_factory=list)
     created_at: datetime | None = None
+    # Refunds, ISO 4217 minor units. A partially refunded order stays "paid".
+    refunded_minor: int = 0
+    refundable_minor: int = 0
+    can_refund: bool = False
+    refunds: list[OrderRefundView] = Field(default_factory=list)
+
+
+class RefundBody(BaseModel):
+    """``POST .../orders/{order_id}/refunds``. No amount: everything still refundable.
+    The same ``idempotency_key`` again returns the first attempt's result."""
+
+    amount_minor: StrictInt | None = Field(default=None, ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class FieldOptionsView(BaseModel):
+    options: list[SettingOptionView] = Field(default_factory=list)
 
 
 class OrdersPage(BaseModel):
@@ -104,8 +159,23 @@ class OrdersPage(BaseModel):
     next_cursor: str | None = None
 
 
+class NewsletterSubscriberView(BaseModel):
+    email: str
+    # ISO-8601 in UTC with an offset; None for a row with no stamp.
+    subscribed_at: str | None = None
+
+
+class NewsletterSubscribers(BaseModel):
+    """A site's newsletter list at a glance: the total and the newest few."""
+
+    count: int = 0
+    latest: list[NewsletterSubscriberView] = Field(default_factory=list)
+
+
 class ConnectBody(BaseModel):
     pocket_id: str | None = None
+    # Values for the provider's ``connect_params`` (refused for providers with none).
+    params: dict[str, str] | None = Field(default=None, max_length=10)
 
 
 class ConnectResponse(BaseModel):

@@ -3,7 +3,8 @@
 # pins the per-run skill materializer that makes ``SurfaceProfile.skill_names``
 # LIVE for the claude_agent_sdk backend. Covers: filters to the named subset,
 # rejects unsafe slugs, produces a plugin-shaped dir (.claude-plugin/plugin.json
-# + skills/<slug>/SKILL.md), returns None on no match, and cleans up.
+# + skills/<slug>/SKILL.md), returns None on no match, cleans up, resolves
+# bundled skills, and the shared content-addressed, reference-counted dir.
 
 from __future__ import annotations
 
@@ -192,3 +193,158 @@ def test_bundled_fallback_is_inert_when_no_bundle_present(installed_skills, monk
 
     monkeypatch.setattr(materialize_mod, "_bundled_plugin_root", lambda: None, raising=False)
     assert materialize_run_skills(["code-react"]) is None
+
+
+# --- shared, content-addressed dirs ---------------------------------------
+# A warm Claude CLI is bound to the plugin path it connected with, so the dir
+# must not depend on the run: the same skills give the same path, references
+# are counted, and the dir goes only when the last holder releases it. A run id
+# (a session key full of ``:``) never reaches the path.
+
+_RUN_DIR_RE = r"^paw-run-skills-[0-9a-f]+$"
+
+_CLOUD_SESSION_KEY = (
+    "cloud:session:6ad37f5d6c7b32c8c231987c:69f88339dc8997d1f758cb60:u:69f88339dc8997d1f758cb5d"
+)
+
+
+def test_session_key_run_id_yields_legal_shared_dir(installed_skills):
+    """A colon-bearing session key still produces a legal dir, and the run id
+    does not change which dir the same skills land in."""
+    import re
+
+    root_a = materialize_run_skills(["github"], run_id="cloud:session:6ad37f5d:u:69f8")
+    root_b = materialize_run_skills(["github"], run_id=_CLOUD_SESSION_KEY)
+    try:
+        assert root_a is not None and root_a.is_dir()
+        assert ":" not in str(root_a.relative_to(root_a.parent.parent))
+        assert re.match(_RUN_DIR_RE, root_a.name), root_a.name
+        assert root_a == root_b
+    finally:
+        cleanup_run_skills(root_a)
+        cleanup_run_skills(root_b)
+    assert not root_a.exists()
+
+
+def test_dir_survives_until_last_reference_released(installed_skills):
+    """Two holders of the same skills share one dir; releasing one keeps it."""
+    first = materialize_run_skills(["github", "calendar-sync"])
+    second = materialize_run_skills(["calendar-sync", "github"])
+    assert first is not None and first == second
+    cleanup_run_skills(first)
+    assert (first / "skills" / "github" / "SKILL.md").is_file(), (
+        "releasing one reference removed a dir another holder still uses"
+    )
+    cleanup_run_skills(second)
+    assert not first.exists()
+
+
+def test_different_skill_sets_get_different_dirs(installed_skills):
+    a = materialize_run_skills(["github"])
+    b = materialize_run_skills(["github", "calendar-sync"])
+    try:
+        assert a is not None and b is not None and a != b
+    finally:
+        cleanup_run_skills(a)
+        cleanup_run_skills(b)
+
+
+def test_changed_skill_files_get_a_new_dir(installed_skills):
+    """Editing a skill yields a fresh dir; the old holder's dir is untouched."""
+    old = materialize_run_skills(["github"])
+    md = installed_skills.get_all()["github"].path
+    md.write_text(md.read_text(encoding="utf-8") + "\nmore\n", encoding="utf-8")
+    new = materialize_run_skills(["github"])
+    try:
+        assert old is not None and new is not None and old != new
+        assert old.exists() and "more" in (new / "skills" / "github" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+    finally:
+        cleanup_run_skills(old)
+        cleanup_run_skills(new)
+
+
+def test_damaged_dir_is_rebuilt_in_place(installed_skills):
+    """A dir whose manifest vanished (partial tmp reaping) is rebuilt at the
+    same path, so clients bound to that path see their skills again."""
+    root = materialize_run_skills(["github"])
+    try:
+        assert root is not None
+        (root / ".claude-plugin" / "plugin.json").unlink()
+        again = materialize_run_skills(["github"])
+        assert again == root
+        assert (root / ".claude-plugin" / "plugin.json").is_file()
+        cleanup_run_skills(again)
+    finally:
+        cleanup_run_skills(root)
+    assert not list(root.parent.glob(".staging-*")), "a staging dir leaked"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("abc-123_x.y", "abc-123_x.y"),
+        ("cloud:session:abc:u:def", "cloud-session-abc-u-def"),
+        (r'a/b\c*d?e"f<g>h|i', "a-b-c-d-e-f-g-h-i"),
+        ("::a::::b::", "a-b"),
+        ("..", ""),
+        ("", ""),
+        ("ünïcode key", "n-code-key"),
+    ],
+)
+def test_fs_safe_component(raw, expected):
+    from pocketpaw.skills.materialize import fs_safe_component
+
+    assert fs_safe_component(raw) == expected
+
+
+def test_fs_safe_component_caps_with_stable_hash():
+    from pocketpaw.skills.materialize import fs_safe_component
+
+    long_a = "x" * 100
+    long_b = "x" * 99 + "y"
+    out_a = fs_safe_component(long_a, max_len=48)
+    assert len(out_a) == 48
+    assert out_a == fs_safe_component(long_a, max_len=48)  # stable
+    assert out_a != fs_safe_component(long_b, max_len=48)  # distinguishable
+    assert fs_safe_component("short", max_len=48) == "short"
+
+
+def test_first_use_sweeps_dead_process_stores_and_own_staging(
+    installed_skills, tmp_path, monkeypatch
+):
+    """Stores left by dead processes and stale staging dirs in our own store are
+    removed at first use; a live process's store is left alone."""
+    import os
+
+    import psutil
+
+    from pocketpaw.skills import materialize as materialize_mod
+
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir()
+    monkeypatch.setattr(materialize_mod.tempfile, "gettempdir", lambda: str(tmp_root))
+    monkeypatch.setattr(materialize_mod, "_SWEPT", False, raising=False)
+
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 4
+    dead = tmp_root / f"paw-run-skills-p{dead_pid}"
+    (dead / "paw-run-skills-abc").mkdir(parents=True)
+    live = tmp_root / f"paw-run-skills-p{os.getppid()}"
+    live.mkdir()
+    unrelated = tmp_root / "paw-run-skills-legacy-name"
+    unrelated.mkdir()
+    own_staging = tmp_root / f"paw-run-skills-p{os.getpid()}" / ".staging-old"
+    own_staging.mkdir(parents=True)
+
+    root = materialize_run_skills(["github"])
+    try:
+        assert root is not None and root.is_dir()
+        assert not dead.exists(), "a dead process's store must be swept"
+        assert live.exists(), "a live process's store must be left alone"
+        assert unrelated.exists(), "names that are not a pid store must be left alone"
+        assert not own_staging.exists(), "stale staging dirs in our store must be swept"
+    finally:
+        cleanup_run_skills(root)

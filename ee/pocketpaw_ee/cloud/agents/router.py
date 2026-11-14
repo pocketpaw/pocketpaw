@@ -309,6 +309,10 @@ async def list_knowledge(
     before an owner attaches something private. It is a label, not a gate: it
     never changes what this endpoint returns to its (already owner/admin-scoped)
     caller, which the ``ensure_can_read`` visibility gate below still governs.
+
+    ``site_id`` / ``foreign`` name that site ("" / False when there is none). The
+    editor then renders the site's own knowledge view (``…/knowledge/index`` and
+    the source routes), so the agent and Paw Bar → Knowledge are one store.
     """
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
@@ -319,7 +323,14 @@ async def list_knowledge(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list knowledge: {exc}")
     visible = await agents_service.is_visible_to_site_visitors(agent_id)
-    return {"items": articles, "visible_to_site_visitors": visible}
+    # ponytail: a second widget scan when bound; fold into one lookup if it shows up.
+    site = await agents_service.bound_site(agent_id) if visible else {}
+    return {
+        "items": articles,
+        "visible_to_site_visitors": visible,
+        "site_id": site.get("site_id", ""),
+        "foreign": site.get("foreign", False),
+    }
 
 
 @router.get("/{agent_id}/knowledge/{article_id}")

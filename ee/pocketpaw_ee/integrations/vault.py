@@ -21,12 +21,20 @@
 #     bound sites. Nothing retries a dead grant.
 #   * No token in a view, an event, an exception message or a log line.
 #
-# ``store_grant`` saves a finished connect or resume flow. A resume names the
+# ``store_grant`` saves a finished connect or resume flow (a per-member provider's
+# reconnect matches the caller's own row only). A resume names the
 # connection it continues and updates that row in place, refusing a different
 # provider account. Non-secret provider state rides ``TokenGrant.meta`` into
 # ``connection.meta``; the view's ``attention`` is the provider's
 # ``connection_attention`` hook over the stored row. A provider with
 # ``refresh_with_meta`` gets that meta on ``refresh`` (Zoho's regional token host).
+#
+# STORED SECRETS. ``store_secret`` / ``read_secret`` keep a credential the owner
+# pasted rather than granted (a lead webhook URL) under the same encryption, keyed
+# by (workspace, provider, account_ref) so a re-store updates the row in place.
+# Rows of an internal provider (``providers.internal_ids``) are invisible to the
+# integrations routes: ``list_connections`` skips them and ``get_connection``
+# reads them as missing unless the caller passes ``internal=True``.
 
 from __future__ import annotations
 
@@ -40,7 +48,7 @@ from typing import Any
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound
 from pocketpaw_ee.integrations.dto import ConnectionView
-from pocketpaw_ee.integrations.providers import get_provider
+from pocketpaw_ee.integrations.providers import get_provider, internal_ids
 from pocketpaw_ee.integrations.providers.base import InvalidGrant, ProviderError, TokenGrant
 
 logger = logging.getLogger(__name__)
@@ -118,7 +126,9 @@ def attention(conn: Any) -> str | None:
     return str(text)[:200] if text else None
 
 
-def to_view(conn: Any, site_count: int = 0) -> ConnectionView:
+def to_view(conn: Any, site_count: int = 0, *, viewer_id: str = "") -> ConnectionView:
+    """The connection as ``viewer_id`` sees it (``mine`` when they created it)."""
+    created_by = str(getattr(conn, "created_by", "") or "") or None
     return ConnectionView(
         id=str(conn.id),
         provider=conn.provider,
@@ -128,11 +138,14 @@ def to_view(conn: Any, site_count: int = 0) -> ConnectionView:
         created_at=_utc(conn.createdAt),
         site_count=site_count,
         attention=attention(conn),
+        created_by=created_by,
+        mine=bool(viewer_id) and created_by == viewer_id,
     )
 
 
-async def get_connection(workspace_id: str, connection_id: str):
-    """The connection, or NotFound when missing or in another workspace."""
+async def get_connection(workspace_id: str, connection_id: str, *, internal: bool = False):
+    """The connection, or NotFound when missing, in another workspace, or an
+    internal provider's row and ``internal`` is False."""
     from beanie import PydanticObjectId
 
     try:
@@ -141,13 +154,18 @@ async def get_connection(workspace_id: str, connection_id: str):
         conn = None
     if conn is None or not workspace_id or conn.workspace != workspace_id:
         raise NotFound("integration_connection", connection_id)
+    if (conn.provider in internal_ids()) != internal:
+        raise NotFound("integration_connection", connection_id)
     return conn
 
 
 async def list_connections(workspace_id: str) -> list[Any]:
     doc = _doc()
     rows = await doc.find(doc.workspace == workspace_id, doc.status != "revoked").to_list()
-    return sorted(rows, key=lambda r: (r.provider, str(r.id)))
+    hidden = internal_ids()
+    return sorted(
+        (r for r in rows if r.provider not in hidden), key=lambda r: (r.provider, str(r.id))
+    )
 
 
 # ----------------------------------------------------------------- writes
@@ -175,12 +193,17 @@ async def store_grant(
                 "integrations.resume_mismatch", "That is a different account. Connect it instead."
             )
     elif grant.account_ref:
-        conn = await doc.find_one(
+        same_account = [
             doc.workspace == workspace_id,
             doc.provider == provider,
             doc.account_ref == grant.account_ref,
             doc.status != "revoked",
-        )
+        ]
+        if getattr(get_provider(provider), "per_member", False):
+            # A per-member grant (Figma) is its creator's: another member connecting
+            # the same account gets their own row, never this one's tokens.
+            same_account.append(doc.created_by == user_id)
+        conn = await doc.find_one(*same_account)
     if conn is None:
         conn = doc(workspace=workspace_id, provider=provider, created_by=user_id)
     conn.account_label = grant.account_label or conn.account_label or provider
@@ -195,6 +218,52 @@ async def store_grant(
     conn.refresh_lease_until = None
     await conn.save()
     return conn
+
+
+async def store_secret(
+    *,
+    workspace_id: str,
+    provider: str,
+    account_ref: str,
+    account_label: str,
+    secret: dict[str, str],
+    user_id: str = "",
+):
+    """Save a pasted credential (no OAuth, no expiry) as an active connection. The
+    live row with the same (workspace, provider, account_ref) is updated in place,
+    so storing twice never makes a second row."""
+    if not workspace_id or not provider or not account_ref:
+        raise ValueError("store_secret needs a workspace, a provider and an account_ref")
+    doc = _doc()
+    conn = await doc.find_one(
+        doc.workspace == workspace_id,
+        doc.provider == provider,
+        doc.account_ref == account_ref,
+        doc.status != "revoked",
+    )
+    if conn is None:
+        conn = doc(
+            workspace=workspace_id, provider=provider, account_ref=account_ref, created_by=user_id
+        )
+    conn.account_label = account_label[:200]
+    conn.token_ciphertext = crypto.encrypt_json(dict(secret))
+    conn.expires_at = None
+    conn.status = "active"
+    conn.last_error = ""
+    await conn.save()
+    return conn
+
+
+def read_secret(conn: Any) -> dict[str, str]:
+    """The stored credential of an active connection, else ``{}``. Never logged."""
+    if conn is None or conn.status != "active" or not conn.token_ciphertext:
+        return {}
+    try:
+        value = _tokens(conn)
+    except Exception:  # noqa: BLE001 - a key change: unusable, reads as unset
+        logger.warning("integrations: connection %s could not be decrypted", conn.id)
+        return {}
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
 
 
 async def mark_revoked(conn: Any) -> None:

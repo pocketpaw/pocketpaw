@@ -14,6 +14,9 @@
     }
   },
   "weather-forecast": {
-    "line": "{place, unit?: C|F, now?: {temp, condition, feelsLike?, humidity?, wind?}, days: [{day, condition, high, low, rainChance?, sunrise?, sunset?}] (1 to 14, first is today), hourly?: [{time, temp, condition, rainChance?}] (up to 48), note?}: a weather forecast. condition is sunny|partly-cloudy|cloudy|rain|heavy-rain|thunder|snow|fog|wind|night-clear. Unless a tool gave the numbers, note \"Sample forecast\"."
+    "line": "{place, unit?: C|F, now?: {temp, condition, feelsLike?, humidity?, wind?: text like \"14 km/h\"}, days: [{day, condition, high, low, rainChance?, sunrise?, sunset?}] (1 to 14, first is today), hourly?: [{time, temp, condition, rainChance?}] (up to 48), note?}: a weather forecast. condition is sunny|partly-cloudy|cloudy|rain|heavy-rain|thunder|snow|fog|wind|night-clear. Unless a tool gave the numbers, note \"Sample forecast\"."
+  },
+  "habit-tracker": {
+    "line": "{title?, habits: [{id,name,icon?,target_per_week:number}], week_start?: mon|sun, weeks?: number, seed?: Record<string,number[]>}: Habit tracker app: habits on a week grid the visitor ticks; streaks, weekly target rings, today %. Bind value. icon is read|run|walk|bike|gym|stretch|water|sleep|meditate|journal|code|music|veg|no-sugar|vitamins or left out, never an emoji."
   }
 }

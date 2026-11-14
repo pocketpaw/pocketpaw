@@ -215,5 +215,32 @@
     "tests": [
       "tests/ee/sites/test_foreign_grounding.py::test_a_target_that_never_finishes_answering_is_abandoned_on_the_clock"
     ]
+  },
+  {
+    "label": "sitemap walk keeps off-host sitemap URLs, so a robots.txt Sitemap: line can point the grounding crawl at another host",
+    "file": "ee/pocketpaw_ee/sites/sitemap.py",
+    "find": "        return [u for u in urls if (urlsplit(u).hostname or \"\") == host]",
+    "replace": "        return list(urls)",
+    "tests": [
+      "tests/ee/sites/test_foreign_grounding.py::test_an_off_host_or_doctype_sitemap_is_ignored"
+    ]
+  },
+  {
+    "label": "<main> no longer closes an unclosed menu, so every link after an unclosed <nav> ranks as a menu link",
+    "file": "ee/pocketpaw_ee/sites/url_crawler.py",
+    "find": "        if tag == \"main\" and self._menus_open:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_crawler_budget_knobs.py::test_link_scan_marks_only_links_inside_a_menu"
+    ]
+  },
+  {
+    "label": "menu links lose their rank, so /inscription in the header loses the budget to 30 event pages",
+    "file": "ee/pocketpaw_ee/sites/url_crawler.py",
+    "find": "                    rank = _RANK_MENU",
+    "replace": "                    rank = _RANK_LINK",
+    "tests": [
+      "tests/ee/sites/test_crawler_budget_knobs.py::test_ranked_crawl_reads_menu_links_before_shallower_body_links"
+    ]
   }
 ]

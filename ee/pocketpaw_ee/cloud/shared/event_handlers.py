@@ -96,15 +96,12 @@ async def _on_member_removed(data: dict) -> None:
     # Revoke pocket access
     from pocketpaw_ee.cloud.models.pocket import Pocket
 
-    pockets = await Pocket.find(
-        Pocket.workspace == workspace_id,
-        {"shared_with": user_id},
-    ).to_list()
-
-    for pocket in pockets:
-        if user_id in pocket.shared_with:
-            pocket.shared_with.remove(user_id)
-            await pocket.save()
+    # One atomic $pull, never a whole-document save: a save resends the pocket's
+    # stale ``source`` / ``rippleSpec`` over any edit that landed since the read.
+    await Pocket.get_pymongo_collection().update_many(
+        {"workspace": workspace_id, "shared_with": user_id},
+        {"$pull": {"shared_with": user_id}},
+    )
 
 
 async def _create_notification(

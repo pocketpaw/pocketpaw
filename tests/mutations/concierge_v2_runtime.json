@@ -88,7 +88,7 @@
   {
     "label": "the output filter is bypassed — raw deltas, code and all, reach the visitor",
     "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
-    "find": "                for piece in await fences.afeed(delta or \"\"):",
+    "find": "                for piece in await fences.afeed(think.feed(delta or \"\")):",
     "replace": "                for piece in [delta] if delta else []:",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_v2_output.py::test_v2_streams_the_fixed_line_instead_of_code",
@@ -861,6 +861,33 @@
     "tests": [
       "tests/cloud/test_paw_bar_card_streaming.py::test_what_the_client_trims_before_a_card_keeps_the_stream_checks_on",
       "tests/cloud/test_paw_bar_card_streaming.py::test_a_body_that_cannot_start_an_object_is_rejected_before_any_delta"
+    ]
+  },
+  {
+    "label": "the reply skips the think filter, so a reasoning model's thinking reaches the visitor",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                        for piece in await fences.afeed(think.feed(delta or \"\")):",
+    "replace": "                        for piece in await fences.afeed(delta or \"\"):",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_never_shows_the_models_thinking"
+    ]
+  },
+  {
+    "label": "a reply that is all thinking ends with nothing instead of unavailable",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                        raise ThinkingOnlyReply(\"the reply was all thinking\")",
+    "replace": "                        pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_thinking_that_never_closes_is_unavailable_not_shown"
+    ]
+  },
+  {
+    "label": "a 'Thinking Process' head with no opener is no longer treated as thinking",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "_THINK_HEADS = (*_THINK_OPENERS, \"Thinking Process\", \"Thinking process\")",
+    "replace": "_THINK_HEADS = _THINK_OPENERS",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_v2.py::test_v2_never_shows_the_models_thinking"
     ]
   }
 ]

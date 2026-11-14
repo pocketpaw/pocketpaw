@@ -13,9 +13,10 @@
 # hides); pagination; the Sites plan gate, size and count caps; that deleting a
 # template leaves its pockets alone; the source refusals; audit rows; and the
 # routes; and the screenshot copied onto the public asset rail (save, refresh,
-# delete purge, prefix isolation). The asset detector's per-shape tests: test_private_assets.py.
+# delete purge, prefix isolation); ``show_creator`` on by default for a new
+# save and kept by a PATCH that doesn't name it. The asset detector's per-shape
+# tests: test_private_assets.py.
 # Mutation plan: tests/mutations/site_templates.json.
-# Updated 2026-10-01 (feat/discover-index): META_KEYS gains kind, audiences, live_url.
 from __future__ import annotations
 
 from typing import Any
@@ -39,12 +40,14 @@ OWNER = "u1"
 PEER = "u2"  # same workspace, not the owner
 STRANGER = "u3"  # another workspace
 
-SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle")
+SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle", "site_meta")
 LEAKY_KEYS = {"snapshot", "source", "rippleSpec"}
 META_KEYS = {
     "kind",
     "audiences",
     "live_url",
+    "tags",
+    "show_creator",
     "id",
     "name",
     "description",
@@ -138,7 +141,7 @@ async def test_save_list_get_use_round_trip() -> None:
         _assert_meta_only(row)
     assert _sans_times(await svc.get_template(WS, OWNER, meta["id"])) == _sans_times(meta)
 
-    # The stored snapshot is exactly the five fields plus the source's stamp.
+    # The stored snapshot is exactly the snapshot fields plus the source's stamp.
     doc = await SiteTemplate.get(meta["id"])
     assert set(doc.snapshot) == {*SNAPSHOT_FIELDS, "source_gated"}
     assert doc.source_pocket_id == str(src.id)
@@ -156,6 +159,41 @@ async def test_save_list_get_use_round_trip() -> None:
     assert pocket.source_gated is True
     sites = await Site.find(Site.pocket_id == used["pocket_id"]).to_list()
     assert len(sites) == 1 and sites[0].deployed is False
+
+
+@pytest.mark.asyncio
+async def test_a_project_template_keeps_its_starter_and_recipes() -> None:
+    """Saving a project site as a template and using it gives a pocket with the same
+    template, framework and recipes; nothing else under ``site_meta`` is saved."""
+    project = {"template": "astro", "framework": "astro", "recipes": ["d1-drizzle", "kv"]}
+    src = await _site(
+        engine="project",
+        source={"package.json": "{}", "src/pages/index.astro": "<h1>Hi</h1>\n"},
+        rippleSpec=None,
+        site_meta={"project": {**project, "draft_worker_id": "w-1"}, "token": "secret"},
+    )
+    meta = await _saved(src)
+
+    doc = await SiteTemplate.get(meta["id"])
+    assert doc.snapshot["site_meta"] == {"project": project}
+
+    used = await svc.use_template(WS, OWNER, meta["id"], {})
+    pocket = await PocketDoc.get(used["pocket_id"])
+    assert pocket.engine == "project"
+    assert pocket.site_meta == {"project": project}
+    assert pocket.source == src.source
+
+
+@pytest.mark.asyncio
+async def test_a_template_saved_before_site_meta_still_uses() -> None:
+    """Rows saved before ``site_meta`` was a snapshot field have no key for it."""
+    meta = await _saved()
+    doc = await SiteTemplate.get(meta["id"])
+    doc.snapshot.pop("site_meta", None)
+    await doc.save()
+
+    used = await svc.use_template(WS, OWNER, meta["id"], {})
+    assert (await PocketDoc.get(used["pocket_id"])).site_meta is None
 
 
 @pytest.mark.asyncio
@@ -632,6 +670,34 @@ async def test_public_use_obeys_the_callers_pocket_cap(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # Sharing: PATCH
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_show_creator_is_on_for_a_new_save_and_kept_by_patch(client: AsyncClient) -> None:
+    src = await _site()
+    resp = await client.post(
+        "/api/v1/site-templates", json={"pocket_id": str(src.id), "name": "Tpl"}
+    )
+    assert resp.status_code == 200, resp.text
+    tid = resp.json()["id"]
+    assert resp.json()["show_creator"] is True
+    assert (await SiteTemplate.get(tid)).show_creator is True
+
+    resp = await client.patch(f"/api/v1/site-templates/{tid}", json={"name": "Renamed"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["show_creator"] is True
+    resp = await client.patch(f"/api/v1/site-templates/{tid}", json={"show_creator": False})
+    assert resp.json()["show_creator"] is False
+    resp = await client.patch(f"/api/v1/site-templates/{tid}", json={"description": "D"})
+    assert resp.json()["show_creator"] is False
+    assert (await SiteTemplate.get(tid)).show_creator is False
+
+    # Opting out at save time.
+    resp = await client.post(
+        "/api/v1/site-templates",
+        json={"pocket_id": str(src.id), "name": "Quiet", "show_creator": False},
+    )
+    assert resp.json()["show_creator"] is False
 
 
 @pytest.mark.asyncio

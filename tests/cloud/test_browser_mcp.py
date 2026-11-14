@@ -299,7 +299,7 @@ async def test_screenshot_returns_both_the_image_and_a_url(media_store):
 
 
 async def test_capture_is_namespaced_to_its_workspace(media_store):
-    """MUTATION: drop ``name_prefix`` — captures become indistinguishable from
+    """MUTATION: drop ``capture=True`` — captures become indistinguishable from
     gallery files and the serve guard has nothing to check."""
     url = _url_from(await _capture("ws-1"))
     name = url.rsplit("/", 1)[1]
@@ -343,7 +343,8 @@ async def test_ordinary_gallery_files_still_serve_without_a_session(media_client
 async def test_captures_stay_out_of_the_studio_gallery(media_client, media_store):
     """A capture is not a gallery item, and listing one in every workspace would
     leak its name. MUTATION: drop the capture predicate from the listings."""
-    (media_store / "1700000000000-abc123.png").write_bytes(_PNG)
+    gallery = f"{media_storage.owned_name_prefix('ws-1')}1700000000000-abc123.png"
+    (media_store / gallery).write_bytes(_PNG)
     capture_url = _url_from(await _capture("ws-1"))
 
     with patch.object(
@@ -352,5 +353,5 @@ async def test_captures_stay_out_of_the_studio_gallery(media_client, media_store
         media_client.as_workspace("ws-1")
         names = [e["name"] for e in media_client.get("/api/v1/media").json()["media"]]
 
-    assert "1700000000000-abc123.png" in names
+    assert gallery in names
     assert capture_url.rsplit("/", 1)[1] not in names

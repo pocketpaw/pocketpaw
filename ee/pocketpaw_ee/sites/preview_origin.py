@@ -20,6 +20,10 @@
 #     ``?paw_edit=1`` variant stamped with data-uid (paw-sites ``arm-html``, else the
 #     ``html_uid_stamp`` port) carrying the vendored edit-bridge (``edit_bridge.js``).
 #     Both scripts are pinned to a paw-sites commit (paw-sites-edit-bridge.pin.json).
+#   * any other static draft page asked for with ``?paw_edit=1`` and stored without the
+#     bridge (project drafts) gets the reporter and bridge at serve time, posting to
+#     ``preview_proxy.builder_origin_for`` its pocket. Only this origin adds them; the
+#     stored and published bundles never carry them.
 #   * ``preview_app`` — the ASGI app that serves a draft (a full-mode project draft
 #     with a live draft Worker is reverse-proxied to it by ``preview_proxy``, its
 #     WebSockets too; any other token's WebSocket is refused before accept) — and
@@ -35,7 +39,8 @@
 # send Set-Cookie. Static bytes come only from the artifact store; nothing in a
 # request can name a path outside a draft's own file set or choose a proxy upstream.
 # A preview URL is handed out only when the draft's files (or its draft Worker) AND
-# token are both stored.
+# token are both stored. ``draft_pocket_for_origin`` maps a draft's origin back to its
+# pocket, which is how the integrations gateway lets that pocket's draft call it.
 # Per-process caches (token lookups, unpacked drafts, single-flight loads) keep an
 # asset request off the store; every servable draft fits the draft cache.
 
@@ -224,6 +229,29 @@ def token_from_host(host: str) -> str | None:
         return None
     label = name[: -len(base) - 1]
     return label if TOKEN_RE.fullmatch(label) else None
+
+
+def draft_pocket_for_origin(origin: str | None) -> str | None:
+    """The pocket a draft preview ``Origin`` header belongs to, or ``None``.
+
+    Only an exact ``<token>.<base host>`` origin under the base's own scheme and port
+    counts, and only when the artifact store resolves the token: the token is minted
+    per stored draft, so the origin can serve nothing but that pocket's own files.
+    Blocking (store read, cached like a page load): call it off the event loop."""
+    parts = _base_parts()
+    if parts is None or not origin:
+        return None
+    try:
+        split = urlsplit(origin.strip())
+        port = split.port
+    except ValueError:
+        return None
+    scheme, _host, base_port = parts
+    if split.scheme.lower() != scheme or port != base_port or split.path not in ("", "/"):
+        return None
+    token = token_from_host(split.hostname or "")
+    ref = _resolve_ref(token) if token else None
+    return ref[0] if ref is not None else None
 
 
 def new_token() -> str:
@@ -770,11 +798,37 @@ async def preview_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         await _send(send, 404, b"Not found", plain, head)
         return
     status, rel = resolved
+    body = files[rel]
+    if edit and _HTML_RE.search(rel):
+        body = await _armed_page(token, body)
     headers = base + [
         ("content-type", _content_type(rel)),
         ("cache-control", _cache_control(rel, status)),
     ]
-    await _send(send, status, files[rel], headers, head)
+    await _send(send, status, body, headers, head)
+
+
+async def _armed_page(token: str, body: bytes) -> bytes:
+    """An ``?paw_edit=1`` page with the runtime reporter and the edit bridge, for a
+    draft that was stored without them (project drafts: no-build and sandbox-built).
+    A page that already carries the bridge (an html draft's ``.paw-edit`` variant, an
+    armed svelte/react build) is served as stored. The origin is resolved per request,
+    the same rule ``preview_proxy`` uses for a proxied draft, so it is never baked
+    into the stored draft, and the bundle that gets published never has it."""
+    if f'id="{_BRIDGE_SCRIPT_ID}"'.encode() in body:
+        return body
+    try:
+        html = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    ref = await asyncio.to_thread(_resolve_ref, token)
+    if ref is None:
+        return body
+    from pocketpaw_ee.sites import preview_proxy
+
+    origin = await asyncio.to_thread(preview_proxy.builder_origin_for, ref[0])
+    html = inject_runtime_reporter(html, origin)
+    return inject_edit_bridge(html, origin).encode("utf-8")
 
 
 def _resolve_ref(token: str) -> tuple[str, str] | None:
@@ -871,6 +925,7 @@ class PreviewHostDispatch:
 __all__ = [
     "PREVIEW_BASE_ENV",
     "PreviewHostDispatch",
+    "draft_pocket_for_origin",
     "existing_preview_url",
     "forget_pocket",
     "inject_edit_bridge",

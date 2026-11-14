@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -71,12 +72,17 @@ MAX_COLUMNS = 60
 NEW_KEYS_PER_REQUEST = 5
 NEW_KEYS_PER_DAY = 10
 _SPREADSHEET_ID = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
+# Stricter, for the dashboard link (a Drive file id is 44 characters today).
+_DASH_SHEET_ID = re.compile(r"[A-Za-z0-9_-]{20,100}")
+_DASH_SHEET_URL = re.compile(
+    r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{20,100})/edit"
+)
 # C0 controls except newline, plus DEL and C1.
 _CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 _SPACES = re.compile(r"\s+")
 
 
-def _clean(value: str, *, keep_newlines: bool) -> str:
+def clean_text(value: str, *, keep_newlines: bool) -> str:
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     value = _CONTROL.sub("", value)
     return value if keep_newlines else value.replace("\n", " ")
@@ -85,7 +91,7 @@ def _clean(value: str, *, keep_newlines: bool) -> str:
 def normalise_key(raw: str) -> str:
     """A header key: controls stripped, whitespace collapsed, trimmed. ValueError
     when empty, over 80 chars, or punctuation only."""
-    key = _SPACES.sub(" ", _clean(raw, keep_newlines=False)).strip()
+    key = _SPACES.sub(" ", clean_text(raw, keep_newlines=False)).strip()
     if not key or len(key) > MAX_KEY:
         raise ValueError(f"Field names must be 1-{MAX_KEY} characters.")
     if not any(c.isalnum() for c in key):
@@ -108,7 +114,7 @@ class AppendRowArgs(ActionArgs):
                 raise ValueError(f"Field values must be at most {MAX_VALUE} characters.")
             if key == TIMESTAMP_COLUMN:
                 continue  # the server stamps this column
-            cleaned[key] = _clean(raw_value, keep_newlines=True).strip()
+            cleaned[key] = clean_text(raw_value, keep_newlines=True).strip()
         if not cleaned:
             raise ValueError("Send at least one field.")
         return cleaned
@@ -129,7 +135,7 @@ def _column(index: int) -> str:
 
 
 def _sheet_name(settings: Any) -> str:
-    name = _clean(str((settings or {}).get("sheet_name") or ""), keep_newlines=False).strip()
+    name = clean_text(str((settings or {}).get("sheet_name") or ""), keep_newlines=False).strip()
     return name[:80] or DEFAULT_SHEET
 
 
@@ -324,6 +330,14 @@ class GoogleSheetsProvider(BaseProvider):
         ),
     }
 
+    def dashboard_url(self, settings: Mapping[str, Any]) -> str | None:
+        """The site's spreadsheet, from the stored id or the readonly link we wrote."""
+        sheet = str(settings.get("spreadsheet_id") or "")
+        if not _DASH_SHEET_ID.fullmatch(sheet):
+            found = _DASH_SHEET_URL.fullmatch(str(settings.get("spreadsheet_url") or ""))
+            sheet = found.group(1) if found else ""
+        return f"https://docs.google.com/spreadsheets/d/{sheet}" if sheet else None
+
     def availability(self) -> Availability:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)
         return "available" if client_id and secret else "unconfigured"
@@ -482,5 +496,5 @@ async def _site_name(pocket_id: str) -> str:
         pocket = await Pocket.get(PydanticObjectId(pocket_id))
     except Exception:  # noqa: BLE001 - a bad id just means no name
         pocket = None
-    name = _clean(str(getattr(pocket, "name", "") or ""), keep_newlines=False).strip()
+    name = clean_text(str(getattr(pocket, "name", "") or ""), keep_newlines=False).strip()
     return name[:120] or "Paw Site"

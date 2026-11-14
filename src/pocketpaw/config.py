@@ -242,6 +242,20 @@ class Settings(BaseSettings):
         default=100,
         description="Max tool-use turns per query in Claude SDK (0 = unlimited)",
     )
+    sites_app_build_max_turns: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Tool-use turn cap for a /sites project turn whose PLAN.md still has "
+            "unticked milestones: an approved app plan is built through every "
+            "milestone in one turn (a build, previews and a play-test each). "
+            "0 (default) = no cap for that turn; N > 0 = cap it at N, raising the "
+            "backend's own cap (claude_sdk_max_turns / pydantic_ai_max_turns) but "
+            "never lowering it. Every other chat keeps its backend cap, and a "
+            "platform-funded free run keeps free_run_max_turns either way. "
+            "Set via POCKETPAW_SITES_APP_BUILD_MAX_TURNS."
+        ),
+    )
     claude_sdk_cli_path: str | None = Field(
         default=None,
         description=(
@@ -1140,9 +1154,7 @@ class Settings(BaseSettings):
             "prompt context builder + the cloud's foresight surface "
             "handler include the skill-activation hint in the preamble. "
             "Read by the agent prompt assembler "
-            "(``pocketpaw.bootstrap.context_builder``) and the cloud's "
-            "paw-enterprise feature-flag echo endpoint at "
-            "``/api/v1/config/features``); the foresight CRUD endpoints "
+            "(``pocketpaw.bootstrap.context_builder``); the foresight CRUD endpoints "
             "themselves stay reachable regardless of this flag — the gate "
             "is purely a chat-surface affordance toggle. The flag is dev-"
             "grade today and tightens to a per-workspace database setting "
@@ -2282,13 +2294,15 @@ class Settings(BaseSettings):
         ),
     )
     ripple_manifest_url: str = Field(
-        default="http://localhost:5174/manifest.json",
+        default="",
         description=(
-            "URL to the Ripple UI manifest (widget specs). Defaults to the "
-            "local ripple dev server while @ripple-ui/svelte is unreleased; "
-            "swap to "
-            "https://cdn.jsdelivr.net/npm/@ripple-ui/svelte@latest/dist/manifest.json "
-            "(or any pinned version) once published."
+            "Optional override URL for the Ripple widget manifest. Empty (the "
+            "default) uses the catalog bundled in the package "
+            "(pocketpaw/ripple/manifest.json, pinned to the @ripple-ui/svelte "
+            "version Paw OS renders), with no network call. When set, the URL is "
+            "fetched and cached for ripple_manifest_ttl_seconds; if the fetch "
+            "fails or it serves a version older than the bundled one, a warning "
+            "is logged and the bundled catalog is used."
         ),
     )
     ripple_manifest_ttl_seconds: int = Field(
@@ -2301,10 +2315,8 @@ class Settings(BaseSettings):
             "When True, the strict (agent-generation) catalog gate FAILS CLOSED "
             "if the Ripple widget manifest can't be fetched — an unverifiable "
             "spec is rejected instead of persisted. Defaults False (best-effort "
-            "skip, preserving current behavior) because ripple_manifest_url "
-            "defaults to the local ripple dev server, which is often down in "
-            "dev; enable it on cloud/prod where the manifest URL points at a "
-            "reliable CDN. Set via "
+            "skip). The manifest is bundled now, so it is always available "
+            "and this flag rarely matters. Set via "
             "POCKETPAW_RIPPLE_CATALOG_GATE_REQUIRE_MANIFEST."
         ),
     )
@@ -2448,7 +2460,9 @@ class Settings(BaseSettings):
         default="test_mode",
         description=(
             "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
-            "Selects the API base URL the DodoPayments client targets. Set via "
+            "Selects the API base URL the DodoPayments client targets. Webhook "
+            "deliveries grant credits or change plans only in 'live_mode' with "
+            "payments_open on, so a test-card payment never mints credits. Set via "
             "POCKETPAW_DODO_ENVIRONMENT."
         ),
     )
@@ -2515,10 +2529,13 @@ class Settings(BaseSettings):
     dodo_checkout_return_base: str = Field(
         default="",
         description=(
-            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
-            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
-            "request carries no Origin (and no usable Referer) header. The return "
-            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "Fallback app base URL the Dodo subscription CHECKOUT SESSION returns "
+            "the buyer to after pay / cancel, used when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header, and as the "
+            "redirect target when the return hop is handed an untrusted origin. "
+            "The buyer passes through the backend hop "
+            "``/api/v1/billing/checkout/return/{outcome}`` and lands on "
+            "``{base}/settings/billing?checkout=success|cancel``. Set "
             "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
             "Default empty: when both this and the request Origin are absent the "
             "redirect is omitted (the checkout still works, the buyer just isn't "
@@ -2712,6 +2729,112 @@ class Settings(BaseSettings):
             "daily call budget and the storage cap. Default False, so OSS / "
             "self-host sees no paywall and the seams do no extra database read. Set "
             "via POCKETPAW_SITES_BILLING_ENFORCED."
+        ),
+    )
+    credits_enforced: bool = Field(
+        default=False,
+        description=(
+            "Chat credit gate only, independent of billing_enforced. When True, "
+            "starting a chat or agent run is refused with HTTP 402 when the "
+            "workspace credit balance is <= 0 (credits.insufficient) or its "
+            "monthly credit ceiling is reached (credits.quota_exceeded), on "
+            "every seam that reads the shared run-start guard (chat HTTP, "
+            "execute_run, the group/DM bridge, /files agent ops, the planner). "
+            "The guard reads billing_enforced OR this flag. Unlike "
+            "billing_enforced it turns on nothing else: the seat, pocket, "
+            "connector, upload, storage, call and sites gates stay off. It "
+            "exists for the early-access launch, where free credits are "
+            "metered but no plan or upgrade surface is live. The platform "
+            "settings route refuses writes to it on purpose: a runtime switch "
+            "that turns enforcement off is a footgun. Default False. Set via "
+            "POCKETPAW_CREDITS_ENFORCED."
+        ),
+    )
+    payments_open: bool = Field(
+        default=False,
+        description=(
+            "Whether customers can pay (plans, top-ups). While False, a "
+            "workspace on the free plan with no purchased top_up or "
+            "subscription_grant in its ledger is platform-funded early access "
+            "(credits.guards.is_platform_funded_free), and the early-access "
+            "guards apply to it. While False the billing service also refuses "
+            "every checkout (top-up, subscribe, partner pay link) with 403 "
+            "payments.closed, and the Dodo webhook grants no credits and changes "
+            "no plan. Flip it together with live payment provider credentials "
+            "(dodo_environment=live_mode). The platform settings route refuses "
+            "writes to it. "
+            "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
+        ),
+    )
+    free_run_max_turns: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Model requests one platform-funded free run may make (an unpaid "
+            "early-access workspace, credits.guards.free_run_bounds), in place of "
+            "pydantic_ai_max_turns when lower. Such a run is also forced onto the "
+            "pydantic_ai backend and given a total token limit its wallet can pay "
+            "for. Applies only while credits_enforced or billing_enforced is on. "
+            "Set via POCKETPAW_FREE_RUN_MAX_TURNS."
+        ),
+    )
+    free_run_reserve_credits: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Credits one platform-funded free run reserves on the daily early-access "
+            "ceiling (credits.guards.reserve_free_run) while it is in flight, or its "
+            "wallet when that is smaller. bill_run then moves the meter to the real "
+            "spend, overrun included, so the ceiling is a soft burn-rate limit: runs "
+            "already in flight may pass it. Higher holds more of the ceiling per "
+            "concurrent run. Set via POCKETPAW_FREE_RUN_RESERVE_CREDITS."
+        ),
+    )
+    free_model_allowlist: list[str] = Field(
+        default=[
+            "deepseek/deepseek-v4-flash",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6",
+        ],
+        description=(
+            "Models a platform-funded turn on an unpaid early-access workspace may "
+            "use (credits.guards.free_model_denial), the free default first. "
+            "claude-sonnet-4-6 stays only because it is pydantic_ai_model's code "
+            "default. Matched exactly, ignoring case "
+            "and one known provider prefix such as litellm:. The per-send model, the "
+            "agent's own model and the model the forced pydantic_ai run really "
+            "uses must all be on it, and priced by the metering ladder, else the "
+            "turn is refused with 400 model.not_allowed. Paid workspaces and BYOK "
+            "turns are not limited. Applies only while credits_enforced or "
+            "billing_enforced is on. pydantic_ai_model is always checked, so it "
+            "must be on this list or every free turn is refused: change the two "
+            "together. Set via POCKETPAW_FREE_MODEL_ALLOWLIST as a JSON list."
+        ),
+    )
+    early_access_grant_credits: int = Field(
+        default=1_000,
+        ge=0,
+        description=(
+            "Early access credits granted ONCE per verified user, into the first "
+            "workspace they own (credits.service.grant_early_access). Fired on "
+            "owned-workspace create and on the guest social upgrade; never into "
+            "a workspace the user was only invited to. Keep it at or below the "
+            "free plan's monthly ceiling. 0 turns the grant off. Grants are "
+            "permanent, so changing it affects new users only. Set via "
+            "POCKETPAW_EARLY_ACCESS_GRANT_CREDITS."
+        ),
+    )
+    password_signup_open: bool = Field(
+        default=True,
+        description=(
+            "Whether new accounts may be created with an email and password. "
+            "When False, POST /auth/register and the guest password upgrade "
+            "(POST /auth/guest/upgrade) are refused with 403 "
+            "auth.password_signup_closed, and social sign-in (Google) is the "
+            "only way in. Existing password accounts still sign in. The "
+            "early-access launch runs with it False. Default True so self-host "
+            "keeps working. Set via POCKETPAW_PASSWORD_SIGNUP_OPEN."
         ),
     )
     billing_dunning_grace_days: int = Field(

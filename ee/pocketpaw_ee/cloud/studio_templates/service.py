@@ -1,12 +1,12 @@
 # Studio templates — service (the sole owner of StudioTemplate writes in-tenant).
 #
-# Created 2026-10-02 (feat/studio-templates). Publishing turns one Studio
-# generation into a FROZEN SNAPSHOT: the chosen asset becomes ``cover`` and the
-# generation's ``{kind, model, prompt, params}`` becomes ``recipe``. Later edits
-# or deletes of the generation never reach the template, and deleting the
-# template leaves the generation alone. The generation is read through
-# ``studio.service.get_generation`` (workspace filter); this module never imports
-# the StudioGeneration doc (import-linter "StudioTemplates" contract).
+# Publishing turns one Studio generation into a FROZEN SNAPSHOT: the chosen
+# asset becomes ``cover`` and the generation's ``{kind, model, prompt, params}``
+# becomes ``recipe``. Later edits or deletes of the generation never reach the
+# template, and deleting the template leaves the generation alone. The
+# generation is read through ``studio.service.get_generation`` (workspace
+# filter); this module never imports the StudioGeneration doc (import-linter
+# "StudioTemplates" contract).
 #
 # Invariants a reader must not break:
 #   * Input images never leave the workspace: ``_strip_input_images`` drops every
@@ -83,6 +83,7 @@ def _meta(doc: StudioTemplate) -> dict:
         cover=doc.cover,
         recipe=doc.recipe,
         uses_input_images=doc.uses_input_images,
+        show_creator=doc.show_creator,
         hidden=doc.hidden,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
@@ -182,6 +183,7 @@ async def publish_template(
             "params": _strip_input_images(params),
         },
         uses_input_images=(gen.params.inputImageCount or 0) > 0,
+        show_creator=body.show_creator,
     )
     await doc.insert()
     await emit(StudioTemplateSaved(data=_event_data(doc)))
@@ -211,8 +213,9 @@ async def list_templates(
 async def update_template(
     workspace_id: str, user_id: str, template_id: str, body: PatchStudioTemplateRequest | dict
 ) -> dict:
-    """Change a template's title, description, audiences or visibility (owner
-    only; anyone else gets NotFound). The cover and recipe never change."""
+    """Change a template's title, description, audiences, visibility or
+    ``show_creator`` (owner only; anyone else gets NotFound). The cover and
+    recipe never change."""
     body = PatchStudioTemplateRequest.model_validate(body)
     doc = await _owned(workspace_id, user_id, template_id)
     changes = body.model_dump(exclude_none=True)

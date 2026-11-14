@@ -300,6 +300,22 @@ async def test_write_refuses_catalog_locked_field(mongo_db, isolated_settings_en
         )
 
 
+@pytest.mark.parametrize("field", ["credits_enforced", "payments_open"])
+async def test_write_refuses_env_only_launch_switch(mongo_db, isolated_settings_env, field) -> None:
+    # Env unset (as at launch): the write must still be refused, and nothing
+    # may land in config.json where Settings.load would pick it up.
+    tmp_path, _ = isolated_settings_env
+    operator = await _user("operator")
+    body = platform_settings.SettingsWriteIn(changes={field: True}, reason="testing")
+    with pytest.raises(Forbidden) as exc:
+        await platform_settings.update_platform_settings(
+            body=body, request=_request(), operator=operator
+        )
+    assert exc.value.code == "platform.settings.env_only_field"
+    assert not (tmp_path / "config.json").exists()
+    assert getattr(pocketpaw_config.get_settings(), field) is False
+
+
 async def test_write_refuses_env_shadowed_field(
     mongo_db, isolated_settings_env, monkeypatch
 ) -> None:

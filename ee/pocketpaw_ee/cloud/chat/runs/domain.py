@@ -7,8 +7,8 @@ resolved (``surface``/``surface_meta``, ``model_override``, ``tools_enabled``,
 ``flow_context``, ``persist_user_text``) ride on it: a field left off is silently
 dropped at the submit boundary.
 
-``RunActivityRow`` and ``StrandedReply`` are Beanie-free read projections, so
-consumers outside this entity never import ``ChatRunDoc`` (EE Rule 2).
+``RunActivityRow``, ``StrandedReply`` and ``SessionRunState`` are Beanie-free read
+projections, so consumers outside this entity never import ``ChatRunDoc`` (EE Rule 2).
 
 The timing resolvers live here rather than in ``worker.py`` so the web process
 (the SSE reader, the sweeper, the arq executor) can read them without importing
@@ -41,6 +41,12 @@ DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
 # 15s slices — so a cap equal to the job timeout would race the very frame it is
 # waiting for and report a spurious error on a healthy run.
 STREAM_LIFETIME_GRACE_SECONDS = 120
+
+# How many times one chat run may be driven: the first attempt plus one automatic
+# retry when the WORKER killed it (deploy or restart past the drain window). Both the
+# run doc's ``attempt`` cap and arq's ``max_tries`` for ``execute_run_job`` read this,
+# so arq never re-runs a job the run doc would refuse, and vice versa.
+MAX_RUN_ATTEMPTS = 2
 
 
 def run_job_timeout_seconds() -> int:
@@ -210,3 +216,15 @@ class StrandedReply(BaseModel):
     status: str
     text: str
     created_at: datetime
+
+
+class SessionRunState(BaseModel):
+    """A chat session's NEWEST run, reduced to what the sites ``generation`` flag
+    needs: is it still going, how did it end, and which reply did it leave."""
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    status: str
+    assistant_message_id: str | None = None
+    ended_at: datetime | None = None

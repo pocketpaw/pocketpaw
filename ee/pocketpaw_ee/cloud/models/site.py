@@ -15,11 +15,16 @@
 #
 # Capture and the concierge: ``signed_key`` + ``allowed_origins`` are the public,
 # origin-bound embed credential for both site forms and the Paw Bar (``scopes``,
-# ``revoked`` = a 401 kill switch on the KEY). ``concierge_enabled`` is the owner's
+# ``revoked`` = a 401 kill switch on the KEY). Lead capture additionally accepts the
+# owner-added ``lead_intake_origins``. ``concierge_enabled`` is the owner's
 # 403 switch on the concierge, and a concierge exists only once its owner created it
 # (``concierge_created_at``). ``concierge_*`` fields hold the owner's settings
 # (runtime, guided fields, FAQs, sources, doc code, transcript retention, lead
 # capture); owner text is only ever rendered as quoted data, never into the frame.
+#
+# Generation: ``generation`` / ``generation_session_id`` say whether the agent run
+# that created the site is still working on it. Independent of ``deployed`` and the
+# build lane, and never read by publish, serving, previews or billing.
 #
 # Billing: ``plan_tier`` / ``subscription_*`` / ``billing_rail`` /
 # ``period_paid_usd`` are what the owner pays US; ``client_*`` are what the owner's
@@ -256,6 +261,11 @@ class Site(TimestampedDocument):
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
     # None until the pocket has been deployed at least once (old rows read null).
     deployed_at: datetime | None = None
+    # The content hash (``sites.service.source_content_hash``) of the source map that
+    # live deploy shipped, written in the SAME save that marks it deployed, so it never
+    # names content that did not go live. Discard restores only a version whose content
+    # hashes to this. Empty for a ripple site and for rows deployed before it existed.
+    live_source_hash: str = ""
     # SA-4: when this site's visitors STARTED being counted (UTC), and None whenever
     # they are not being counted at all. Read it as a state rather than as history —
     # "counting is on, and it began at this stamp".
@@ -395,6 +405,16 @@ class Site(TimestampedDocument):
     # into a config. The stderr tail stays in logs. Same reasoning as
     # ``jobs/worker.py``'s ``_safe_failure_message``.
     build_reason: str | None = None
+    # Is the agent still GENERATING this site in the chat run that created it?
+    # ``generating`` | ``waiting`` (the run ended on an unanswered ``ask_user``) |
+    # ``ready``; None = never tracked (every site not made by an agent create tool).
+    # Separate from ``status`` / ``deployed`` / ``build_*`` on purpose: nothing in
+    # publish, serving, previews, billing or the build lane reads it. Stamped only
+    # by the create tools' shared mint (``create_draft_site``), settled by run
+    # finalization and self-healed on read (``sites.generation``).
+    # ``generation_session_id`` is the chat session the creating run lives in.
+    generation: Literal["generating", "waiting", "ready"] | None = None
+    generation_session_id: str | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key — one of the SITE-SCOPED rungs
@@ -652,6 +672,12 @@ class Site(TimestampedDocument):
     # back. Existing rows read the default and are therefore un-gated, which is the
     # intended migration: they were the ones silently dropping leads.
     enforce_origin: bool = False
+    # Extra hosts the OWNER allowed to post leads (Collect leads settings), bare
+    # lowercased hostnames, at most 20. Kept apart from ``allowed_origins`` so the
+    # publish stamp and add/remove_domain never drop them, and so an unverified
+    # owner-typed host widens lead capture only, never the concierge key gate or
+    # frame CSP. See ``cloud/leads/intake.py``.
+    lead_intake_origins: list[str] = Field(default_factory=list)
     signed_key: str = ""
     rate_limit_per_min: int = 60
     per_ip_limit_per_min: int = 10
@@ -807,6 +833,8 @@ class Site(TimestampedDocument):
     concierge_voice: bool = True
     # The bar's full-screen button.
     concierge_expandable: bool = True
+    # Whether a visitor may move the bar to another side of the screen.
+    concierge_movable: bool = True
     # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
     # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
     # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
@@ -841,6 +869,11 @@ class Site(TimestampedDocument):
     # is broken". "" means the last sync was clean.
     kb_synced_at: datetime | None = None
     kb_sync_error: str = ""
+    # What the last sync that reached the site's pages left out, for the owner's
+    # index view: ``{"skips": [{path, reason, detail}], "page_cap", "capped",
+    # "pages_failed", "skipped_by_robots"}`` (``kb_ingest._record_sync``). Empty
+    # until the next sync, so no migration.
+    kb_crawl_report: dict[str, Any] = Field(default_factory=dict)
     # The catalog sync a knowledge sync schedules (``paw_bar.catalog_sync``): when it
     # last ran, how it ended (the importer's ``ok`` / ``partial`` / ``empty``, its
     # failure reason, or ``sync_failed``) and what it did to the rows (added,
@@ -941,5 +974,12 @@ class Site(TimestampedDocument):
                 [("slug_pending", 1)],
                 unique=True,
                 partialFilterExpression={"slug_pending": {"$type": "string"}},
+            ),
+            # Run finalization settles a session's generating sites by
+            # ``generation_session_id``. PARTIAL, so the index holds only the
+            # agent-created rows, never the null majority.
+            IndexModel(
+                [("generation_session_id", 1)],
+                partialFilterExpression={"generation_session_id": {"$type": "string"}},
             ),
         ]

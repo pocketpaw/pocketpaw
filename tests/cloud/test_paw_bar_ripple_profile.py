@@ -1,7 +1,7 @@
 # tests/cloud/test_paw_bar_ripple_profile.py — the "ripple" concierge card profile.
 #
 # A site whose ``concierge_ui_profile`` is "ripple" gets full-catalog Ripple cards
-# (``card_spec.RIPPLE_PROFILE``: the vendored ripple-manifest.json, 400 nodes,
+# (``card_spec.RIPPLE_PROFILE``: the bundled Ripple manifest, 400 nodes,
 # depth 16, 64,000 chars, handlers checked wherever a widget keeps them), the
 # Ripple cards paragraph with no catalog, actions or lead capture, an 8,000
 # token reply cap and ``FRAME_DEMO`` (rules 3 to 5 of FRAME kept verbatim)
@@ -66,10 +66,9 @@ from tests.cloud.test_paw_bar_concierge_v2 import (  # noqa: F401 — fixtures
 
 _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 
-# Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
-# (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
-# update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "1109d9d5be9ac87fbbf8bfbbc3be9fb4bc0cf2a086693a165e536a971cf678e9"
+# Refreshing the bundled Ripple manifest: see src/pocketpaw/ripple/manifest.json.source
+# (drop the widget examples, bump RIPPLE_UI_SVELTE_VERSION, update the pins below).
+_RIPPLE_MANIFEST_SHA256 = "76ad91447bc44d0fe4ce7fb6c3abbd7c9df4d7a2fac410c8d08d7b9791276cf3"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -108,7 +107,7 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
 
     raw = card_spec.RIPPLE_MANIFEST_PATH.read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(raw).hexdigest() == _RIPPLE_MANIFEST_SHA256
-    assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.0"
+    assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.2"
     assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 216
     # Every trimmed or typed name is a real widget (a typo would trim nothing).
     every = {w["type"] for w in card_spec.RIPPLE_MANIFEST["widgets"]}

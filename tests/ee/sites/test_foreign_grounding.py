@@ -1,10 +1,7 @@
 # tests/ee/sites/test_foreign_grounding.py — the FOREIGN grounding lane
-# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the bind no longer
-# provisions (``provision_foreign_concierge`` is gone). The row-handoff test now
-# drives ``ensure_site_agent``, which the owner's explicit create calls on the
-# foreign row, and still pins that the FOREIGN row is what reaches the sync.
 # (ee.pocketpaw_ee.sites.foreign_grounding): a concierge on a site we do not host,
-# grounded by crawling that site's own verified origin.
+# grounded by crawling that site's own verified origin. The owner's explicit
+# create (``ensure_site_agent``) is what hands the FOREIGN row to the sync.
 #
 # This lane fetches a CUSTOMER-CONTROLLED HOSTNAME, so the gates are the point and
 # every gate test asserts a MECHANISM, not a return value: an unverified or stale
@@ -654,7 +651,9 @@ async def test_grounding_fetches_no_assets_and_that_is_most_of_the_traffic(beani
     assert harvest.pages_failed == 0
     # Same pages, and every extra request the import path made was an asset.
     assert len(harvest.source) == imported.stats.pages_fetched == 15
-    assert len(ground_seen) == len(import_seen) - 9
+    # Grounding also asks for the sitemap (a 404 here); the import path never does.
+    ground_pages = [r for r in ground_seen if "sitemap" not in r.url.path]
+    assert len(ground_pages) == len(import_seen) - 9
     asset_bytes = imported.stats.bytes_fetched - sum(
         len(body) for path, body in imported.files.items() if path.endswith(".html")
     )
@@ -709,3 +708,152 @@ async def test_creating_a_foreign_concierge_hands_the_foreign_row_to_the_sync(mo
     assert bound == "agent-1"
     assert seen == [site]
     assert seen[0].foreign_origin is True
+
+
+# --------------------------------------------------------------------------- #
+# Key pages survive the page budget
+# --------------------------------------------------------------------------- #
+
+
+def _events_site() -> dict[str, httpx.Response]:
+    """An events site: the homepage links 30 event pages BEFORE its key pages.
+    A plain BFS spends the 25-page budget on events and never sees /apply, so
+    the concierge cannot point a visitor at the page they asked for."""
+    events = "".join(f'<a href="/events/{n}/">Event {n}</a>' for n in range(1, 31))
+    key = "".join(
+        f'<a href="/{slug}/">{slug}</a>' for slug in ("apply", "membership", "contact", "faq")
+    )
+    routes = {"/": _html(f"<html><body><h1>Events Co</h1>{_COPY}{events}{key}</body></html>")}
+    for n in range(1, 31):
+        routes[f"/events/{n}/"] = _html(f"<html><body><h1>Event {n}</h1>{_COPY}</body></html>")
+    for slug in ("apply", "membership", "contact", "faq"):
+        routes[f"/{slug}/"] = _html(f"<html><body><h1>{slug}</h1>{_COPY}</body></html>")
+    return routes
+
+
+async def test_key_pages_are_crawled_before_the_budget_runs_out(beanie_test_db):
+    await _claim()
+
+    harvest = await _harvest(routes=_events_site())
+
+    assert harvest.error == ""
+    for page in (
+        "apply/index.html",
+        "membership/index.html",
+        "contact/index.html",
+        "faq/index.html",
+    ):
+        assert page in harvest.source, f"{page} missing from {sorted(harvest.source)}"
+    assert len(harvest.source) == foreign_grounding.GROUNDING_MAX_PAGES
+
+
+# --------------------------------------------------------------------------- #
+# Menu links and the sitemap pick the pages, in any language
+# --------------------------------------------------------------------------- #
+
+
+def _xml(body: str) -> httpx.Response:
+    return httpx.Response(200, headers={"content-type": "application/xml"}, content=body.encode())
+
+
+def _urlset(*paths: str, host: str = _HOST) -> str:
+    locs = "".join(f"<url><loc>https://{host}{p}</loc></url>" for p in paths)
+    return f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>'
+
+
+def _busy_site(nav: str = "") -> dict[str, httpx.Response]:
+    """A homepage whose body links 30 event pages; ``nav`` goes in its header,
+    AFTER the body, so plain discovery order reaches it last."""
+    events = "".join(f'<a href="/events/{n}/">Event {n}</a>' for n in range(1, 31))
+    routes = {
+        "/": _html(
+            f"<html><body><main><h1>Club</h1>{_COPY}{events}</main>"
+            f"<header><nav>{nav}</nav></header></body></html>"
+        )
+    }
+    for n in range(1, 31):
+        routes[f"/events/{n}/"] = _html(f"<html><body><h1>Event {n}</h1>{_COPY}</body></html>")
+    return routes
+
+
+async def test_menu_pages_make_the_budget_whatever_they_are_called(beanie_test_db):
+    """No word list can know /become-a-member or /inscription. Being in the
+    site's own menu is what makes them main pages."""
+    await _claim()
+    routes = _busy_site(
+        '<a href="/become-a-member/">Join</a><a href="/inscription/">Inscription</a>'
+    )
+    routes["/become-a-member/"] = _html(f"<html><body><h1>Join</h1>{_COPY}</body></html>")
+    routes["/inscription/"] = _html(f"<html><body><h1>Inscription</h1>{_COPY}</body></html>")
+
+    harvest = await _harvest(routes=routes)
+
+    assert harvest.error == ""
+    assert "become-a-member/index.html" in harvest.source
+    assert "inscription/index.html" in harvest.source
+    assert len(harvest.source) == foreign_grounding.GROUNDING_MAX_PAGES
+
+
+async def test_a_page_only_the_sitemap_lists_is_crawled(beanie_test_db):
+    await _claim()
+    routes = _busy_site()
+    routes["/sitemap.xml"] = _xml(_urlset("/events/1/", "/faq/"))
+    routes["/faq/"] = _html(f"<html><body><h1>FAQ</h1>{_COPY}</body></html>")
+
+    harvest = await _harvest(routes=routes)
+
+    assert harvest.error == ""
+    assert "faq/index.html" in harvest.source
+
+
+async def test_the_sitemap_robots_names_is_followed_one_index_deep(beanie_test_db):
+    await _claim()
+    routes = _busy_site()
+    routes["/robots.txt"] = _robots(
+        f"User-agent: *\nAllow: /\nSitemap: https://{_HOST}/sitemap_index.xml\n"
+    )
+    routes["/sitemap_index.xml"] = _xml(
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"<sitemap><loc>https://{_HOST}/sitemaps/pages.xml</loc></sitemap></sitemapindex>"
+    )
+    routes["/sitemaps/pages.xml"] = _xml(_urlset("/faq/"))
+    routes["/faq/"] = _html(f"<html><body><h1>FAQ</h1>{_COPY}</body></html>")
+    seen: list[httpx.Request] = []
+
+    harvest = await _harvest(routes=routes, seen=seen)
+
+    assert harvest.error == ""
+    assert "faq/index.html" in harvest.source
+    assert "/sitemap.xml" not in [r.url.path for r in seen]
+
+
+async def test_an_off_host_or_doctype_sitemap_is_ignored(beanie_test_db):
+    await _claim()
+    routes = _busy_site()
+    routes["/robots.txt"] = _robots(
+        "User-agent: *\nAllow: /\n"
+        "Sitemap: https://evil.example/sitemap.xml\n"
+        f"Sitemap: https://{_HOST}/sitemap-a.xml\n"
+        f"Sitemap: https://{_HOST}/sitemap-b.xml\n"
+    )
+    routes["/sitemap-a.xml"] = _xml(
+        '<?xml version="1.0"?><!DOCTYPE urlset [<!ENTITY x "y">]>' + _urlset("/secret/")
+    )
+    routes["/sitemap-b.xml"] = _xml(
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"<url><loc>https://evil.example/stolen/</loc></url>"
+        f"<url><loc>https://{_HOST}/ok/</loc></url></urlset>"
+    )
+    routes["/secret/"] = _html(f"<html><body><h1>Secret</h1>{_COPY}</body></html>")
+    routes["/ok/"] = _html(f"<html><body><h1>OK</h1>{_COPY}</body></html>")
+    seen: list[httpx.Request] = []
+
+    # evil.example resolves, so a fetch of it would reach the transport and show.
+    table = {**_PUBLIC, "evil.example": ["93.184.216.36"]}
+    harvest = await _harvest(routes=routes, seen=seen, table=table)
+
+    assert harvest.error == ""
+    assert "ok/index.html" in harvest.source
+    assert "secret/index.html" not in harvest.source
+    assert {r.headers.get("host", "") for r in seen} == {_HOST}
+    assert "/stolen/" not in [r.url.path for r in seen]

@@ -393,7 +393,8 @@ async def test_a_completed_delete_removes_the_site_document(beanie_test_db, monk
     await delete_job_mod.run_site_delete({}, WORKSPACE, str(site.id), _deps=deps)
 
     assert await Site.get(site.id) is None
-    assert deps.purged_records == [(WORKSPACE, str(site.id))]
+    # A built site's leads are filed under its script_name (``lead_site_id``).
+    assert deps.purged_records == [(WORKSPACE, "paw-site-x")]
 
 
 @pytest.mark.asyncio
@@ -488,23 +489,26 @@ async def test_purging_records_takes_this_sites_rows_and_only_this_sites(beanie_
 
 @pytest.mark.asyncio
 async def test_purging_records_takes_both_rate_counter_scopes(beanie_test_db):
-    """``scope_id`` is the site id for the overall scope and ``"{site_id}:{rate_key}"``
-    for the per-IP one — one anchored prefix has to catch both, and nothing else."""
+    """``scope_id`` is ``"{workspace}:{site_id}"`` for the overall scope and
+    ``"{workspace}:{site_id}:{rate_key}"`` for the per-IP one, as the capture limiter
+    writes them — one anchored prefix has to catch both, and nothing else."""
     from datetime import UTC, datetime
 
     now = datetime.now(UTC)
+    w = WORKSPACE
     for scope, scope_id in (
-        ("site", "site-a"),
-        ("ip", "site-a:1.2.3.4"),
-        ("site", "site-abc"),  # a DIFFERENT site whose id merely starts the same way
-        ("site", "site-b"),
+        ("site", f"{w}:site-a"),
+        ("ip", f"{w}:site-a:1.2.3.4"),
+        ("site", f"{w}:site-abc"),  # a DIFFERENT site whose id merely starts the same way
+        ("site", f"{w}:site-b"),
+        ("site", "ws_other:site-a"),  # the same site id in another workspace
     ):
         await SiteRateCounter(scope=scope, scope_id=scope_id, bucket=now, hits=1).insert()
 
     await sites_service.purge_site_records(workspace_id=WORKSPACE, site_id="site-a")
 
     left = sorted(d.scope_id for d in await SiteRateCounter.find_all().to_list())
-    assert left == ["site-abc", "site-b"]
+    assert left == sorted([f"{w}:site-abc", f"{w}:site-b", "ws_other:site-a"])
 
 
 # ── The enqueue ──────────────────────────────────────────────────────────────

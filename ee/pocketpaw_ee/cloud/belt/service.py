@@ -25,7 +25,9 @@
 #     ``commit_sha``) and mandate provenance (``mandate_id`` / ``shift_no`` /
 #     ``headless_error`` / ``headless_state`` / ``redevelop``) are read
 #     STRUCTURALLY off the blob; ``error`` is the failure reason (``Action.error``, else
-#     ``headless_error``). The mandates digest reads this same list.
+#     ``headless_error``); ``lead`` is a feature lead's feature, PRs, session and
+#     stall counts, contact sheet and per-slice state, off the cloud station's ``lead``
+#     blob (null on a task run). The mandates digest reads this same list.
 #   * ``save_run_feed`` / ``get_run_feed`` — a run stage's step feed (what one
 #     station step did), one ``BeltRunFeed`` row per (workspace, run, stage),
 #     kept out of the Action blob that ``list_runs`` reads in bulk. The read
@@ -776,6 +778,41 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
             for s in blob.get("screenshots") or []
             if isinstance(s, dict)
         ],
+        "lead": _lead_row(blob),
+    }
+
+
+# A feature-lead run's recipe (``cloud_station.LEAD_RECIPE``, ``mandates.domain.LEAD_RUN_KIND``);
+# a literal here because importing either module from this one is heavy or circular.
+_LEAD_RECIPE = "feature-lead"
+_PACKET_APP = re.compile(r"docs/blueprints/([\w.-]+)/features/")
+
+
+def _lead_row(blob: dict[str, Any]) -> dict[str, Any] | None:
+    """A feature lead's progress, read off the ``lead`` dict the cloud station's
+    tracker writes (``feature`` / ``packet`` / ``issue`` / ``branch`` / ``prs`` /
+    ``sessions`` / ``stalls`` / ``contact_sheet`` / ``slices``, a v3 lead's
+    ``{id, done, run, gaps, pr}`` per slice, and the ``skipped`` issue numbers);
+    ``None`` on a task run. A lead
+    still queued (no launch, so no ``lead`` dict yet) reads with empty fields."""
+    if blob.get("recipe") != _LEAD_RECIPE:
+        return None
+    lead = blob.get("lead")
+    lead = lead if isinstance(lead, dict) else {}
+    app = _PACKET_APP.match(str(lead.get("packet") or ""))
+    prs, slices = lead.get("prs"), lead.get("slices")
+    return {
+        "feature": lead.get("feature") or None,
+        "app": app.group(1) if app else None,
+        "issue": lead.get("issue"),
+        "branch": lead.get("branch") or None,
+        "prs": [p for p in prs if isinstance(p, dict)] if isinstance(prs, list) else [],
+        "sessions": len(lead.get("sessions") or []),
+        "stalls": len(lead.get("stalls") or []),
+        "contact_sheet": lead.get("contact_sheet") or None,
+        "slices": [s for s in slices if isinstance(s, dict)] if isinstance(slices, list) else [],
+        # Line issues the launch skipped (no packet): cited, never worked.
+        "skipped": [s["issue"] for s in lead.get("skipped") or [] if isinstance(s, dict)],
     }
 
 
@@ -973,17 +1010,36 @@ _DIFF_FILE_RE = re.compile(r"^(?:\+\+\+ b/|diff --git a/.* b/)(.+)$", re.MULTILI
 _READ_GIT = ("git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
 
-async def _base_model(blob: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
-    """``(ref, model)``: the bound repo's ``docs/c4/model.json`` as committed
-    where the run starts: its mandate's line when the local line ref exists
-    (the station moves it to the run's start), else ``origin/<base>`` when it
-    exists, else ``<base>`` (the station's rule, without its fetch). Read with
-    ``git cat-file`` (no textconv, no filters), nothing from the repo runs.
-    ``(None, None)`` for a repo outside the allowlist or a base git would read
-    as an option; the ref with ``None`` when it has no readable model (over
-    ``MAX_MODEL_BYTES`` counts as unreadable)."""
-    from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo, _run, line_branch
+async def read_repo_model(repo: Path, rev: str) -> tuple[str | None, dict[str, Any] | None]:
+    """``(sha, model)``: ``docs/c4/model.json`` as committed at ``rev`` in the
+    allowlisted ``repo``, read with ``git cat-file`` (no textconv, no filters),
+    so nothing from the repo runs. ``(None, None)`` when ``rev`` names no
+    commit; the sha with ``None`` when it has no readable model (over
+    ``MAX_MODEL_BYTES`` counts as unreadable, never a partial body). Raises
+    ``OSError`` / ``RuntimeError`` when git is missing or times out."""
+    from pocketpaw_ee.cloud.belt.executor import _run
     from pocketpaw_ee.cloud.belt.orient import load_model
+
+    argv = [*_READ_GIT, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"]
+    code, sha, _ = await _run(argv, cwd=repo)
+    if code != 0:
+        return None, None
+    argv = [*_READ_GIT, "cat-file", "blob", f"{sha.strip()}:{_MODEL_PATH}"]
+    code, text, _ = await _run(argv, cwd=repo)
+    if code != 0 or len(text.encode("utf-8")) > MAX_MODEL_BYTES:
+        return sha.strip(), None
+    return sha.strip(), load_model(text)
+
+
+async def _base_model(blob: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """``(ref, model)``: the bound repo's C4 model (``read_repo_model``) where
+    the run starts: its mandate's line when the local line ref exists (the
+    station moves it to the run's start), else ``origin/<base>`` when it
+    exists, else ``<base>`` (the station's rule, without its fetch).
+    ``(None, None)`` for a repo outside the allowlist, a base git would read as
+    an option, or a failed git; the ref with ``None`` when it has no readable
+    model."""
+    from pocketpaw_ee.cloud.belt.executor import _re_resolve_repo, line_branch
 
     base = str(blob.get("base_branch") or "")
     repo, _err = _re_resolve_repo(str(blob.get("repo") or ""))
@@ -994,20 +1050,12 @@ async def _base_model(blob: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
     refs += [(f"origin/{base}", f"origin/{base}"), (base, base)]
     try:
         for ref, rev in refs:
-            argv = [*_READ_GIT, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"]
-            code, sha, _ = await _run(argv, cwd=repo)
-            if code == 0:
-                break
-        else:
-            return None, None
-        argv = [*_READ_GIT, "cat-file", "blob", f"{sha.strip()}:{_MODEL_PATH}"]
-        code, text, _ = await _run(argv, cwd=repo)
+            sha, model = await read_repo_model(repo, rev)
+            if sha:
+                return ref, model
     except (OSError, RuntimeError):  # git missing, or the 120 s timeout
         logger.debug("belt: could not read the blueprint", exc_info=True)
-        return None, None
-    if code != 0 or len(text.encode("utf-8")) > MAX_MODEL_BYTES:
-        return ref, None
-    return ref, load_model(text)
+    return None, None
 
 
 async def _touched_files(workspace_id: str, action_id: str, blob: dict[str, Any]) -> list[str]:

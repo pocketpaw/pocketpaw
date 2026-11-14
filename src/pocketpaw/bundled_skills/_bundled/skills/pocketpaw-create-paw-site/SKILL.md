@@ -236,18 +236,9 @@ print is display only: never put a price or currency in the button's data.
 - a signup: `<form data-paw-subscribe>` with an `<input type="email" name="email">`
 - anything else: `Paw.call(provider, action, args)` in a small inline script
 
-Booking pages: call `connect_site_integration(pocket_id, 'calendly' | 'cal_com',
-purpose)`. The card asks the owner for their public booking link (no account to
-connect); `list_site_integrations` shows it as `settings.url`. Embed that link with
-the provider's standard inline embed markup, and never invent one.
-
-Forms into a spreadsheet: `connect_site_integration(pocket_id, 'google_sheets', purpose)`,
-then submit with `Paw.call('google_sheets', 'append_row', {fields})` (string values).
-Lead forms into a CRM: `connect_site_integration(pocket_id, 'hubspot', purpose)`, then
-`Paw.call('hubspot', 'create_contact', {email, firstname, lastname, phone, company, message})`.
-Zoho CRM instead: provider `zoho_crm`, `Paw.call('zoho_crm', 'create_lead', {email, first_name, last_name, phone, company, message})`.
-Indian sellers (INR, UPI): `connect_site_integration(pocket_id, 'razorpay', purpose)`; `data-paw-checkout`
-is Stripe-only, so the button runs `Paw.call('razorpay', 'create_checkout', {product_ref, qty})` and opens `result.url`.
+Every other provider (booking embeds, spreadsheets, CRMs, Razorpay, Shopify,
+Mailchimp, Brevo, Notion, Turnstile): `connect_site_integration`'s reply carries
+that provider's exact wiring, action names and args included. Follow it.
 
 ### Changing an html site that already exists
 

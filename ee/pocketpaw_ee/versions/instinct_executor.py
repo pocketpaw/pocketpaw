@@ -1,58 +1,50 @@
-# ee/pocketpaw_ee/versions/instinct_executor.py
-# Created: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — the
-# apply-on-approve / discard-on-reject executor for the Branch primitive's
-# artifact-change merge gate.
+# ee/pocketpaw_ee/versions/instinct_executor.py — the apply-on-approve /
+# discard-on-reject executor for the Branch primitive's artifact-change merge gate.
 #
-# Updated 2026-06-19 (P2a — discard-all-drafts): discard_rejected_change now
-# clears ALL drafts above the published pointer in one pass via
-# versions_service.discard_all_drafts (passing the blob's branch), instead of
-# reverting only the single candidate ``to_version_id``. Fixes "discard needs N
-# clicks": a pocket edited N times accumulated N draft rows, and reverting only
-# the latest left the others standing so the unpublished-changes bar never
-# cleared. The published pointer is still left untouched (a reject never moves
-# Live).
+# The Instinct router dispatches here when an approved / rejected Action carries an
+# ``_artifact_change`` blob (the peer of the pocket-write bridge, the belt
+# code-change executor and the external-action executor). Artifact-generic over
+# (scope_type, scope_id). The router owns the tenant gate
+# (``_assert_artifact_change_workspace``, a 403 before any mutation) and the
+# Decision-Graph chain emits; this module owns the state transitions and the deploy.
 #
-# This is the executor the Instinct router dispatches to when an approved /
-# rejected Action carries an ``_artifact_change`` blob (the peer of the
-# pocket-write bridge, the belt code-change executor, and the external-action
-# executor). It is artifact-GENERIC over (scope_type, scope_id) and keeps the
-# router thin — the router owns the tenant gate (``_assert_artifact_change_
-# workspace``, a 403 before any mutation) + the Decision-Graph chain emits; this
-# module owns the actual MERGE / DISCARD state transitions + the deploy trigger.
-#
-# Contract (mirrors the belt executor):
-#   * execute_approved_change(action, human_event_id=None) — APPROVE = MERGE:
-#       1. publish the reviewed candidate (``to_version_id``) → moves the
-#          published pointer via versions.publish(). This IS the merge. In the
-#          single-row derived-pointer model (versions/models.py) published/merged
-#          are mutually exclusive, so we do NOT also mark this row "merged" — that
-#          would erase the published pointer. ``service.mark_merged`` exists for a
-#          branch-based flow where the published row lives separately on main
-#          (BP-4 / a producer path), not for this in-place promote.
-#       2. for pocket/site scope, trigger the deploy via BP-2's
-#          ``sites.service.publish_pocket(...)`` so Live reflects the new
-#          published version;
-#       3. mark the Action ``executed`` (success) or ``failed`` (any error) on
-#          the Instinct store, so The Tray shows the outcome.
-#   * discard_rejected_change(action) — REJECT = DISCARD: flip the candidate
-#       (``to_version_id``) status="discarded" so it leaves the draft pointer; the
-#       PUBLISHED pointer is left UNTOUCHED (a rejection never moves what is
-#       live). No deploy. Best-effort store nudge — the router already closed the
-#       chain on the reject path.
+#   * execute_approved_change(action, human_event_id=None, confirm_destructive=False)
+#     APPROVE = MERGE: publish ``to_version_id`` (moves the published pointer; the
+#     row is NOT also marked merged, which would erase that pointer in the
+#     single-row model), then for a pocket/site scope deploy through
+#     ``sites.service.publish_pocket``, then mark the Action executed or failed.
+#     The blob's ``destructive_migrations`` (recorded and pinned at propose time)
+#     become the deploy's ``confirm_destructive_migrations`` ONLY when the caller
+#     passes ``confirm_destructive=True``, which the single-Action approve route
+#     does and bulk approve does not: a migration that deletes data is approved one
+#     card at a time, by someone who saw it.
+#     The publish gate runs BEFORE the merge: blocking findings (placeholders, made-up
+#     numbers, broken forms) fail the Action with the owner-worded refusal and record
+#     them on the blob as ``publish_blocked``; nothing is promoted or deployed.
+#     ``confirm_placeholders=True`` (an individual approve's "publish anyway") skips it.
+#   * approve_gate(store, action, ...) — the same gate for the single-Action approve
+#     route, run BEFORE the Action flips to approved: a refusal is returned (the
+#     route raises it as 409 ``sites.publish_blocked``) and the card stays pending,
+#     so "Publish anyway" approves that same card. Publish anyway counts only when
+#     it echoes the refusal's ``findings_digest``. A pass returns the content hash it
+#     checked; the route hands it to the executor as ``gated_hash``, which skips its
+#     own check only while the draft still has that hash. A STALE card is refused
+#     there first (409 ``sites.publish_review_stale``, the card failed).
+#     A STALE card is refused before the gate: the pocket's content no longer matches
+#     the ``reviewed_content_hash`` the card was filed for (or, on a card without one,
+#     a newer draft superseded ``to_version_id``). The Action fails with
+#     ``sites.publish_review_stale`` and ``publish_stale`` on the blob; nothing is
+#     promoted or deployed, and the owner files a new review of the current draft.
+#   * discard_rejected_change(action) — REJECT = DISCARD: every draft above the
+#     published pointer is discarded in one pass (``discard_all_drafts``); the
+#     published pointer is untouched and nothing deploys. Best effort.
 #
 # Both lazy-import the versions + sites services so the instinct package keeps no
-# module-top dependency on either (same discipline as the other executors), and
-# the deploy trigger is itself wrapped so a deploy failure marks the Action
-# failed rather than crashing the approve response (the router's call is also
-# best-effort).
-#
-# TODO(BP-4): revert/discard semantics deepen — BP-4 owns reverting the published
-# pointer to a prior snapshot + the Journal history projection. BP-3 only
-# promotes the candidate on approve and abandons it on reject.
+# module-top dependency on either. Neither raises: failures land on the Action.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +74,258 @@ def artifact_change_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
-async def execute_approved_change(action: Any, *, human_event_id: Any | None = None) -> None:
+class GateResult(NamedTuple):
+    """What the publish gate decided: the refusal (None to go ahead) and the
+    content hash it checked ("" when the pocket could not be read)."""
+
+    refusal: Any
+    content_hash: str
+
+
+def _content_hash(pocket: Any) -> str:
+    from pocketpaw_ee.sites import verify
+
+    if pocket is None:
+        return ""
+    try:
+        return str(verify.publish_content_hash(pocket) or "")
+    except Exception:  # noqa: BLE001 — no hash: nothing can be skipped on it
+        return ""
+
+
+def _confirmed_migration_keys(blob: dict[str, Any]) -> list[str]:
+    """The ``name:sha256`` keys of the destructive migrations the card showed."""
+    found = blob.get("destructive_migrations")
+    if not isinstance(found, list):
+        return []
+    return sorted({str(d["key"]) for d in found if isinstance(d, dict) and d.get("key")})
+
+
+async def _gate(
+    store: Any,
+    action: Any,
+    blob: dict[str, Any],
+    *,
+    workspace_id: str,
+    scope_id: str,
+    author: str,
+    confirmed: bool,
+    confirm_digest: str | None = None,
+    approver: str | None = None,
+    can_override: bool = True,
+    base_parameters: dict[str, Any] | None = None,
+) -> GateResult:
+    """Run the publish gate on the pocket about to go live. On blocking findings and
+    no ``confirm_placeholders``: record them on the Action's stored blob as
+    ``publish_blocked`` and return the :class:`~pocketpaw_ee.sites.publish_gate.
+    PublishBlocked` refusal (nothing is merged, nothing deploys). A
+    ``confirm_digest`` other than None must match the current findings, or the
+    confirm does not count. With the approver's "publish anyway" the override is
+    audited under the approver. Content that goes ahead is remembered as vetted, so
+    the deploy's own gate (a machine republish) does not run twice.
+    ``base_parameters`` is what gets written back (the stored proposal, never an
+    approver's unreviewed edits)."""
+    from pocketpaw_ee.sites import publish_gate, verify
+
+    pocket, findings, skipped = await publish_gate.pocket_check(pocket_id=scope_id, user_id=author)
+    content_hash = _content_hash(pocket)
+    if confirm_digest is not None and confirm_digest != publish_gate.findings_digest(findings):
+        confirmed = False
+    if findings and confirmed:
+        approver = str(approver or getattr(action, "approved_by", None) or author)
+        await publish_gate.audit_override(
+            workspace_id=workspace_id, actor_id=approver, pocket_id=scope_id, findings=findings
+        )
+    if not findings or confirmed:
+        # A skipped or partial check vouches for nothing: the deploy then gates again.
+        if pocket is not None and (not skipped or confirmed):
+            try:
+                publish_gate.remember_gated(scope_id, verify.publish_content_hash(pocket))
+            except Exception:  # noqa: BLE001 — the deploy then gates again; harmless
+                logger.warning("artifact-change merge: could not remember %s", scope_id)
+        return GateResult(None, content_hash)
+    refusal = publish_gate.refusal(findings, can_override=can_override)
+    try:
+        stored = base_parameters if base_parameters is not None else action.parameters
+        parameters = dict(stored or {})
+        if isinstance(parameters.get("_artifact_change"), dict):
+            blob = parameters["_artifact_change"]
+        parameters["_artifact_change"] = {**blob, "publish_blocked": refusal.details}
+        await store.update_parameters(action.id, parameters)
+    except Exception:  # noqa: BLE001 — the error text still carries every finding
+        logger.warning("artifact-change merge: could not record findings on %s", action.id)
+    return GateResult(refusal, content_hash)
+
+
+async def _current_hash(scope_id: str, author: str) -> str:
+    """The publish content hash of the pocket as it is now ("" when unreadable)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        return _content_hash(await pockets_service.get(scope_id, author))
+    except Exception:  # noqa: BLE001 — unreadable: the caller re-runs the gate
+        return ""
+
+
+async def _publish_blocked(
+    store: Any,
+    action: Any,
+    blob: dict[str, Any],
+    *,
+    workspace_id: str,
+    scope_id: str,
+    author: str,
+    confirmed: bool,
+    confirm_digest: str | None = None,
+    gated_hash: str | None = None,
+) -> bool:
+    """:func:`_gate` for an already-approved Action: a refusal fails the Action with
+    the owner-worded message (recorded with ``can_override`` false: a failed card
+    cannot be approved again) and returns True. ``gated_hash`` is the content the
+    approve route already passed (:func:`approve_gate`); while the draft still has
+    it, the gate does not run twice."""
+    if gated_hash and await _current_hash(scope_id, author) == gated_hash:
+        return False
+    refusal, _ = await _gate(
+        store,
+        action,
+        blob,
+        workspace_id=workspace_id,
+        scope_id=scope_id,
+        author=author,
+        confirmed=confirmed,
+        confirm_digest=confirm_digest,
+        can_override=False,
+    )
+    if refusal is None:
+        return False
+    await store.mark_failed(action.id, f"{refusal.code}: {refusal.message}")
+    return True
+
+
+def _stale_refusal(blob: dict[str, Any]) -> Any:
+    from pocketpaw_ee.sites.publish_gate import PublishReviewStale
+
+    return PublishReviewStale(str(blob.get("to_version_id") or "") or None)
+
+
+async def _review_is_stale(blob: dict[str, Any], *, scope_id: str, author: str) -> bool:
+    """True when the content the card reviewed is no longer what would deploy.
+
+    ``publish_pocket`` deploys the pocket's CURRENT content, not the ``to_version_id``
+    snapshot, so approving a card filed for older content would ship edits the
+    reviewer never saw and mark the wrong version published. With a
+    ``reviewed_content_hash`` the pocket's current hash must equal it; without one (an
+    older card, or an engine with no content hash) a ``to_version_id`` that a later
+    draft superseded (or a discard dropped) is the signal. An unreadable pocket is not
+    stale here: the deploy reads it again and fails on its own."""
+    reviewed = str(blob.get("reviewed_content_hash") or "")
+    if reviewed:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+        from pocketpaw_ee.sites import verify
+
+        try:
+            pocket = await pockets_service.get(scope_id, author)
+            current = verify.publish_content_hash(pocket)
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("artifact-change merge: could not read %s to check the review", scope_id)
+            return False
+        if current:
+            return current != reviewed
+    from pocketpaw_ee.versions import service as versions_service
+
+    try:
+        row = await versions_service._scoped_row(
+            scope_type=str(blob.get("scope_type") or ""),
+            scope_id=scope_id,
+            workspace_id=str(blob.get("workspace") or blob.get("workspace_id") or ""),
+            version_id=str(blob.get("to_version_id") or ""),
+        )
+    except Exception:  # noqa: BLE001 - a missing version fails in the merge below
+        return False
+    # A later edit superseded the reviewed draft (or a discard dropped it).
+    return row.status in ("superseded", "discarded")
+
+
+async def _refuse_stale(
+    store: Any, action: Any, blob: dict[str, Any], *, base_parameters: Any = None
+) -> Any:
+    """Fail the card as stale: ``publish_stale`` (the refusal's code, message and
+    details) on its stored blob, ``error`` = ``<code>: <message>``. Returns the
+    :class:`~pocketpaw_ee.sites.publish_gate.PublishReviewStale` refusal."""
+    refusal = _stale_refusal(blob)
+    try:
+        stored = base_parameters if base_parameters is not None else action.parameters
+        parameters = dict(stored or {})
+        if isinstance(parameters.get("_artifact_change"), dict):
+            blob = parameters["_artifact_change"]
+        parameters["_artifact_change"] = {
+            **blob,
+            "publish_stale": {
+                "code": refusal.code,
+                "message": refusal.message,
+                **refusal.details,
+            },
+        }
+        if base_parameters is None:
+            action.parameters = parameters  # the executor's copy (no route reread)
+        await store.update_parameters(action.id, parameters)
+    except Exception:  # noqa: BLE001 - the error text still says why
+        logger.warning("artifact-change merge: could not record the stale review on %s", action.id)
+    await store.mark_failed(action.id, f"{refusal.code}: {refusal.message}")
+    return refusal
+
+
+async def approve_gate(
+    store: Any,
+    action: Any,
+    *,
+    approver: str,
+    confirm_placeholders: bool,
+    confirm_digest: str | None,
+    stored_parameters: dict[str, Any] | None,
+) -> GateResult:
+    """The publish gate for a single-Action approve, run while the card is still
+    pending. ``refusal`` is the ``PublishBlocked`` (findings recorded on the stored
+    blob, ``stored_parameters``) or None when the approve may go ahead, including for
+    blobs that do not deploy. A Publish anyway counts only with the refusal's
+    ``findings_digest`` (``confirm_digest``). ``content_hash`` is what was checked."""
+    blob = artifact_change_blob(action)
+    if blob is None:
+        return GateResult(None, "")
+    scope_type = str(blob.get("scope_type") or "")
+    scope_id = str(blob.get("scope_id") or "")
+    workspace_id = str(blob.get("workspace") or blob.get("workspace_id") or "")
+    if scope_type not in _DEPLOYABLE_SCOPES or not scope_id:
+        return GateResult(None, "")
+    author = str(blob.get("user_id") or "system")
+    # A card filed for content the site no longer holds: no override, the card fails.
+    if await _review_is_stale(blob, scope_id=scope_id, author=author):
+        refusal = await _refuse_stale(store, action, blob, base_parameters=stored_parameters)
+        return GateResult(refusal, "")
+    return await _gate(
+        store,
+        action,
+        blob,
+        workspace_id=workspace_id,
+        scope_id=scope_id,
+        author=author,
+        confirmed=confirm_placeholders,
+        confirm_digest=confirm_digest or "",
+        approver=approver,
+        base_parameters=stored_parameters,
+    )
+
+
+async def execute_approved_change(
+    action: Any,
+    *,
+    human_event_id: Any | None = None,
+    confirm_destructive: bool = False,
+    confirm_placeholders: bool = False,
+    confirm_findings_digest: str | None = None,
+    gated_hash: str | None = None,
+) -> None:
     """MERGE an approved artifact-change Action (BP-3).
 
     Promotes the candidate draft (``to_version_id``) to published, marks it
@@ -120,6 +363,29 @@ async def execute_approved_change(action: Any, *, human_event_id: Any | None = N
             action.id,
             "artifact-change merge: blob missing scope_type/scope_id/workspace/to_version_id",
         )
+        return
+
+    # A card filed for content the pocket no longer holds is refused outright: the
+    # deploy below ships the CURRENT content, which nobody reviewed.
+    if scope_type in _DEPLOYABLE_SCOPES and await _review_is_stale(
+        blob, scope_id=scope_id, author=str(author or "system")
+    ):
+        await _refuse_stale(store, action, blob)
+        return
+
+    # The publish gate BEFORE the merge: a refused publish promotes no version, so the
+    # draft stays the draft and the owner can fix it and ask again.
+    if scope_type in _DEPLOYABLE_SCOPES and await _publish_blocked(
+        store,
+        action,
+        blob,
+        workspace_id=workspace_id,
+        scope_id=scope_id,
+        author=str(author or "system"),
+        confirmed=confirm_placeholders,
+        confirm_digest=confirm_findings_digest,
+        gated_hash=gated_hash,
+    ):
         return
 
     try:
@@ -165,10 +431,17 @@ async def execute_approved_change(action: Any, *, human_event_id: Any | None = N
         try:
             from pocketpaw_ee.sites import service as sites_service
 
+            confirm_kw: dict[str, Any] = {}
+            keys = _confirmed_migration_keys(blob) if confirm_destructive else []
+            if keys:
+                confirm_kw["confirm_destructive_migrations"] = keys
             await sites_service.publish_pocket(
                 workspace_id=workspace_id,
                 user_id=str(author or "system"),
                 pocket_id=scope_id,
+                # Gated above, before the merge, and remembered: exempt as vetted.
+                machine_republish=True,
+                **confirm_kw,
             )
             deploy_note = " + deploy triggered"
         except Exception as exc:  # noqa: BLE001 — failed Action, never raise

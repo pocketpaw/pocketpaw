@@ -135,6 +135,7 @@ class AgentRouter:
         *,
         settings_override: dict[str, Any] | None = None,
         policy: Any = None,
+        per_turn: bool = False,
     ) -> Any:
         """Build a fresh, non-cached AgentBackend with optional settings overrides.
 
@@ -145,7 +146,22 @@ class AgentRouter:
         ``policy`` is a per-agent ToolPolicy, handed to a backend whose
         ``__init__`` declares one; without it the backend builds the
         process-wide policy from settings.
+
+        ``per_turn=True`` marks a backend released right after one turn (BYOK):
+        it sets ``backend.per_turn`` so the backend keeps nothing warm for later.
         """
+        backend = cls._build_isolated(backend_name, settings, settings_override, policy)
+        if per_turn:
+            backend.per_turn = True
+        return backend
+
+    @staticmethod
+    def _build_isolated(
+        backend_name: str,
+        settings: Settings,
+        settings_override: dict[str, Any] | None,
+        policy: Any,
+    ) -> Any:
         backend_cls = get_backend_class(backend_name)
         if backend_cls is None:
             raise ValueError(

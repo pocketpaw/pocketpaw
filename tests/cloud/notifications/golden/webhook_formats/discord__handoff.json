@@ -1,0 +1,34 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "content": "A visitor asked for a person · Bright Smile",
+  "embeds": [
+    {
+      "color": 14251782,
+      "fields": [
+        {
+          "inline": true,
+          "name": "Name",
+          "value": "Priya Sharma"
+        },
+        {
+          "inline": true,
+          "name": "Email",
+          "value": "priya@example.com"
+        },
+        {
+          "inline": false,
+          "name": "Message",
+          "value": "Can I talk to someone about a bulk order before Friday?"
+        }
+      ],
+      "footer": {
+        "text": "Bright Smile · Paw"
+      },
+      "timestamp": "2026-10-10T09:30:00+00:00",
+      "title": "A visitor asked for a person",
+      "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+    }
+  ]
+}

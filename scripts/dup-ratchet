@@ -58,7 +58,7 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"(?<!def )check_quota\(",
         ("*",),
         ("ee/pocketpaw_ee/cloud/credits/guards.py",),
-        1,
+        0,
         "credits/guards.over_billing_limit",
     ),
     (

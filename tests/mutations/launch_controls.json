@@ -1,0 +1,83 @@
+[
+  {
+    "label": "the kill switch is never checked, so a paused launch keeps spending",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if controls.free_usage_paused and await is_platform_funded_free(workspace_id):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/credits/test_launch_controls.py"
+    ]
+  },
+  {
+    "label": "the kill switch ignores who pays, so paid workspaces are paused too",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if controls.free_usage_paused and await is_platform_funded_free(workspace_id):\n",
+    "replace": "    if controls.free_usage_paused:\n",
+    "tests": [
+      "tests/cloud/credits/test_launch_controls.py"
+    ]
+  },
+  {
+    "label": "the snapshot never expires, so a worker never sees a flip",
+    "file": "ee/pocketpaw_ee/cloud/launch_controls/service.py",
+    "find": "    if _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:\n",
+    "replace": "    if _cache is not None:\n",
+    "tests": [
+      "tests/cloud/credits/test_launch_controls.py"
+    ]
+  },
+  {
+    "label": "there is no cache, so every run reads Mongo",
+    "file": "ee/pocketpaw_ee/cloud/launch_controls/service.py",
+    "find": "    if _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/credits/test_launch_controls.py"
+    ]
+  },
+  {
+    "label": "a failed read raises instead of failing open",
+    "file": "ee/pocketpaw_ee/cloud/launch_controls/service.py",
+    "find": "        return LaunchControls(read_failed=True)\n",
+    "replace": "        raise\n",
+    "tests": [
+      "tests/cloud/credits/test_launch_controls.py"
+    ]
+  },
+  {
+    "label": "an operator write leaves the writer's stale snapshot in place",
+    "file": "ee/pocketpaw_ee/cloud/launch_controls/service.py",
+    "find": "        await doc.save()\n    invalidate_cache()\n",
+    "replace": "        await doc.save()\n",
+    "tests": [
+      "tests/cloud/credits/test_launch_controls.py"
+    ]
+  },
+  {
+    "label": "waitlist emails are stored as typed, so case variants duplicate",
+    "file": "ee/pocketpaw_ee/cloud/early_access/service.py",
+    "find": "str(body.email).strip().lower()",
+    "replace": "str(body.email)",
+    "tests": [
+      "tests/cloud/credits/test_early_access_waitlist.py"
+    ]
+  },
+  {
+    "label": "a repeat waitlist join errors and reveals the email is known",
+    "file": "ee/pocketpaw_ee/cloud/early_access/service.py",
+    "find": "    except DuplicateKeyError:\n        pass\n",
+    "replace": "    except ZeroDivisionError:\n        pass\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_waitlist.py"
+    ]
+  },
+  {
+    "label": "the waitlist route has no rate limit",
+    "file": "ee/pocketpaw_ee/cloud/early_access/router.py",
+    "find": "dependencies=[Depends(rate_limit_early_access_waitlist)]",
+    "replace": "dependencies=[]",
+    "tests": [
+      "tests/cloud/credits/test_early_access_waitlist.py"
+    ]
+  }
+]

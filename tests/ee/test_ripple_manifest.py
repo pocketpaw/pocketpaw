@@ -1,5 +1,5 @@
 # backend/tests/test_ripple_manifest.py
-"""Tests for ee.ripple.manifest — fetcher, cache, formatter, fallback."""
+"""Tests for pocketpaw.ripple.manifest: override fetch, cache, formatter, bundled fallback."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ pytestmark = pytest.mark.asyncio
 
 VALID_MANIFEST = {
     "schema": "ripple.manifest/v1",
-    "version": "0.2.0",
+    "version": "99.0.0",  # newer than bundled, so an override serves it
     "generatedAt": "2026-05-02T00:00:00.000Z",
     "spec": {
         "uiField": "ui",
@@ -24,6 +24,19 @@ VALID_MANIFEST = {
             "state": {"draft": "", "items": []},
             "ui": {"type": "flex", "props": {}, "children": []},
         },
+    },
+    "actions": {
+        "set": {
+            "description": "Assign `value` to the state path `target`. The most common action.",
+            "shape": {"action": '"set"', "target": "string", "value?": "any"},
+        }
+    },
+    "motion": {
+        "field": "motion",
+        "description": "Add a `motion` field to ANY node to animate it.",
+        "budgetRule": "MOTION BUDGET: animate entrances and the PRIMARY call-to-action only.",
+        "presets": {"snappy": "spring, the default."},
+        "examples": [{"name": "hero-entrance-example-not-rendered"}],
     },
     "widgets": [
         {
@@ -101,7 +114,7 @@ async def test_fetch_timeout_returns_none(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     result = await m.get_manifest("https://example/manifest.json", ttl_seconds=60)
-    assert result is None
+    assert result is m.load_bundled_manifest()
 
 
 async def test_fetch_4xx_returns_none(monkeypatch):
@@ -112,7 +125,7 @@ async def test_fetch_4xx_returns_none(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     result = await m.get_manifest("https://example/manifest.json", ttl_seconds=60)
-    assert result is None
+    assert result is m.load_bundled_manifest()
 
 
 async def test_malformed_json_returns_none(monkeypatch):
@@ -123,7 +136,7 @@ async def test_malformed_json_returns_none(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     result = await m.get_manifest("https://example/manifest.json", ttl_seconds=60)
-    assert result is None
+    assert result is m.load_bundled_manifest()
 
 
 async def test_schema_mismatch_returns_none(monkeypatch):
@@ -136,7 +149,7 @@ async def test_schema_mismatch_returns_none(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     result = await m.get_manifest("https://example/manifest.json", ttl_seconds=60)
-    assert result is None
+    assert result is m.load_bundled_manifest()
 
 
 async def test_missing_widgets_field_returns_none(monkeypatch):
@@ -149,7 +162,7 @@ async def test_missing_widgets_field_returns_none(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     result = await m.get_manifest("https://example/manifest.json", ttl_seconds=60)
-    assert result is None
+    assert result is m.load_bundled_manifest()
 
 
 def test_format_for_prompt_renders_widgets():
@@ -179,6 +192,10 @@ async def test_get_widget_spec_handler_returns_matched_entries(monkeypatch):
         return httpx.Response(200, json=VALID_MANIFEST, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    import pocketpaw.config as config
+
+    override = config.Settings(ripple_manifest_url="https://example/manifest.json")
+    monkeypatch.setattr(config, "get_settings", lambda: override)
     m._cache.clear()
 
     result = await _get_widget_spec_handler({"types": ["metric"]})
@@ -187,6 +204,27 @@ async def test_get_widget_spec_handler_returns_matched_entries(monkeypatch):
     assert "metric" in text
     assert "KPI tile." in text
     assert "**Props:**" in text
+    # The action grammar and the motion field ride along with every lookup.
+    assert "- `set` {target, value?} — Assign `value` to the state path `target`" in text
+    assert "MOTION BUDGET" in text
+    assert "`snappy` spring, the default" in text
+    assert "hero-entrance-example-not-rendered" not in text
+
+
+async def test_widget_spec_builtin_tool_includes_actions_and_motion(monkeypatch):
+    """The runtime builtin (every backend) carries the same action grammar."""
+    from pocketpaw.ripple import manifest as m
+    from pocketpaw.tools.builtin.widget_spec import WidgetSpecTool
+
+    async def fake_get(self, url, timeout):
+        return httpx.Response(200, json=VALID_MANIFEST, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    m._cache.clear()
+
+    text = await WidgetSpecTool().execute(types=["metric"])
+    assert "## Actions" in text
+    assert "MOTION BUDGET" in text
 
 
 async def test_get_widget_spec_handler_errors_on_empty_types():
@@ -263,7 +301,9 @@ async def test_format_for_prompt_handles_legacy_manifest_without_envelope():
     assert "metric" in out
 
 
-async def test_get_widget_spec_handler_errors_when_manifest_unavailable(monkeypatch):
+async def test_get_widget_spec_handler_falls_back_to_bundled_when_override_is_down(monkeypatch):
+    """A failing ``ripple_manifest_url`` override serves the bundled catalog."""
+    import pocketpaw.config as config
     from pocketpaw.agents.sdk_mcp_widgets import _get_widget_spec_handler
     from pocketpaw.ripple import manifest as m
 
@@ -271,11 +311,13 @@ async def test_get_widget_spec_handler_errors_when_manifest_unavailable(monkeypa
         raise httpx.TimeoutException("simulated timeout")
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    override = config.Settings(ripple_manifest_url="https://down.example/manifest.json")
+    monkeypatch.setattr(config, "get_settings", lambda: override)
     m._cache.clear()
 
-    result = await _get_widget_spec_handler({"types": ["metric"]})
-    assert result["is_error"] is True
-    assert "unavailable" in result["content"][0]["text"]
+    result = await _get_widget_spec_handler({"types": ["itinerary"]})
+    assert result.get("is_error") is not True
+    assert "itinerary" in result["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +330,7 @@ async def test_get_widget_spec_handler_errors_when_manifest_unavailable(monkeypa
 
 VALIDATE_MANIFEST = {
     "schema": "ripple.manifest/v1",
-    "version": "0.2.0",
+    "version": "99.0.0",  # newer than bundled, so an override serves it
     "widgets": [
         {
             "type": "timeline",
@@ -498,7 +540,7 @@ def test_validate_unknown_widget_type_is_ignored():
 # those are universal node-level props the renderer wraps on.
 SITE_MANIFEST = {
     "schema": "ripple.manifest/v1",
-    "version": "0.2.0",
+    "version": "99.0.0",  # newer than bundled, so an override serves it
     "widgets": [
         {"type": "section", "props": {"title": {}, "description": {}}},
         {
@@ -643,17 +685,16 @@ async def test_agent_context_validator_mutates_spec_in_place(monkeypatch):
 
 
 async def test_agent_context_validator_skips_when_manifest_unavailable(monkeypatch):
-    """Manifest fetch failure is non-fatal — the spec passes through
+    """A manifest load that raises is non-fatal — the spec passes through
     untouched and the write proceeds."""
     from pocketpaw_ee.cloud.pockets import agent_context
 
     from pocketpaw.ripple import manifest as m
 
-    async def fake_get(self, url, timeout):
-        raise httpx.TimeoutException("network down")
+    async def broken(url, ttl_seconds):
+        raise RuntimeError("manifest unreadable")
 
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
-    m._cache.clear()
+    monkeypatch.setattr(m, "get_manifest", broken)
 
     spec = {
         "ui": {

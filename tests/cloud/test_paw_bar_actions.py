@@ -139,18 +139,22 @@ def stores(tmp_path: Path, monkeypatch):
 
 class TestExecutorAuto:
     async def test_add_to_cart_happy_path(self, stores) -> None:
-        from pocketpaw_ee.paw_bar.actions import execute_action
+        from pocketpaw_ee.paw_bar.actions import _cart_ref, execute_action
 
         pp_store, _ = stores
         widget = await pp_store.create_widget(_widget())
-        out = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "espresso"})
+        # Non-hex characters, so the ref can never show up inside the hex cart handle by chance.
+        ref = "customer-ref-xyz"
+        out = await execute_action(widget, "ws-1", ref, "add_to_cart", {"product_id": "espresso"})
         assert out.ok
         assert out.result == {"added": "espresso", "qty": 1}
         assert out.cart["total_cents"] == 350
         assert out.cart["items"][0]["id"] == "espresso"
         # checkout_url is rendered with the opaque cart ref (no raw customer_ref).
-        assert "{cart_ref}" not in out.cart["checkout_url"]
-        assert "c1" not in out.cart["checkout_url"]
+        assert out.cart["checkout_url"] == (
+            f"https://brewco.com/checkout?cart={_cart_ref(str(widget.id), ref)}"
+        )
+        assert ref not in out.cart["checkout_url"]
 
     async def test_add_to_cart_unknown_product_rejected(self, stores) -> None:
         from pocketpaw_ee.paw_bar.actions import execute_action
@@ -563,9 +567,7 @@ class TestWidgetPatch:
         client, store = admin_client
         import asyncio
 
-        widget = asyncio.get_event_loop().run_until_complete(
-            store.create_widget(_widget(agent_id="", workspace_id="ws-1"))
-        )
+        widget = asyncio.run(store.create_widget(_widget(agent_id="", workspace_id="ws-1")))
         res = client.patch(
             f"/paw-bar/widgets/{widget.id}",
             json={"agent_id": "agent-new", "name": "Renamed"},
@@ -582,7 +584,7 @@ class TestWidgetPatch:
         client, store = admin_client
         import asyncio
 
-        widget = asyncio.get_event_loop().run_until_complete(
+        widget = asyncio.run(
             store.create_widget(_widget(agent_id="agent-xyz", workspace_id="ws-1"))
         )
         res = client.patch(
@@ -598,9 +600,7 @@ class TestWidgetPatch:
         import asyncio
 
         # A widget owned by ws-other must 404 for the ws-1 admin session.
-        widget = asyncio.get_event_loop().run_until_complete(
-            store.create_widget(_widget(workspace_id="ws-other"))
-        )
+        widget = asyncio.run(store.create_widget(_widget(workspace_id="ws-other")))
         res = client.patch(
             f"/paw-bar/widgets/{widget.id}",
             json={"agent_id": "x"},
@@ -803,15 +803,26 @@ class TestCatalogPreamble:
                 {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"}
             ],
         )
-        pre = await build_preamble("ws", "u", meta)
+        pre = (await build_preamble("ws", "u", meta)).text
         assert "espresso" in pre and "$3.50" in pre
         assert "pawbar_add_to_cart" in pre
+
+    async def test_an_item_with_no_price_lists_no_price(self) -> None:
+        """price_cents 0 is "no listed price" (an application-only event, an owner
+        item never priced): the line names the item and claims no $0.00."""
+        from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
+
+        block = _catalog_block(
+            [{"id": "jazz", "name": "Jazz Night", "price_cents": 0, "currency": "USD"}]
+        )
+        assert 'id "jazz": Jazz Night\n' in block
+        assert "$0.00" not in block
 
     async def test_no_actions_preamble_has_no_catalog(self) -> None:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        pre = (await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))).text
         assert "Products you can sell" not in pre
         assert "don't act" in pre
 
@@ -824,9 +835,11 @@ class TestFormCardPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        return await build_preamble(
-            "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
-        )
+        return (
+            await build_preamble(
+                "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
+            )
+        ).text
 
     async def test_gated_action_with_args_renders_form_instructions(self) -> None:
         """A gated action with typed args teaches the "form" pawbar-card: the
@@ -856,7 +869,7 @@ class TestFormCardPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        pre = (await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))).text
         assert "FORMS for gated actions" not in pre
         assert '"kind": "form"' not in pre
 

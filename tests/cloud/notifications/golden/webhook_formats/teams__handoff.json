@@ -1,0 +1,62 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in Paw",
+            "type": "Action.OpenUrl",
+            "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+          }
+        ],
+        "body": [
+          {
+            "size": "Medium",
+            "text": "A visitor asked for a person",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "spacing": "None",
+            "text": "Bright Smile",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "facts": [
+              {
+                "title": "Name",
+                "value": "Priya Sharma"
+              },
+              {
+                "title": "Email",
+                "value": "priya@example.com"
+              }
+            ],
+            "type": "FactSet"
+          },
+          {
+            "text": "Message",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "spacing": "Small",
+            "text": "Can I talk to someone about a bulk order before Friday?",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

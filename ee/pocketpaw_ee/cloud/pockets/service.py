@@ -9,15 +9,12 @@ The import-linter pins that boundary: sites, kb, connectors, reconcile, the
 schedulers and the jobs worker reach pockets THROUGH this module, so a new
 caller that needs a field adds a function here rather than a second reader.
 
-Public API: ``create`` / ``get`` / ``get_for_wire`` / ``can_read`` /
-``list_pockets`` / ``update`` / ``delete``; ``ensure_home_pocket``;
-``duplicate_pocket`` and the ``copy_site_snapshot`` it writes through; the
-share-link, collaborator, team and agent mutators; the per-pocket backend +
-write/tool allowlist setters; ``merge_spec``; ``site_render_inputs``; the
-``set_{svelte,react,html}_source_file`` edit lane and
-``set_site_dependency_manifest`` (the only writer of ``paw.dependencies.json``);
-``scan_source_site_pockets`` + ``migrate_legacy_build_shell``; and the
-``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist drives over MCP.
+Public API: CRUD (``create`` / ``get`` / ``get_for_wire`` / ``list_pockets`` /
+``update`` / ``delete``), ``duplicate_pocket`` / ``copy_site_snapshot``, the
+share, collaborator, team, agent and backend mutators, ``merge_spec``, every
+``pocket.source`` writer (the per-file edit lane, ``set_project_source``, the
+upgrade pair, Discard's and Revert's restores, the dependency manifest, the
+build-shell migration, imports) and the ``agent_*`` ``rippleSpec.ui`` ops.
 
 INVARIANTS a reader must not break:
 
@@ -44,6 +41,9 @@ INVARIANTS a reader must not break:
   overlays per key through ``_layer_safe_update_spec`` unless ``reset_state`` is
   set or a ``template_slug`` recompile is in play. The typed ``RippleSpec`` is an
   INTERNAL representation only: every reader, and both stored shapes, stay dicts.
+* EVERY ``source`` WRITE IS A COMPARE-AND-SET (``_commit_fields``), never a
+  ``doc.save()``: a save re-sends the whole map it read and drops a concurrent
+  edit to another file. Writers retry from a fresh read (``_retry_source_race``).
 * DRAFT ``ArtifactVersion`` SNAPSHOTS ARE BEST-EFFORT. A version-store failure
   logs and never breaks the write it was recording.
 * ``resolve_webhook_pocket`` COMPARES IN CONSTANT TIME and returns ``None`` for
@@ -60,6 +60,7 @@ import copy
 import logging
 import secrets
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -247,7 +248,7 @@ async def apply_derived_surface_profile(
             skill_names=skill_names,
             system_message_override=sys_override,
         )
-    await doc.save()
+    await _save_pocket(doc)
 
 
 def _promote_ripple_spec(raw: Any) -> RippleSpec | dict[str, Any] | None:
@@ -333,6 +334,111 @@ async def _fetch_pocket(pocket_id: str) -> _PocketDoc:
     if doc is None:
         raise NotFound("pocket", pocket_id)
     return doc
+
+
+#: How many times a source writer re-reads and re-applies its change when another
+#: write landed between its read and its conditional update.
+_SOURCE_WRITE_ATTEMPTS = 5
+
+
+class _SourceRaced(Exception):
+    """A conditional source write matched nothing: the field changed since the read."""
+
+
+async def _commit_fields(
+    doc: _PocketDoc, changes: dict[str, Any], *, guard_field: str = "source"
+) -> None:
+    """Write ``changes`` to the pocket in ONE ``update_one`` that matches only while
+    ``guard_field`` still holds the value ``doc`` was read with (compare-and-set).
+
+    Every ``source`` writer persists through this instead of ``doc.save()``: a save
+    re-sends the whole document, so two writers editing different files would each
+    put back the map they read and one edit would vanish. Raises ``_SourceRaced``
+    when the guard no longer matches; nothing is written then. On success ``doc``
+    carries the written values, so the event and the version row see them."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    result = await _PocketDoc.get_pymongo_collection().update_one(
+        {"_id": doc.id, guard_field: getattr(doc, guard_field)},
+        {"$set": {**changes, "updatedAt": now}},
+    )
+    if result.matched_count == 0:
+        raise _SourceRaced(str(doc.id))
+    for name, value in changes.items():
+        setattr(doc, name, value)
+    doc.updatedAt = now
+    doc._save_state()
+
+
+#: Fields that hold a site's content. A whole-document save resent the copy the
+#: writer read and dropped a concurrent edit, so ``_save_pocket`` only writes them
+#: when they changed, and then only while the stored copy is still the one read.
+_CONTENT_FIELDS = ("source", "rippleSpec")
+
+
+async def _save_pocket(doc: _PocketDoc) -> None:
+    """Persist a Pocket the caller read and changed: the one save every non-insert
+    write in this module goes through (never ``Document.save``).
+
+    ``$set`` s only the fields that differ from the state Beanie captured at the read
+    (``use_state_management``), so a rename never resends ``source``. A changed
+    content field is written compare-and-set on the value read: when another write
+    changed it meanwhile nothing is written and ``_SourceRaced`` is raised, which
+    ``_retry_source_race`` turns into a re-run from a fresh read."""
+    from datetime import UTC, datetime
+
+    from beanie.odm.utils.dump import get_dict
+
+    if not isinstance(doc, _PocketDoc):
+        # An in-memory test double standing in for a Pocket: it has its own save.
+        stand_in: Any = doc
+        await stand_in.save()
+        return
+    state = doc.get_saved_state()
+    doc.updatedAt = datetime.now(UTC)
+    data = get_dict(doc, to_db=True, keep_nulls=doc.get_settings().keep_nulls)
+    query: dict[str, Any] = {"_id": doc.id}
+    changes: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in ("_id", "revision_id"):
+            continue
+        if state is not None and key in state and state[key] == value:
+            continue
+        if state is not None and key in _CONTENT_FIELDS:
+            query[key] = state.get(key)
+        changes[key] = value
+    result = await _PocketDoc.get_pymongo_collection().update_one(query, {"$set": changes})
+    if result.matched_count == 0:
+        if len(query) > 1:
+            raise _SourceRaced(str(doc.id))
+        raise NotFound("pocket", str(doc.id))
+    doc._save_state()
+
+
+def _retry_source_race(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Re-run a source writer from its read when its conditional write raced.
+
+    The writer re-reads the pocket, re-runs its checks (a guard or an
+    ``expected_source`` that no longer holds raises its own error) and re-applies
+    its change on the fresh map, so a concurrent edit to another file is kept.
+    After ``_SOURCE_WRITE_ATTEMPTS`` lost races it answers 409
+    ``pocket.source_busy``."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for _ in range(_SOURCE_WRITE_ATTEMPTS):
+            try:
+                return await fn(*args, **kwargs)
+            except _SourceRaced:
+                continue
+        raise ConflictError(
+            "pocket.source_busy",
+            "This site's files kept changing while saving. Try again in a moment.",
+        )
+
+    return wrapper
 
 
 def _check_domain_owner(domain_pocket: Pocket, user_id: str) -> None:
@@ -696,13 +802,13 @@ async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str
         if value not in current:
             current.append(value)
             setattr(doc, field, current)
-            await doc.save()
+            await _save_pocket(doc)
             changed = True
     else:
         if value in current:
             current.remove(value)
             setattr(doc, field, current)
-            await doc.save()
+            await _save_pocket(doc)
             changed = True
     if changed:
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -1704,7 +1810,7 @@ async def _seed_home_pocket_widgets(doc: _PocketDoc) -> None:
 
     if widget_docs:
         doc.widgets = widget_docs
-        await doc.save()
+        await _save_pocket(doc)
 
 
 async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, bool]:
@@ -2129,6 +2235,50 @@ async def engines_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[
     return {str(row["_id"]): row.get("engine") for row in rows}
 
 
+async def site_database_inputs_for_pockets(
+    workspace_id: str, pocket_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Map each given ``pocket_id`` to the pocket fields that say whether its site owns
+    a D1 database, in ONE query: ``{pattern, ripple_spec, site_meta}``, the keyword
+    inputs of ``sites.engines.site_has_database``.
+
+    The sibling of ``engines_for_pockets`` for the sites list/status capabilities.
+    Projected to ``pattern``, the three rippleSpec keys that make a spec dynamic
+    (``sources`` / ``actions`` / ``auth``) and ``site_meta.project.recipes``, so a
+    gallery never pulls a full rippleSpec or source map. Tenant-scoped on
+    ``workspace``; malformed and missing ids are absent from the map."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {
+            "_id": 1,
+            "pattern": 1,
+            "rippleSpec.sources": 1,
+            "rippleSpec.actions": 1,
+            "rippleSpec.auth": 1,
+            "site_meta.project.recipes": 1,
+        },
+    ).to_list(length=None)
+    return {
+        str(row["_id"]): {
+            "pattern": row.get("pattern"),
+            "ripple_spec": row.get("rippleSpec"),
+            "site_meta": row.get("site_meta"),
+        }
+        for row in rows
+    }
+
+
 async def site_render_inputs(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
     """The fields that decide a site pocket's render, tenant-scoped, in wire spelling.
 
@@ -2246,8 +2396,47 @@ async def get_for_wire(pocket_id: str, user_id: str) -> dict:
 
 #: The authored fields that make up a site. A duplicate, and later a template
 #: "use", copies exactly these; everything else (sharing, team, agents, tools,
-#: connectors, the Site deployment row) belongs to the original.
-SITE_SNAPSHOT_FIELDS = ("engine", "pattern", "rippleSpec", "source", "keeps_client_bundle")
+#: connectors, the Site deployment row) belongs to the original. ``site_meta`` is
+#: carried only through :func:`site_meta_snapshot`.
+SITE_SNAPSHOT_FIELDS = (
+    "engine",
+    "pattern",
+    "rippleSpec",
+    "source",
+    "keeps_client_bundle",
+    "site_meta",
+)
+
+
+def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
+    """The part of a pocket's ``site_meta`` a copy may carry: ``project.template``,
+    ``project.framework`` and ``project.recipes`` (what the repo was started from and
+    which recipes are applied), plus ``admin_path`` (the copy's code puts the owner
+    page at the same path). Nothing else crosses, so a future site-specific id or
+    secret stored under ``site_meta`` never leaks into a duplicate or a template.
+    ``None`` when there is no project part (every non-project pocket)."""
+    project = site_meta.get("project") if isinstance(site_meta, dict) else None
+    if not isinstance(project, dict):
+        return None
+    template = project.get("template")
+    framework = project.get("framework")
+    recipes = project.get("recipes")
+    snapshot: dict[str, Any] = {
+        "project": {
+            "template": template if isinstance(template, str) else None,
+            "framework": framework if isinstance(framework, str) else None,
+            "recipes": [r for r in recipes if isinstance(r, str)]
+            if isinstance(recipes, list)
+            else [],
+        }
+    }
+    from pocketpaw_ee.sites.project_tools import admin_path_or_error
+
+    try:
+        snapshot["admin_path"] = admin_path_or_error(site_meta.get("admin_path"))
+    except ValueError:
+        pass  # absent or not a plain site path: the copy carries none
+    return snapshot
 
 
 async def copy_site_snapshot(
@@ -2303,6 +2492,10 @@ async def copy_site_snapshot(
         rippleSpec=snap["rippleSpec"],
         source=snap["source"],
         keeps_client_bundle=snap["keeps_client_bundle"],
+        # Re-filtered on write too: a template saved before ``site_meta`` was a
+        # snapshot field reads None here, and a stored snapshot is never trusted to
+        # hold only the project part.
+        site_meta=site_meta_snapshot(snap["site_meta"]),
         template_id=template_id,
         template_version=template_version,
         # SF-2 — the caller's cohort when given, else the create-time stamp.
@@ -2330,9 +2523,12 @@ async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) ->
     """Read a site pocket's ``SITE_SNAPSHOT_FIELDS`` for a copy, after authorizing it.
 
     The one read path behind ``duplicate_pocket`` and saving a site as a template.
-    Returns the five snapshot fields plus the source's raw ``source_gated`` stamp,
-    ``name`` and ``visibility``. The values are the document's own, not copies;
-    ``copy_site_snapshot`` deep-copies on write.
+    Returns the snapshot fields (``site_meta`` reduced to its project part by
+    ``site_meta_snapshot``) plus the source's raw ``source_gated`` stamp,
+    ``name``, ``visibility`` and ``template_id`` (the site template the pocket
+    was made from, or ``None``; saving a template records it as provenance).
+    The values are the document's own, not copies; ``copy_site_snapshot``
+    deep-copies on write.
 
     A pocket outside ``workspace_id`` (or a malformed id) is NotFound, never
     Forbidden, so this is not an existence oracle across tenants; a private pocket
@@ -2356,9 +2552,11 @@ async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) ->
         "rippleSpec": source.rippleSpec,
         "source": source.source,
         "keeps_client_bundle": source.keeps_client_bundle,
+        "site_meta": site_meta_snapshot(source.site_meta),
         "source_gated": source.source_gated,
         "name": source.name,
         "visibility": source.visibility,
+        "template_id": source.template_id,
     }
 
 
@@ -2407,6 +2605,7 @@ async def duplicate_pocket(
     return wire
 
 
+@_retry_source_race
 async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:
     """Update pocket fields. Edit-access required; visibility changes require ownership."""
     doc = await _fetch_pocket(pocket_id)
@@ -2498,11 +2697,12 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     #   exactly as the create path does — same shape, same normalization.
     if "surface_profile" in body.model_fields_set:
         doc.surface_profile = body.surface_profile
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_svelte_source_file(
     pocket_id: str,
     user_id: str,
@@ -2568,8 +2768,7 @@ async def set_svelte_source_file(
     # dict field is not always detected as dirty by the ODM).
     updated = dict(doc.source)
     updated[component_path] = new_source
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-3): a svelte source edit ALSO writes a draft
     # ArtifactVersion. BP-1 only hooked the rippleSpec write (merge_spec →
@@ -2584,6 +2783,7 @@ async def set_svelte_source_file(
     return await _resolved_wire_dict(doc, user_id), previous_source
 
 
+@_retry_source_race
 async def remove_svelte_source_file(
     pocket_id: str,
     user_id: str,
@@ -2620,8 +2820,7 @@ async def remove_svelte_source_file(
     # sibling writer rebuilds the map rather than popping in place.
     updated = dict(doc.source)
     del updated[component_path]
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(
         doc, author=user_id, label=_edit_label(component_path)
@@ -2629,6 +2828,7 @@ async def remove_svelte_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_react_source_file(
     pocket_id: str,
     user_id: str,
@@ -2694,8 +2894,7 @@ async def set_react_source_file(
     # ``set_svelte_source_file``.
     updated = dict(doc.source)
     updated[component_path] = new_source
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-3): a source-map edit ALSO writes a draft
     # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
@@ -2708,6 +2907,7 @@ async def set_react_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_html_source_file(
     pocket_id: str,
     user_id: str,
@@ -2772,8 +2972,7 @@ async def set_html_source_file(
     # ``set_svelte_source_file``.
     updated = dict(doc.source)
     updated[file_path] = new_source
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-3): a source-map edit ALSO writes a draft
     # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
@@ -2784,6 +2983,7 @@ async def set_html_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_project_source(
     pocket_id: str,
     user_id: str,
@@ -2791,7 +2991,9 @@ async def set_project_source(
     writes: dict[str, str] | None = None,
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
+    admin_path: str | None = None,
     label: str | None = None,
+    guard: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Write and delete files of a ``project`` pocket's source map in ONE save.
 
@@ -2802,9 +3004,13 @@ async def set_project_source(
     the event and the draft version, mirroring ``set_html_source_file``.
 
     ``add_recipe`` appends a recipe id to ``site_meta.project.recipes`` in the same
-    save. A delete of a path that is not there is a ``NotFound`` (nothing saved).
-    Returns ``{files, bytes, changed}`` for the saved map; a call that changes
-    nothing saves nothing and records no version.
+    save; ``admin_path`` (already validated by ``sites.project_tools``) records where
+    the site's owner page lives as ``site_meta.admin_path``. A delete of a path that
+    is not there is a ``NotFound`` (nothing saved).
+    ``guard`` sees the source map just read, before anything changes, and refuses
+    the save by raising (``sites.project_tools.check_bases``: a file that moved
+    since the caller read it is a 409). Returns ``{files, bytes, changed}`` for the
+    saved map; a call that changes nothing saves nothing and records no version.
     """
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
@@ -2813,6 +3019,8 @@ async def set_project_source(
             "pocket.not_project_site",
             "This pocket is not a project site, so it has no project files to edit.",
         )
+    if guard is not None:
+        guard(dict(doc.source))
     updated = dict(doc.source)
     missing = [path for path in deletes or [] if path not in updated]
     if missing:
@@ -2831,13 +3039,15 @@ async def set_project_source(
         project["recipes"] = [*recipes, add_recipe]
         meta["project"] = project
         meta_changed = True
+    if admin_path and meta.get("admin_path") != admin_path:
+        meta["admin_path"] = admin_path
+        meta_changed = True
     changed = updated != doc.source
     if changed or meta_changed:
-        # Reassign fresh dicts so Beanie tracks the change (same note as the peers).
-        doc.source = updated
+        changes: dict[str, Any] = {"source": updated}
         if meta_changed:
-            doc.site_meta = meta
-        await doc.save()
+            changes["site_meta"] = meta
+        await _commit_fields(doc, changes)
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     if changed:
         await _record_pocket_svelte_draft_version(
@@ -2850,10 +3060,216 @@ async def set_project_source(
     }
 
 
+_UPGRADE_LABEL_BEFORE = "Before the upgrade to a static project"
+_UPGRADE_LABEL_AFTER = "Upgraded to a static project"
+_UPGRADE_LABEL_UNDONE = "Undid the upgrade to a static project"
+
+
+@_retry_source_race
+async def convert_html_to_project(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    project: dict[str, Any],
+    upgraded_from: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn an html pocket into a ``project`` pocket in place (the opt-in "Upgrade
+    this site"). ``sites.site_upgrade`` builds the new map and checks it; this layer
+    owns access, the compare-and-set, the undo snapshot, the persist and the event.
+
+    The pocket must still be ``html`` with exactly ``expected_source``, else a 409
+    ``sites.upgrade_conflict`` (an edit landed while the caller was reading). Before
+    anything changes, the old source map is written as its own draft version, and
+    that write is NOT swallowed: an upgrade that cannot be undone does not happen.
+    ``site_meta.upgraded_from`` gets ``upgraded_from`` plus that version's id and
+    number and the old ``site_meta`` (minus any earlier ``upgraded_from``).
+    Returns ``{version_id, version_no}`` of the snapshot."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "html" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while it was being upgraded. Reload it and try again.",
+        )
+    snapshot = await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id=str(doc.id),
+        workspace_id=doc.workspace,
+        content=dict(doc.source),
+        author=user_id,
+        label=_UPGRADE_LABEL_BEFORE,
+    )
+    prior_meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    prior_meta.pop("upgraded_from", None)
+    await _commit_fields(
+        doc,
+        {
+            "engine": "project",
+            "source": dict(source),
+            "site_meta": {
+                **prior_meta,
+                "project": dict(project),
+                "upgraded_from": {
+                    **upgraded_from,
+                    "version_id": str(snapshot.id),
+                    "version_no": snapshot.version_no,
+                    "site_meta": prior_meta,
+                },
+            },
+        },
+    )
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_AFTER)
+    return {"version_id": str(snapshot.id), "version_no": snapshot.version_no}
+
+
+@_retry_source_race
+async def restore_upgraded_html(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    site_meta: dict[str, Any],
+) -> None:
+    """Undo :func:`convert_html_to_project`: engine back to ``html``, ``source`` and
+    ``site_meta`` back to what the caller read from the snapshot. The pocket must
+    still be the ``project`` with exactly ``expected_source`` (409
+    ``sites.upgrade_conflict`` otherwise). The restored map is recorded as a draft
+    version like any other edit."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while the upgrade was being undone. Reload it and try again.",
+        )
+    await _commit_fields(
+        doc, {"engine": "html", "source": dict(source), "site_meta": dict(site_meta) or None}
+    )
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_UNDONE)
+
+
+_RETHEME_LABEL = "Pointed the site's CSS at its theme tokens"
+
+
+@_retry_source_race
+async def retheme_project_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    upgraded_source_hash: str | None = None,
+) -> None:
+    """Save the source ``sites.site_upgrade.retheme_site`` built (the site's CSS pointed
+    at its theme tokens). The pocket must still be the ``project`` with exactly
+    ``expected_source`` (409 ``sites.upgrade_conflict`` otherwise).
+    ``upgraded_source_hash``, when given, replaces ``site_meta.upgraded_from.source_hash``
+    in the same save, so a site untouched since its upgrade can still be undone. The
+    saved map is recorded as a draft version like any other edit."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while its CSS was being updated. Reload it and try again.",
+        )
+    changes: dict[str, Any] = {"source": dict(source)}
+    meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    record = meta.get("upgraded_from")
+    if upgraded_source_hash is not None and isinstance(record, dict):
+        meta["upgraded_from"] = {**record, "source_hash": upgraded_source_hash}
+        changes["site_meta"] = meta
+    await _commit_fields(doc, changes)
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_RETHEME_LABEL)
+
+
+async def restore_published_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+) -> None:
+    """Put a source-map pocket's ``source`` back to its published content (Discard,
+    ``sites.service.discard_pocket_draft``). The pocket must still hold exactly
+    ``expected_source`` (409 ``sites.discard_conflict`` otherwise: an edit landed
+    while the discard was reading). The write is ONE conditional ``update_one`` keyed
+    on the source as stored, so an edit landing after the read is never overwritten.
+    Records NO draft version: the caller snapshots what it replaces first, then marks
+    the drafts above the published pointer discarded."""
+    from pocketpaw_ee.sites.engines import is_source_engine
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if not is_source_engine(getattr(doc, "engine", "ripple")) or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_source_site",
+            "This site has no source files to put back.",
+        )
+    conflict = ConflictError(
+        "sites.discard_conflict",
+        "This site changed while its changes were being discarded. Nothing was discarded.",
+    )
+    if doc.source != expected_source:
+        raise conflict
+    try:
+        await _commit_fields(doc, {"source": dict(source)})
+    except _SourceRaced:
+        raise conflict from None
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+
+
+async def restore_version_content(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected: dict[str, Any] | None,
+    content: dict[str, Any],
+) -> bool:
+    """Put a site's content back to a version's (Revert, ``sites.service.
+    revert_pocket_version``): ``source`` on a source engine, ``rippleSpec`` on ripple.
+
+    The pocket must still hold exactly ``expected`` in that field, else 409
+    ``sites.revert_conflict``: an edit landed while the revert was reading, and it
+    wins. ONE conditional ``update_one`` keyed on the field as read, like Discard's
+    :func:`restore_published_source`. Records NO version: the caller writes the
+    revert row after this succeeds. Returns False (nothing written) when the field
+    already equals ``content``."""
+    from pocketpaw_ee.sites.engines import is_source_engine
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    field = "source" if is_source_engine(getattr(doc, "engine", "ripple")) else "rippleSpec"
+    conflict = ConflictError(
+        "sites.revert_conflict",
+        "This site changed while it was being reverted. Nothing was reverted.",
+    )
+    current = getattr(doc, field)
+    if (current or None) != (expected or None):
+        raise conflict
+    if current == content:
+        return False
+    try:
+        await _commit_fields(doc, {field: dict(content)}, guard_field=field)
+    except _SourceRaced:
+        raise conflict from None
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return True
+
+
 #: Engines whose source map may carry an author dependency manifest.
 _DEPENDENCY_MANIFEST_ENGINES = ("svelte", "react", "html")
 
 
+@_retry_source_race
 async def set_site_dependency_manifest(
     pocket_id: str,
     user_id: str,
@@ -2896,9 +3312,7 @@ async def set_site_dependency_manifest(
         if updated.get(manifest_path) == contents:
             return await _resolved_wire_dict(doc, user_id)
         updated[manifest_path] = contents
-    # Reassign a fresh dict so Beanie tracks the change (same note as the peers).
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(manifest_path))
     return await _resolved_wire_dict(doc, user_id)
@@ -2939,6 +3353,7 @@ async def scan_source_site_pockets(
     ]
 
 
+@_retry_source_race
 async def migrate_legacy_build_shell(
     pocket_id: str,
     *,
@@ -2988,8 +3403,7 @@ async def migrate_legacy_build_shell(
         updated[manifest_path] = manifest
     if updated == doc.source:
         return False
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(
         doc, author=author, label="Moved build-shell files to the generator"
@@ -2997,36 +3411,38 @@ async def migrate_legacy_build_shell(
     return True
 
 
+@_retry_source_race
 async def set_imported_source(
     pocket_id: str,
     *,
     workspace_id: str,
     source: dict[str, str],
 ) -> None:
-    """Replace an IMPORTED html-engine pocket's whole ``source`` map (SI-5).
+    """Replace an IMPORTED pocket's whole ``source`` map (SI-5).
 
-    Called by the sites URL-import crawler after a successful crawl, so the
-    pocket — the durable source of truth every re-publish reads — carries the
-    harvested files. Background-safe: takes an explicit ``workspace_id`` and
-    fails CLOSED on a mismatch with the same NotFound a missing pocket raises
-    (no cross-tenant existence signal). html-engine pockets only — a spec/svelte
-    pocket must never have its content swapped by the import path.
+    Called by the sites import paths once the files are rewired, so the pocket (the
+    durable source of truth every re-publish reads) carries them. Background-safe:
+    takes an explicit ``workspace_id`` and fails CLOSED on a mismatch with the same
+    NotFound a missing pocket raises (no cross-tenant existence signal). Only an
+    html pocket, or a ``project`` pocket stamped ``pattern="imported"`` (an import
+    copied onto the static starter): a spec, svelte or authored project pocket must
+    never have its content swapped by the import path.
     """
     doc = await _fetch_pocket(pocket_id)
     if doc.workspace != workspace_id:
         raise NotFound("pocket", pocket_id)
-    if getattr(doc, "engine", "ripple") != "html":
+    engine = getattr(doc, "engine", "ripple")
+    imported_project = engine == "project" and getattr(doc, "pattern", None) == "imported"
+    if engine != "html" and not imported_project:
         raise ValidationError(
             "pocket.not_html_site",
-            "Only an imported html-engine pocket can receive crawled source.",
+            "Only an imported site's pocket can receive imported source.",
         )
-    # Reassign a fresh dict so Beanie tracks the change (mirrors
-    # set_svelte_source_file's dirty-tracking note).
-    doc.source = dict(source)
-    await doc.save()
+    await _commit_fields(doc, {"source": dict(source)})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
 
 
+@_retry_source_race
 async def merge_spec(
     workspace_id: str,
     user_id: str,
@@ -3174,7 +3590,7 @@ async def merge_spec(
 
     # Persist + emit.
     doc.rippleSpec = normalized
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-1): record a draft ArtifactVersion snapshot of the
     # mutated rippleSpec. ADDITIVE — the destructive overwrite above already
@@ -3519,7 +3935,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
         }
     )
     doc.widgets.append(widget)
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3549,7 +3965,7 @@ async def update_widget(
         widget.assignedAgent = body.assigned_agent
     if body.span is not None:
         widget.span = body.span
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3562,7 +3978,7 @@ async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
     doc.widgets = [w for w in doc.widgets if w.id != widget_id]
     if len(doc.widgets) == before:
         raise NotFound("widget", widget_id)
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3593,7 +4009,7 @@ async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -
         )
     widgets_by_id = {w.id: w for w in doc.widgets}
     doc.widgets = [widgets_by_id[wid] for wid in ordered]
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3610,7 +4026,7 @@ async def generate_share_link(pocket_id: str, user_id: str, access: str) -> dict
     token = secrets.token_urlsafe(32)
     doc.share_link_token = token
     doc.share_link_access = access
-    await doc.save()
+    await _save_pocket(doc)
     # no-event: share-link state is owner-only; the token comes back inline
     # in this REST response. Broadcasting would leak the token.
     return {"token": token, "access": access, "url": f"/shared/{token}"}
@@ -3622,7 +4038,7 @@ async def revoke_share_link(pocket_id: str, user_id: str) -> None:
 
     doc.share_link_token = None
     doc.share_link_access = "view"
-    await doc.save()
+    await _save_pocket(doc)
     # no-event: see ``generate_share_link``.
 
 
@@ -3634,7 +4050,7 @@ async def update_share_link(pocket_id: str, user_id: str, access: str) -> dict:
         raise NotFound("share_link", pocket_id)
 
     doc.share_link_access = access
-    await doc.save()
+    await _save_pocket(doc)
     # no-event: see ``generate_share_link``.
     return {
         "token": doc.share_link_token,
@@ -4073,7 +4489,7 @@ async def _heal_node_ids(doc: _PocketDoc) -> None:
                 changed = True
     if changed:
         try:
-            await doc.save()
+            await _save_pocket(doc)
         except Exception as exc:  # noqa: BLE001
             logger.warning("pocket %s node-id heal save failed: %s", doc.id, exc)
 
@@ -4197,6 +4613,7 @@ async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
     ]
 
 
+@_retry_source_race
 async def agent_update(
     pocket_id: str,
     *,
@@ -4242,7 +4659,9 @@ async def agent_update(
             except MissingRequiredPropError as exc:
                 return None, format_required_prop_violations_for_agent(exc.violations)
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4316,6 +4735,7 @@ def _merge_authored_sources_logged(
     return authored, skipped
 
 
+@_retry_source_race
 async def agent_add_widget(
     pocket_id: str,
     widget: dict,
@@ -4370,7 +4790,9 @@ async def agent_add_widget(
     if sources is not None:
         authored, skipped = _merge_authored_sources_logged(doc, sources)
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4380,6 +4802,7 @@ async def agent_add_widget(
     return view, None
 
 
+@_retry_source_race
 async def agent_update_widget(
     pocket_id: str,
     widget_id: str,
@@ -4448,7 +4871,9 @@ async def agent_update_widget(
     if sources is not None:
         authored, skipped = _merge_authored_sources_logged(doc, sources)
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4458,6 +4883,7 @@ async def agent_update_widget(
     return view, None
 
 
+@_retry_source_race
 async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | None, str | None]:
     doc, err = await _agent_load_doc(pocket_id)
     if err:
@@ -4467,7 +4893,9 @@ async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | No
     if len(doc.widgets) == before:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4530,12 +4958,15 @@ async def _load_and_ensure_ids(
     if spec_ops.ensure_ids(ui):
         # Persist newly-assigned ids so subsequent ops can target them.
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, None, f"id-assignment save failed: {exc}"
     return doc, ui, None
 
 
+@_retry_source_race
 async def agent_add_node(
     pocket_id: str,
     *,
@@ -4573,7 +5004,9 @@ async def agent_add_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4583,6 +5016,7 @@ async def agent_add_node(
         )
 
 
+@_retry_source_race
 async def agent_replace_node(
     pocket_id: str,
     *,
@@ -4611,7 +5045,9 @@ async def agent_replace_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4621,6 +5057,7 @@ async def agent_replace_node(
         )
 
 
+@_retry_source_race
 async def agent_set_node_prop(
     pocket_id: str,
     *,
@@ -4654,7 +5091,9 @@ async def agent_set_node_prop(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4669,6 +5108,7 @@ async def agent_set_node_prop(
         )
 
 
+@_retry_source_race
 async def agent_set_prop_array_item(
     pocket_id: str,
     *,
@@ -4747,7 +5187,9 @@ async def agent_set_prop_array_item(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4762,6 +5204,7 @@ async def agent_set_prop_array_item(
         )
 
 
+@_retry_source_race
 async def agent_append_prop_array_item(
     pocket_id: str,
     *,
@@ -4831,7 +5274,9 @@ async def agent_append_prop_array_item(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4845,6 +5290,7 @@ async def agent_append_prop_array_item(
         )
 
 
+@_retry_source_race
 async def agent_remove_prop_array_item(
     pocket_id: str,
     *,
@@ -4901,7 +5347,9 @@ async def agent_remove_prop_array_item(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4915,6 +5363,7 @@ async def agent_remove_prop_array_item(
         )
 
 
+@_retry_source_race
 async def agent_move_node(
     pocket_id: str,
     *,
@@ -4946,7 +5395,9 @@ async def agent_move_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4961,6 +5412,7 @@ async def agent_move_node(
         )
 
 
+@_retry_source_race
 async def agent_remove_node(
     pocket_id: str,
     *,
@@ -4985,7 +5437,9 @@ async def agent_remove_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5032,6 +5486,7 @@ def _state_root(doc: _PocketDoc) -> tuple[dict[str, Any], str | None]:
     return state, None
 
 
+@_retry_source_race
 async def agent_set_state(
     pocket_id: str,
     *,
@@ -5058,7 +5513,9 @@ async def agent_set_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5073,6 +5530,7 @@ async def agent_set_state(
         )
 
 
+@_retry_source_race
 async def agent_append_state(
     pocket_id: str,
     *,
@@ -5096,7 +5554,9 @@ async def agent_append_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5111,6 +5571,7 @@ async def agent_append_state(
         )
 
 
+@_retry_source_race
 async def agent_remove_state(
     pocket_id: str,
     *,
@@ -5132,7 +5593,9 @@ async def agent_remove_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5142,6 +5605,7 @@ async def agent_remove_state(
         )
 
 
+@_retry_source_race
 async def agent_patch_state(
     pocket_id: str,
     *,
@@ -5164,7 +5628,9 @@ async def agent_patch_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5202,6 +5668,7 @@ def _sources_root(doc: _PocketDoc) -> dict[str, Any]:
     return spec
 
 
+@_retry_source_race
 async def agent_set_source(
     pocket_id: str,
     *,
@@ -5240,7 +5707,9 @@ async def agent_set_source(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5254,6 +5723,7 @@ async def agent_set_source(
         )
 
 
+@_retry_source_race
 async def agent_remove_source(
     pocket_id: str,
     *,
@@ -5273,7 +5743,9 @@ async def agent_remove_source(
         spec = _sources_root(doc)
         sources_ops.remove_source(spec, source_key)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5297,6 +5769,7 @@ async def agent_remove_source(
 # config decides whether the write may actually fire.
 
 
+@_retry_source_race
 async def agent_set_action(
     pocket_id: str,
     *,
@@ -5342,7 +5815,9 @@ async def agent_set_action(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5356,6 +5831,7 @@ async def agent_set_action(
         )
 
 
+@_retry_source_race
 async def agent_remove_action(
     pocket_id: str,
     *,
@@ -5375,7 +5851,9 @@ async def agent_remove_action(
         spec = _sources_root(doc)
         actions_ops.remove_action(spec, action_key)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5995,7 +6473,7 @@ async def set_pocket_write_policy(
     # callers (bus handlers, jobs) re-parse here, matching the entry-point
     # validation rule.
     doc.allowed_writes = [_AllowedWriteDoc.model_validate(rule) for rule in allowed_writes]
-    await doc.save()
+    await _save_pocket(doc)
 
     _audit_backend_config(
         actor=user_id,
@@ -6045,7 +6523,7 @@ async def set_pocket_tool_policy(
     # validated through `ToolGrantDTO`, but internal callers (bus handlers,
     # jobs) re-parse here, matching the entry-point validation rule.
     doc.allowed_tools = [_ToolGrantDoc.model_validate(grant) for grant in allowed_tools]
-    await doc.save()
+    await _save_pocket(doc)
 
     _audit_backend_config(
         actor=user_id,
@@ -6113,7 +6591,7 @@ async def set_pocket_approval_route(
         # mode == "owner" → store None (the explicit default).
 
     doc.approval_route = new_route
-    await doc.save()
+    await _save_pocket(doc)
 
     _audit_backend_config(
         actor=user_id,
@@ -6344,7 +6822,7 @@ async def rotate_webhook_secret(workspace_id: str, user_id: str, pocket_id: str)
             "This pocket has no backend configured — set one before a webhook secret",
         )
     doc.webhook_secret = _new_webhook_secret()
-    await doc.save()
+    await _save_pocket(doc)
     _audit_backend_config(
         actor=user_id,
         action="pocket.backend.webhook_rotate",
@@ -6501,7 +6979,7 @@ async def set_pocket_connector_permissions(
         doc.allowed_connectors = allowed_connectors
     else:
         doc.allowed_connectors = None
-    await doc.save()
+    await _save_pocket(doc)
     logger.info(
         "pocket.connector_permissions.set",
         extra={
@@ -6533,7 +7011,7 @@ async def grant_pocket_connector(
         doc.allowed_connectors = [*current, connector_name]
     else:
         return  # already granted
-    await doc.save()
+    await _save_pocket(doc)
     logger.info(
         "pocket.connector_permissions.grant",
         extra={
@@ -6558,7 +7036,7 @@ async def revoke_pocket_connector(
     next_list = [c for c in current if c != connector_name]
     # Keep the list (even empty) to distinguish "no restrictions" from "nothing allowed"
     doc.allowed_connectors = next_list
-    await doc.save()
+    await _save_pocket(doc)
     logger.info(
         "pocket.connector_permissions.revoke",
         extra={

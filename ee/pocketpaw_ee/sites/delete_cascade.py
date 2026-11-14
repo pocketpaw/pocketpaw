@@ -13,7 +13,8 @@
 #                      anything irreversible, so lead ingest and the concierge stop
 #                      even if every later step fails;
 #   3. serving off   — routes, hostnames, the script's Durable Objects (tombstone,
-#                      forced delete, verify; best effort), then the Worker script;
+#                      forced delete, verify; best effort), then the Worker script
+#                      and the redirect Workers of its old addresses;
 #   4. reclaim       — D1, the bundle-deploy KV namespaces and R2 buckets, the
 #                      pocket's draft Worker and draft data, the public-asset R2
 #                      prefix, artifacts: the things that cost money once nothing
@@ -41,6 +42,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+
+from pocketpaw_ee.cloud.leads.domain import lead_site_id
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +357,11 @@ async def _delete_script(*, site: Any, deps: Any) -> str:
         from pocketpaw_ee.sites.workers_deploy import site_worker_name
 
         await deps.cloudflare.delete_account_script(site_worker_name(site), **force)
+        # The site's old addresses, still redirecting to it after a rename. Only a
+        # workers site can rename; ``deps`` without the hook (unit fakes) has none.
+        remove_redirects = getattr(deps, "remove_redirects", None)
+        if remove_redirects is not None:
+            await remove_redirects(site_id=str(site.id))
     return OUTCOME_DONE
 
 
@@ -417,6 +425,7 @@ async def _delete_drafts(*, site: Any, deps: Any) -> str:
 
 
 async def _purge_assets(*, site: Any, deps: Any) -> str:
+    await _purge_references(site)
     if deps.assets is None:
         # No public rail configured on this deployment, so there is nothing on a
         # bucket to remove. Distinct from an adapter that cannot list, which
@@ -445,16 +454,55 @@ async def _purge_assets(*, site: Any, deps: Any) -> str:
     return OUTCOME_DONE
 
 
+async def _purge_references(site: Any) -> None:
+    """The design references stored for the pocket (``site_references``), on the
+    PRIVATE adapter. Best effort and never raises: they are agent input nobody can
+    reach without the pocket, so a leftover is clutter, not exposure."""
+    from pocketpaw_ee.sites import site_references
+
+    try:
+        await site_references.purge_references(
+            workspace_id=str(getattr(site, "workspace", "") or ""),
+            pocket_id=str(getattr(site, "pocket_id", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - best effort, logged
+        logger.warning(
+            "sites.delete: site %s reference cleanup failed: %s", getattr(site, "id", "?"), exc
+        )
+
+
 async def _purge_records(*, site: Any, deps: Any) -> str:
     """The dependent rows: leads, transcripts, briefs, counters.
 
     NOT the Site document — that is deleted by the caller after this returns, so the
     ledger survives every step it records.
     """
-    await deps.purge_records(workspace_id=site.workspace, site_id=str(site.id))
+    # The id the lead writer filed under, NOT the object id: a built site's leads
+    # carry its script_name, and keying on ``str(site.id)`` left every one of them.
+    await deps.purge_records(workspace_id=site.workspace, site_id=lead_site_id(site))
     await _purge_secrets(site)
     await _purge_integrations(site)
+    await _purge_site_ai(site)
     return OUTCOME_DONE
+
+
+async def _purge_site_ai(site: Any) -> None:
+    """The site's AI settings, presets, budget, holds, usage rows and transcripts.
+    The credit ledger keeps its debits. Best effort, like secrets."""
+    try:
+        from pocketpaw_ee.site_ai import service as site_ai_service
+
+        removed = await site_ai_service.purge_for_pocket(
+            workspace_id=site.workspace, pocket_id=site.pocket_id
+        )
+        if removed:
+            logger.info("sites.delete: site %s removed %d site AI row(s)", site.id, removed)
+    except Exception:  # noqa: BLE001 - best effort, logged
+        logger.warning(
+            "sites.delete: site %s could not remove its site AI rows",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
 
 async def _purge_integrations(site: Any) -> None:

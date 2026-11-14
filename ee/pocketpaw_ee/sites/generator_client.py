@@ -1146,11 +1146,17 @@ def artifact_home() -> Path:
 _ARTIFACT_FORMAT_EPOCH = "v1"
 
 
-def _generator_build_id() -> str:
-    """Identity of the paw-sites BUILD currently on disk — ``mtime_ns:size`` of the
-    resolved generator entry file, or ``"unresolved"`` when it cannot be located.
+# Single-slot memo for :func:`_generator_build_id`: the last entry file's stat key
+# ``(resolved path, st_mtime_ns, st_size)`` and the content digest computed for it.
+_BUILD_ID_MEMO: dict[str, Any] = {}
 
-    Added 2026-08-25. :func:`generator_version` claimed to identify "the paw-sites
+
+def _generator_build_id() -> str:
+    """Identity of the paw-sites BUILD currently on disk — a SHA-256 content digest
+    prefix of the resolved generator entry file, or ``"unresolved"`` when it cannot be
+    located or read.
+
+    :func:`generator_version` once claimed to identify "the paw-sites
     GENERATOR", but every term of it was a hand-maintained constant or a dep version
     string: rebuilding ``paw-sites/dist/cli.js`` did not move the cache key at all.
     So a generator change that alters the built HTML — exactly what RX-2's react
@@ -1161,15 +1167,17 @@ def _generator_build_id() -> str:
     is coarse and stays armed in Browse mode", nowhere near the cache that caused it,
     and no amount of rebuilding the generator clears it.
 
-    Stat, not hash: the bundled ``cli.js`` is ~10MB and this rides a per-view code
-    path, so a content hash would cost more than the rebuild it guards against.
-    ``mtime_ns`` moves on every rebuild, which is precisely the event that must
-    invalidate.
+    Content, not mtime: a redeploy, image rebuild or fresh checkout writes the SAME
+    bytes with a NEW mtime. The built HTML cannot differ, so the key must not either;
+    keying on mtime made every routine deploy re-build every site's preview in a
+    sandbox the next time it was opened, with nothing about the site changed.
 
-    NOT memoised, deliberately. A module-level cache would pin the value at import
-    and reintroduce the bug for the case that matters most — a generator rebuilt
-    while the server is running, which is the normal inner loop when someone is
-    iterating on the generator itself.
+    Memoised on stat, not at import. The bundled ``cli.js`` is ~10MB and this rides
+    a per-view code path, so the digest is cached against ``(resolved path,
+    st_mtime_ns, st_size)``: an unchanged file costs one ``stat()``, and any stat
+    change forces a re-hash. That still picks up a generator rebuilt while the
+    server is running (the normal inner loop when iterating on the generator
+    itself), which a value pinned at import would miss.
 
     ``"unresolved"`` (a CONSTANT, never a changing value) is the honest degrade: it
     restores exactly today's behaviour rather than making the key unstable, which
@@ -1178,7 +1186,7 @@ def _generator_build_id() -> str:
     # LAST existing-file token wins, and the direction is load-bearing. The documented
     # local override is an INTERPRETER plus a script — the shipped one on this box is
     # "C:/PROGRA~1/nodejs/node.exe D:/…/paw-sites/dist/cli.js" — so both tokens are
-    # real files and taking the FIRST fingerprints node.exe, whose mtime never moves
+    # real files and taking the FIRST fingerprints node.exe, whose bytes never change
     # on a generator rebuild. That would leave this function returning a constant and
     # the bug entirely unfixed, while looking like it worked.
     entry: str | None = next((tok for tok in reversed(argv) if Path(tok).is_file()), None)
@@ -1187,10 +1195,21 @@ def _generator_build_id() -> str:
     if not entry:
         return "unresolved"
     try:
-        st = Path(entry).stat()
+        path = Path(entry).resolve()
+        st = path.stat()
+        stat_key = (str(path), st.st_mtime_ns, st.st_size)
+        if _BUILD_ID_MEMO.get("stat") == stat_key:
+            return _BUILD_ID_MEMO["digest"]
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
     except OSError:
         return "unresolved"
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    digest = h.hexdigest()[:20]
+    _BUILD_ID_MEMO["stat"] = stat_key
+    _BUILD_ID_MEMO["digest"] = digest
+    return digest
 
 
 def generator_version() -> str:

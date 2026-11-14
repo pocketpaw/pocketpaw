@@ -5,11 +5,16 @@ base64 Fernet key. When unset we derive a key from ``AUTH_SECRET`` via
 PBKDF2HMAC + a fixed salt; that path logs a one-time warning so the
 operator gets nudged toward a dedicated key without crashing the
 deployment.
+
+``keyed_digest`` is a deterministic keyed BLAKE2b (a MAC) under a key derived
+from the same material, for equality lookups on a field that is stored encrypted
+(Fernet ciphertext is randomized, so it can't be compared or indexed).
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import threading
@@ -25,6 +30,7 @@ _KDF_ITERATIONS = 200_000
 _warned = False
 _lock = threading.Lock()
 _fernet: Fernet | None = None
+_key_material: bytes = b""
 
 
 def _derive_from_auth_secret() -> bytes:
@@ -39,7 +45,7 @@ def _derive_from_auth_secret() -> bytes:
 
 
 def _get_fernet() -> Fernet:
-    global _fernet, _warned
+    global _fernet, _warned, _key_material
     with _lock:
         if _fernet is not None:
             return _fernet
@@ -54,6 +60,7 @@ def _get_fernet() -> Fernet:
                 )
                 _warned = True
         _fernet = Fernet(key)
+        _key_material = bytes(key)
         return _fernet
 
 
@@ -72,8 +79,16 @@ def decrypt_with_ttl(ciphertext: str, ttl_seconds: int) -> str:
     return _get_fernet().decrypt(ciphertext.encode("utf-8"), ttl=ttl_seconds).decode("utf-8")
 
 
+def keyed_digest(value: str, *, purpose: str) -> str:
+    """Hex keyed BLAKE2b-256 of ``value``; ``purpose`` separates the key per use."""
+    _get_fernet()
+    key = hashlib.sha256(b"paw-keyed-digest:" + purpose.encode("utf-8") + b":" + _key_material)
+    return hashlib.blake2b(value.encode("utf-8"), key=key.digest(), digest_size=32).hexdigest()
+
+
 def _reset_for_tests() -> None:
-    global _fernet, _warned
+    global _fernet, _warned, _key_material
     with _lock:
         _fernet = None
+        _key_material = b""
         _warned = False

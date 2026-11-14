@@ -29,28 +29,29 @@ The router does HTTP + SSE; this module decides *what the agent sees*:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import weakref
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     # Type-only — the runtime read imports ``get_person`` lazily inside
     # ``_resolve_about_member`` so importing this module never drags in the
     # people service (and its journal accessor) for chat paths that never
     # render an about-block.
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
     from pocketpaw_ee.cloud.people.domain import Person
 
 from pocketpaw.agents.backend import ImageAttachment
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
-    INLINE_RIPPLE_SYSTEM_PROMPT,
     POCKET_DELEGATION_RULE,
     fill_current_pocket,
     get_pocket_prompts,
@@ -555,15 +556,24 @@ def collect_delivered_artifacts() -> Iterator[list[dict[str, Any]]]:
         detach_delivered_artifacts_collector(token)
 
 
-def record_delivered_artifact(meta: dict[str, Any]) -> None:
+def record_delivered_artifact(meta: dict[str, Any], *, replace: bool = False) -> None:
     """Append one successful delivery's ``meta`` (file_id/name/mime/size) to the
     active run's collector. No-op when unbound (a deliver call outside a chat
     run). Never raises — a collector hiccup must not fail an otherwise-successful
-    delivery."""
+    delivery.
+
+    ``replace=True`` is for an artifact that tracks a file the run keeps editing
+    (a project site's PLAN.md): an entry with the same ``file_id`` is overwritten in
+    place, so the run persists ONE artifact carrying the latest meta."""
     binding = _current_turn_binding()
     collector = binding.artifacts if binding is not None else _delivered_artifacts.get()
     if collector is None:
         return
+    if replace:
+        for i, existing in enumerate(collector):
+            if existing.get("file_id") == meta.get("file_id"):
+                collector[i] = meta
+                return
     collector.append(meta)
 
 
@@ -767,6 +777,16 @@ class ScopeContext:
     # agent then behaves exactly as before, no block. Stays a pre-rendered
     # string so the sync ``build_behavior_instructions`` never has to await.
     about_member_block: str | None = None
+    # The raw text of a backend error whose chat frame was rewritten into a plain
+    # sentence. Set by ``run_core._drive_agent_loop`` so the run doc's ``error``
+    # field keeps the provider's own words for operators.
+    backend_error_detail: str | None = None
+    # The model this turn ran on (the per-send pick, else the agent's own) and
+    # whether the workspace's own key paid. Stamped by ``_drive_agent_loop`` just
+    # before ``AgentPool.run``; ``execute_run`` keys the out-of-credit mark and
+    # its clear on them (``catalog.availability``). Best effort, never a gate.
+    turn_model: str | None = None
+    turn_byok: bool = False
     # The anchored pocket's orientation data: {name, description, type,
     # template_slug, pattern, ripple} where ``ripple`` is
     # ``spec_ops.summarize_ripple_spec`` over the pocket's rippleSpec
@@ -799,6 +819,22 @@ class ScopeContext:
     #: ``None`` is the legacy path. Copied onto ``ctx`` by ``execute_run``
     #: exactly like ``model_override`` beside it.
     tools_enabled: bool | None = None
+    #: Who pays for this turn, resolved by ``execute_run`` BEFORE its credit
+    #: gate (``credits.guards.resolve_payer``) so the gate and the loop act on
+    #: one answer. ``_drive_agent_loop`` spends it instead of resolving again;
+    #: ``None`` (every other caller) makes the loop resolve for itself. Can
+    #: carry a plaintext provider key: never log or serialize it.
+    turn_credentials: TurnCredentials | None = None
+    #: Who the credit gate and ``bill_run`` treat as paying: ``byok`` only when
+    #: ``turn_credentials`` is BYOK and the agent's backend spends the key
+    #: (``credits.guards.billing_source``). Set by ``execute_run``; ``None``
+    #: elsewhere, where readers fall back to ``turn_credentials``.
+    credential_source: Literal["platform", "byok"] | None = None
+    #: ``credits.guards.FreeRunBounds`` for a platform-funded free run (an
+    #: unpaid early-access workspace while credits are enforced), set by
+    #: ``execute_run`` after the gates; ``_drive_agent_loop`` forces such a run
+    #: onto pydantic_ai within them. None for every other run.
+    free_run_bounds: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -1868,6 +1904,8 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     override = ctx.resolved_profile.system_message_override if ctx.resolved_profile else None
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
+    if ctx.kind is not ScopeKind.CONCIERGE:
+        parts.append(_IN_APP_LINKS_RULE)
     # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
     # the user can't reach, so a downloadable result MUST go through
     # deliver_artifact (which lands it in tenant blob storage and returns a real
@@ -1936,13 +1974,13 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         # "delegate, don't call add_widget" framing. Just the base ripple
         # conventions, then HOME_POCKET_PROMPT. (No /sites home pocket exists,
         # so the surface gate doesn't apply here.)
-        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+        parts.append(chat_ripple_prompt())
     elif backend_name in _MCP_POCKET_BACKENDS:
         # Surface gate: omit the ripple LAW + delegation rule on a
         # ripple-off surface (/sites). The agent there hand-authors Svelte —
         # the "default to ui-spec" LAW would bias it away from that.
         if not ripple_off:
-            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(chat_ripple_prompt())
             parts.append(POCKET_DELEGATION_RULE)
     else:
         creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
@@ -1959,7 +1997,7 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
             # and get_pocket now carries the real backend summary.
             parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
         elif not ripple_off:
-            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(chat_ripple_prompt())
     # Home surface: append the home-surface prompt so the agent calls
     # add_widget for an explicit widget request and answers directly
     # otherwise. Backend-agnostic — the discriminator is the pocket type.
@@ -2048,6 +2086,28 @@ DOES NOT EXIST in this environment:
   plainly. Don't fabricate instructions for a different environment.
 </runtime-identity>"""
 
+
+# In-app links. The chat renders ``mc://<kind>/<id>`` markdown links as chips
+# that open the thing in the app (paw-enterprise chat/mc-links.ts), and @slug
+# as an agent chip that opens the agent. Only kinds whose ids the agent actually
+# gets from tools or the prompt are listed, so it never has to guess one. Left out
+# of Paw Bar concierge runs: they render on a customer's site, not in the app.
+_IN_APP_LINKS_RULE = """\
+<in-app-links>
+The chat turns these into clickable chips that open the thing in the app.
+Whenever your reply names one of these and you have its id (from a tool result
+or this prompt), write the link INSTEAD of the name and the raw id. Never print
+an id in parentheses next to a name. Never guess an id; without one, use plain
+text.
+
+- A pocket: [📦 Pocket name](mc://pocket/<pocket id>)
+  Write "[📦 Q3 plan](mc://pocket/<pocket id>)", not "Q3 plan (<pocket id>)".
+- A channel or room: [#handle](mc://channel/<room id>)
+- An image, video or audio you generated: [short title](mc://studio/<file name>),
+  where <file name> is the last segment of its media path
+  (/api/v1/media/<file name>).
+- An agent or a teammate: write @<slug>, e.g. @research-agent, not a link.
+</in-app-links>"""
 
 # Artifact delivery (ART-4). The cloud agent's working directory is a per-tenant
 # jail on the server's filesystem — the user has no shell, no SSH, and cannot
@@ -2161,6 +2221,76 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     if ctx.pocket_id and ctx.intent != "pocket_create":
         parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
     return "\n".join(parts)
+
+
+# Chat-only: the order a card's main widget is chosen in. The "Match the card to
+# the answer" rule already maps intents to widgets; this makes checking it come
+# before composing, which the model skipped without it.
+PURPOSE_BUILT_FIRST_RULE = (
+    "   - Purpose-built first. Before you compose anything, check the Match the card "
+    "rule and the widgets listed for this message (under Widgets for this message in "
+    "your context). When one fits the request, it is the card's main widget, filled "
+    "with the user's own numbers and items, alone or under one heading; call "
+    "get_widget_spec for its props when they are not listed. How a thing in the figure "
+    "list works is a figure with its params and labels; a thing to spin, explore or "
+    "label in 3D is a model-viewer. Compose from flex, grid, slider, each and inputs "
+    "only when no purpose-built widget fits."
+)
+
+
+@functools.cache
+def chat_ripple_prompt() -> str:
+    """The chat-inline Ripple prompt: core's chat-only head and tail around the
+    widget block the Paw Bar concierge uses, generated from the vendored manifest
+    (always-on widgets with props, the figure and 3D model ids, every widget by
+    category), the authoring rules for the chat card profile and
+    ``PURPOSE_BUILT_FIRST_RULE``. Static per process, so it stays cacheable; the
+    per-turn part is ``chat_turn_widgets``."""
+    from pocketpaw.ripple._inline import INLINE_RIPPLE_PROMPT_HEAD, INLINE_RIPPLE_PROMPT_TAIL
+    from pocketpaw_ee.paw_bar import widget_relevance
+    from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import ripple_rules
+
+    cards = "\n".join(
+        [
+            "# WIDGETS (from the Ripple manifest)",
+            "",
+            "These widgets are listed with their props; copy the prop names exactly:",
+            *widget_relevance.core_lines(),
+            widget_relevance.full_line("figure"),
+            widget_relevance.full_line("model-viewer"),
+            "Every widget by category (call `get_widget_spec` for the props of one "
+            "not listed above):",
+            *widget_relevance.index_lines(),
+            *ripple_rules(CHAT_PROFILE),
+            PURPOSE_BUILT_FIRST_RULE,
+        ]
+    )
+    return INLINE_RIPPLE_PROMPT_HEAD + "\n" + cards + "\n\n" + INLINE_RIPPLE_PROMPT_TAIL
+
+
+def chat_turn_widgets(behavior: str, message: str, history: Sequence[dict[str, Any]] = ()) -> str:
+    """The chat card prompt's per-turn part: the full prop lines of the widgets
+    ``message`` (and the last turns of ``history``) likely need, from Paw Bar's
+    ``pick_widgets`` and ``full_line``, so a named figure carries its sliders and
+    anchors. Empty unless ``behavior`` carries ``chat_ripple_prompt()``. run_core
+    adds it to knowledge_context, below the cache cut, so the instructions layer
+    stays byte-stable across turns."""
+    from pocketpaw_ee.paw_bar import widget_relevance
+
+    if not message or chat_ripple_prompt() not in behavior:
+        return ""
+    picked = widget_relevance.pick_widgets(message, history)
+    if not picked:
+        return ""
+    return "\n".join(
+        [
+            "## Widgets for this message",
+            "These purpose-built widgets fit this message, best first, with their props. "
+            "When one fits, it is the card's main widget (Purpose-built first):",
+            *(widget_relevance.full_line(name, message, history) for name in picked),
+        ]
+    )
 
 
 def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -> str:

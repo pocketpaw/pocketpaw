@@ -1,9 +1,9 @@
 {
   "source_repo": "qbtrix/paw-sites",
   "source_path": "src/edit-bridge.ts (editBridgeScript / runtimeReporterScript)",
-  "source_commit": "170a273e9de7aedec74ecf069a400949557b2dfd",
+  "source_commit": "d4e0e8036f535d24f6b20b7af61f0a396341581b",
   "sha256": {
-    "edit_bridge.js": "3a0d74c4418114688e272c358f1bc72d886f2c5c3d89cc95ef7f928ce78ad8be",
-    "runtime_reporter.js": "fce45fe9563b3d367f0f95e54a409e75e4ea2a9a4c792d8ff68e409996f726c5"
+    "edit_bridge.js": "1f2379294c8445a17ad7d8f27664dd03d46f674c30cb4c8a34b6ce257fb2f149",
+    "runtime_reporter.js": "7f2d35c14b88dbf95e6c724f6c60be6577ce36c21f58ca96638f89a901b95edd"
   }
 }

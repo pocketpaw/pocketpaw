@@ -579,15 +579,18 @@ async def test_call_lifecycle_events_still_route_to_group_members():
         return ["u1", "u2"]
 
     from pocketpaw_ee.cloud._core.realtime.events import (
+        CallAssistantState,
         CallEnded,
         CallNotesPosted,
         CallStarted,
     )
 
     r = AudienceResolver(group_members=group_members)
-    for cls in (CallStarted, CallEnded, CallNotesPosted):
+    for cls in (CallStarted, CallEnded, CallNotesPosted, CallAssistantState):
         ev = cls(data={"group_id": "g1"})
         assert set(await r.audience(ev)) == {"u1", "u2"}, cls.__name__
+    ask = CallAssistantState(data={"group_id": "g1", "state": "idle", "asked_by": "u9"})
+    assert set(await r.audience(ask)) == {"u1", "u2"}
 
 
 @pytest.mark.asyncio

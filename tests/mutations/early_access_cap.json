@@ -1,0 +1,57 @@
+[
+  {
+    "label": "credits_enforced is ignored, so the early-access gate never fires",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not (settings.billing_enforced or settings.credits_enforced):\n",
+    "replace": "    if not settings.billing_enforced:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_cap.py",
+      "tests/cloud/credits/test_platform_funded_free.py::test_credits_enforced_alone_turns_on_the_gate"
+    ]
+  },
+  {
+    "label": "the empty-wallet leg is skipped, so a drained wallet keeps chatting",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        await credits_service.check_balance(workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_cap.py"
+    ]
+  },
+  {
+    "label": "payments_open is ignored by the unpaid helper",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if get_settings().payments_open:\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_platform_funded_free.py::test_payments_open_means_not_platform_funded"
+    ]
+  },
+  {
+    "label": "a paid plan counts as unpaid early access",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if ent.plan != \"free\":\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_platform_funded_free.py::test_paid_plan_is_not_platform_funded"
+    ]
+  },
+  {
+    "label": "a subscription allotment is not treated as paid",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "_PAID_CAUSES = (_TOPUP_CAUSE, \"subscription_grant\")",
+    "replace": "_PAID_CAUSES = (_TOPUP_CAUSE,)",
+    "tests": [
+      "tests/cloud/credits/test_platform_funded_free.py::test_paid_ledger_entry_means_not_platform_funded"
+    ]
+  },
+  {
+    "label": "an unapplied crash-window top_up counts as money received",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "{\"workspace\": workspace, \"cause\": {\"$in\": list(_PAID_CAUSES)}, \"applied\": True}",
+    "replace": "{\"workspace\": workspace, \"cause\": {\"$in\": list(_PAID_CAUSES)}}",
+    "tests": [
+      "tests/cloud/credits/test_platform_funded_free.py::test_unapplied_paid_entry_does_not_count"
+    ]
+  }
+]

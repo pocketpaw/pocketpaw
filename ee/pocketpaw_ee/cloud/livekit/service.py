@@ -2,7 +2,11 @@
 
 Uses the ``livekit-api`` Python SDK to talk to LiveKit Cloud.
 Requires ``LIVEKIT_URL``, ``LIVEKIT_API_KEY``, ``LIVEKIT_API_SECRET``
-environment variables.
+environment variables. ``create_room`` starts the meeting-notes bot only when
+``_meeting_notes_allowed``: an unpaid early-access workspace's call runs without
+it, since its STT and summary spend never reaches the credit ledger. The bot's
+token may publish microphone audio only (no camera, screen or data), which is
+how Ask Paw answers are voiced into the call.
 
 Change log:
 - Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
@@ -770,6 +774,24 @@ async def _force_end_at_budget(group_id: str, workspace_id: str, deadline: datet
         logger.warning("Failed to force-end call %s at budget deadline: %s", group_id, exc)
 
 
+async def _meeting_notes_allowed(workspace_id: str) -> bool:
+    """False for an unpaid early-access workspace: the notes bot spends on STT
+    and an LLM summary outside the credit ledger, so the call runs without it.
+    A failed check also answers False; a call with no notes is the safe miss.
+    """
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    try:
+        return await early_access_denial(workspace_id) is None
+    except Exception:
+        logger.warning(
+            "livekit: early-access check failed for workspace=%s; no meeting notes",
+            workspace_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def create_room(
     group_id: str,
     workspace_id: str = "",
@@ -906,16 +928,18 @@ async def create_room(
         except Exception as exc:
             logger.warning("Failed to create Meeting doc for instant call: %s", exc)
 
-    # Generate a subscriber-only token for the call bot (no agent flag
-    # so it auto-subscribes to remote tracks for transcription).
+    # The call bot subscribes for transcription and publishes one microphone
+    # track for Ask Paw's spoken answers; no camera, screen share or data.
     # Use a 24h TTL so the bot never expires mid-call.
     bot_token = await _generate_token(
         room_name,
         "call-bot",
-        can_publish=False,
+        can_publish=True,
         can_subscribe=True,
         is_admin=False,
         ttl_seconds=86400,
+        publish_sources=["microphone"],
+        can_publish_data=False,
     )
 
     # Start the meeting notes agent as a managed subprocess so it does not
@@ -930,8 +954,9 @@ async def create_room(
     # deploy runs a single worker so this fully dedupes it; cross-replica dedupe
     # (only if the API is ever run multi-replica) is the LiveKit Agents
     # migration's job, not a best-effort participant poll here.
+    notes_on = await _meeting_notes_allowed(workspace_id)
     async with _spawn_lock_for(group_id):
-        if group_id not in _active_agents:
+        if notes_on and group_id not in _active_agents:
             proc = await _spawn_agent_process(
                 group_id=group_id,
                 room_name=room_name,
@@ -1352,6 +1377,60 @@ async def post_meeting_notes_to_group(
             logger.warning("Failed to create tasks from meeting notes: %s", exc)
 
 
+async def post_call_bot_message(group_id: str, content: str, sender_name: str) -> str:
+    """Post ``content`` to the group chat as the call bot; returns the message id.
+
+    Same write path as the meeting notes: the call-bot is not a group member,
+    so the message doc is created directly, then the group stats, the internal
+    ``message.sent`` bus and the realtime ``message.new`` are updated.
+    """
+    from pocketpaw_ee.cloud.chat import group_service
+    from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    domain_msg = await _create_group_message_doc(
+        group_id=group_id,
+        sender=CALL_BOT_USER_ID,
+        sender_type="user",
+        sender_name=sender_name,
+        content=content,
+    )
+    try:
+        await group_service.bump_message_stats(
+            group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)
+        )
+    except Exception:
+        logger.warning("call bot message: group stats bump failed for %s", group_id)
+    await event_bus.emit(
+        "message.sent",
+        {
+            "group_id": group_id,
+            "message_id": domain_msg.id,
+            "sender_id": CALL_BOT_USER_ID,
+            "sender_type": "user",
+            "content": content,
+            "mentions": [],
+        },
+    )
+    await emit(
+        MessageNew(
+            data={
+                "group": group_id,
+                "group_id": group_id,
+                "sender": CALL_BOT_USER_ID,
+                "senderName": sender_name,
+                "senderType": "user",
+                "created_at": datetime.now(UTC).isoformat(),
+                "message_id": domain_msg.id,
+                "_id": domain_msg.id,
+                "content": content,
+                "mentions": [],
+            }
+        )
+    )
+    return domain_msg.id
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -1366,14 +1445,19 @@ async def _generate_token(
     can_subscribe: bool = True,
     is_admin: bool = False,
     ttl_seconds: int = 3600,
+    publish_sources: list[str] | None = None,
+    can_publish_data: bool = True,
 ) -> str:
     """Internal: generate a LiveKit access token."""
+    if publish_sources is None:
+        publish_sources = ["microphone", "camera", "screen_share"]
     grants = VideoGrants(
         room_join=True,
         room=room_name,
         can_publish=can_publish,
         can_subscribe=can_subscribe,
-        can_publish_sources=["microphone", "camera", "screen_share"] if can_publish else None,
+        can_publish_data=can_publish_data,
+        can_publish_sources=publish_sources if can_publish else None,
         can_update_own_metadata=True,
         agent=is_admin or None,
     )

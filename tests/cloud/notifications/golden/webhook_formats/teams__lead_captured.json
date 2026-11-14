@@ -1,0 +1,70 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in Paw",
+            "type": "Action.OpenUrl",
+            "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+          }
+        ],
+        "body": [
+          {
+            "size": "Medium",
+            "text": "New lead",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "spacing": "None",
+            "text": "Bright Smile",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "facts": [
+              {
+                "title": "Name",
+                "value": "Priya Sharma"
+              },
+              {
+                "title": "Email",
+                "value": "priya@example.com"
+              },
+              {
+                "title": "Phone",
+                "value": "+1 555 010 1234"
+              },
+              {
+                "title": "Page",
+                "value": "northwind.example.com/contact"
+              }
+            ],
+            "type": "FactSet"
+          },
+          {
+            "text": "Message",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "spacing": "Small",
+            "text": "Hi! Could you quote 20 embroidered jackets for our team?",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

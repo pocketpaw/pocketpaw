@@ -19,16 +19,28 @@
 #     access to the pocket (the same rule as ``pockets.service.has_edit_access``).
 #     A pocket outside the caller's workspace is a 404, so ids cannot be probed.
 #   * The site delete cascade calls ``purge_for_pocket``; it is best effort there.
-#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets
-#     (the integrations gateway's ``PAW_GATEWAY_TOKEN``). The first skips the owner
-#     gate, so its callers authorize first; the second compares in constant time
-#     here, so the value still never leaves this module.
+#     A site transfer calls ``move_for_pocket`` to re-key the rows to the new
+#     workspace (the Fernet key is deployment-wide, so tokens move as they are).
+#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets:
+#     the integrations gateway's ``PAW_GATEWAY_TOKEN`` and the session-signing secrets
+#     in ``PLATFORM_SIGNING_SECRETS`` (``ensure_signing_secrets``, at recipe apply and
+#     publish, so no owner is ever asked for one). The first skips the owner gate, so
+#     its callers authorize first; the second compares in constant time here, so the
+#     value still never leaves this module.
+#   * ``set_managed_secret`` / ``delete_managed_secrets`` serve integration-written
+#     secrets (Supabase's project keys), tagged ``managed_by``. They skip the owner
+#     gate too (the caller is an integration hook the owner set up) but are audited
+#     (names only). A managed write never replaces a value it does not own (an
+#     owner-set or another integration's); it only fills an empty / pending row or
+#     its own. Deletes only touch rows carrying the tag. An owner ``set_secret``
+#     clears the tag: the value is the owner's from then on.
 """Per-site secret storage: request, set, delete, list names, resolve for deploy."""
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -51,6 +63,27 @@ MAX_SECRETS_PER_SITE = 50
 Requester = Literal["agent", "user"]
 Status = Literal["set", "pending"]
 
+#: Session-signing secrets the platform mints per site. An owner never types one:
+#: publish mints the ones a build requests (``ensure_signing_secrets``) and a draft
+#: binds its own value for each (``draft_worker.draft_secrets``). Only names that
+#: clearly sign the app's own sessions: a JWT_SECRET may verify tokens from another
+#: system, so it stays the owner's to set.
+PLATFORM_SIGNING_SECRETS = ("BETTER_AUTH_SECRET", "AUTH_SECRET", "SESSION_SECRET")
+#: The integrations gateway token (``integrations.bindings.GATEWAY_TOKEN_NAME``),
+#: minted when the owner links an integration.
+GATEWAY_TOKEN_SECRET = "PAW_GATEWAY_TOKEN"
+DRAFT_SUFFIX = "__DRAFT"
+SIGNING_SECRET_DESCRIPTION = (
+    "Created by Paw. Keeps your site's sign-ins secure. Nothing for you to do."
+)
+
+
+def is_platform_managed(name: str) -> bool:
+    """True for a name the platform sets itself (a signing secret, its ``__DRAFT``
+    twin, the gateway token): the agent must never ask the owner for it."""
+    base = (name or "").strip().removesuffix(DRAFT_SUFFIX)
+    return base in PLATFORM_SIGNING_SECRETS or base == GATEWAY_TOKEN_SECRET
+
 
 class SiteSecretView(BaseModel):
     """What any API or tool may say about one secret. There is no value field."""
@@ -61,6 +94,8 @@ class SiteSecretView(BaseModel):
     requested_by: Requester | None = None
     requested_at: datetime | None = None
     updated_at: datetime | None = None
+    # "integration:<provider>" when an integration wrote the value; None otherwise.
+    managed_by: str | None = None
 
 
 class SiteSecretsView(BaseModel):
@@ -91,6 +126,17 @@ def validate_name(name: str) -> str:
     return name
 
 
+def _check_value(name: str, value: str) -> None:
+    """A non-empty string within the size cap, else an owner-facing error."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError("sites.secret_value_empty", f"{name} needs a non-empty value.")
+    if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
+        raise PayloadTooLarge(
+            "sites.secret_too_large",
+            f"{name} is over the {MAX_VALUE_BYTES // 1024} KB limit for a site secret.",
+        )
+
+
 def _doc():
     from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 
@@ -105,6 +151,7 @@ def _view(row) -> SiteSecretView:
         requested_by=row.requested_by if row.requested_by in ("agent", "user") else None,
         requested_at=row.requested_at,
         updated_at=row.value_set_at,
+        managed_by=getattr(row, "managed_by", None) or None,
     )
 
 
@@ -224,13 +271,7 @@ async def set_secret(
 ) -> SiteSecretView:
     """Encrypt and store a value (owner only). Fills a pending request if there is one."""
     name = validate_name(name)
-    if not isinstance(value, str) or not value.strip():
-        raise ValidationError("sites.secret_value_empty", f"{name} needs a non-empty value.")
-    if len(value.encode("utf-8")) > MAX_VALUE_BYTES:
-        raise PayloadTooLarge(
-            "sites.secret_too_large",
-            f"{name} is over the {MAX_VALUE_BYTES // 1024} KB limit for a site secret.",
-        )
+    _check_value(name, value)
     pocket = await _require_owner(workspace_id, user_id, pocket_id)
     token = crypto.encrypt(value)
     now = datetime.now(UTC)
@@ -242,6 +283,7 @@ async def set_secret(
     row.encrypted_value = token
     row.value_set_by = user_id
     row.value_set_at = now
+    row.managed_by = None
     await row.save()
 
     _audit(user_id, workspace_id, pocket_id, "sites.secret.set", name)
@@ -348,22 +390,116 @@ async def ensure_generated_secret(
 
     For secrets the platform owns (a per-site gateway token), so it skips the owner
     gate and the per-site cap: the caller has already authorized the action that
-    needs it. A pending row of the same name is filled in."""
+    needs it. A pending row of the same name is filled in.
+
+    Insert-if-absent, so two callers racing (or a stale read) can never replace a
+    value: a new row relies on the unique (workspace, pocket_id, name) index, and a
+    pending row is filled only by an update that still sees it empty."""
     import secrets as _secrets
+
+    from pymongo.errors import DuplicateKeyError
 
     name = validate_name(name)
     row = await _row(workspace_id, pocket_id, name)
     if row is not None and row.encrypted_value:
         return False
+    fields = {
+        "encrypted_value": crypto.encrypt(_secrets.token_urlsafe(32)),
+        "description": description[:MAX_DESCRIPTION_CHARS],
+        "value_set_by": "system",
+        "value_set_at": datetime.now(UTC),
+    }
+    if row is None:
+        try:
+            await _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name, **fields).insert()
+        except DuplicateKeyError:
+            return False
+    else:
+        coll = _doc().get_pymongo_collection()
+        done = await coll.update_one(
+            {"_id": row.id, "encrypted_value": {"$in": [None, ""]}}, {"$set": fields}
+        )
+        if done.modified_count != 1:
+            return False
+    logger.info("site_secrets: generated %s on pocket %s", name, pocket_id)
+    return True
+
+
+async def ensure_signing_secrets(
+    *, workspace_id: str, pocket_id: str, names: Iterable[object]
+) -> list[str]:
+    """Mint each platform signing secret in ``names``, or with a pending request
+    (a site built when the agent still asked the owner), that has no value yet.
+    An owner-set value is kept; other names are ignored. Returns the minted names.
+    Needs CLOUD_ENCRYPTION_KEY like every secret write; the caller authorized the
+    action that needs them."""
+    if not workspace_id or not pocket_id:
+        return []
+    asked = {str(n) for n in names}
+    asked |= {r.name for r in await _rows(workspace_id, pocket_id) if not r.encrypted_value}
+    return [
+        name
+        for name in PLATFORM_SIGNING_SECRETS
+        if name in asked
+        and await ensure_generated_secret(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            name=name,
+            description=SIGNING_SECRET_DESCRIPTION,
+        )
+    ]
+
+
+async def set_managed_secret(
+    *, workspace_id: str, pocket_id: str, name: str, value: str, managed_by: str, description: str
+) -> bool:
+    """Write ``value`` for ``name`` on behalf of an integration, tagged ``managed_by``.
+
+    True when written. False (nothing changes) when the row already holds a value
+    that ``managed_by`` does not own: an owner's value is never replaced. A pending
+    request is filled. Skips the owner gate and the cap; the caller authorized the
+    link that needs it."""
+    name = validate_name(name)
+    if not managed_by:
+        raise ValueError("managed_by is required")
+    _check_value(name, value)
+    row = await _row(workspace_id, pocket_id, name)
     if row is None:
         row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)
-    row.encrypted_value = crypto.encrypt(_secrets.token_urlsafe(32))
+    elif row.encrypted_value and getattr(row, "managed_by", None) != managed_by:
+        logger.info("site_secrets: %s kept on pocket %s (not %s's)", name, pocket_id, managed_by)
+        return False
+    row.encrypted_value = crypto.encrypt(value)
     row.description = description[:MAX_DESCRIPTION_CHARS]
     row.value_set_by = "system"
     row.value_set_at = datetime.now(UTC)
+    row.managed_by = managed_by
     await row.save()
-    logger.info("site_secrets: generated %s on pocket %s", name, pocket_id)
+    _audit(managed_by, workspace_id, pocket_id, "sites.secret.set_managed", name)
+    logger.info("site_secrets: %s set by %s on pocket %s", name, managed_by, pocket_id)
     return True
+
+
+async def delete_managed_secrets(
+    *, workspace_id: str, pocket_id: str, managed_by: str, keep: frozenset[str] = frozenset()
+) -> list[str]:
+    """Delete the rows tagged ``managed_by`` whose name is not in ``keep``.
+
+    Returns the deleted names. Rows without that tag (owner-set, agent-requested,
+    another integration's) are never touched."""
+    if not managed_by:
+        return []
+    gone: list[str] = []
+    for row in await _rows(workspace_id, pocket_id):
+        if getattr(row, "managed_by", None) == managed_by and row.name not in keep:
+            await row.delete()
+            gone.append(row.name)
+            _audit(managed_by, workspace_id, pocket_id, "sites.secret.delete_managed", row.name)
+    if gone:
+        logger.info(
+            "site_secrets: %s removed %s from pocket %s", managed_by, ",".join(gone), pocket_id
+        )
+    return gone
 
 
 async def secret_matches(*, workspace_id: str, pocket_id: str, name: str, candidate: str) -> bool:
@@ -397,6 +533,45 @@ async def secrets_for_deploy(site) -> dict[str, str]:
         for row in await _rows(workspace_id, pocket_id)
         if row.encrypted_value
     }
+
+
+async def move_for_pocket(*, pocket_id: str, destination_workspace_id: str) -> int:
+    """Re-key every secret of one site pocket to ``destination_workspace_id`` (a site
+    transfer). Returns how many rows moved.
+
+    Rows are matched by ``pocket_id`` in any OTHER workspace: a pocket id is unique,
+    so these are this site's rows wherever an earlier step left them, and the call is
+    idempotent. The encrypted token, name, state, description and ``managed_by``
+    move untouched. When the destination already has a row of the same name (its
+    agent asked for it after the pocket moved), a destination VALUE wins and the
+    source row is dropped; a destination PENDING request is replaced by the source
+    row. Logs names and counts only."""
+    doc = _doc()
+    destination = (destination_workspace_id or "").strip()
+    if not pocket_id or not destination:
+        return 0
+    rows = await doc.find(doc.pocket_id == pocket_id, doc.workspace != destination).to_list()
+    moved = 0
+    for row in rows:
+        existing = await _row(destination, pocket_id, row.name)
+        if existing is not None:
+            if existing.encrypted_value:
+                await row.delete()
+                logger.info(
+                    "sites.secret: transfer kept the destination's %s for %s", row.name, pocket_id
+                )
+                continue
+            await existing.delete()
+        await row.set({"workspace": destination})
+        moved += 1
+    if rows:
+        logger.info(
+            "sites.secret: moved %d secret(s) of %s to workspace %s",
+            moved,
+            pocket_id,
+            destination,
+        )
+    return moved
 
 
 async def purge_for_pocket(*, workspace_id: str, pocket_id: str) -> int:

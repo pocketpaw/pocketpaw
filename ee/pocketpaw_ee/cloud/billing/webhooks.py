@@ -9,8 +9,10 @@
 # no auth/license dependency ever attaches to it.
 #
 # On a verified ``payment.succeeded`` the service grants credits EXACTLY ONCE
-# (BC-1's idempotent grant, keyed on the webhook event id). A bad signature
-# raises ``BadRequest`` → 400 via the cloud error handler — no grant.
+# (BC-1's idempotent grant, keyed on the webhook event id), but only while
+# payments are open in live mode; otherwise it records the payment, grants
+# nothing and still acks 200. A bad signature raises ``BadRequest`` → 400 via
+# the cloud error handler — no grant.
 #
 # Deliveries that move money the OTHER way (``refund.succeeded`` /
 # ``dispute.lost``) arrive on this same route and debit the credits back; the

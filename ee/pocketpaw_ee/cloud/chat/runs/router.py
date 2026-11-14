@@ -1,6 +1,8 @@
 """Run streaming + control endpoints. The stream's tail, heartbeat and
 lifetime cap live in ``transport.sse_tail`` (shared with the Belt run feed);
-this route authorizes, picks the cursor and serves the history fallback.
+this route authorizes, picks the cursor and serves the history fallback: a
+terminal run whose stream expired gets one synthetic frame, an ``error`` carrying
+``doc.error`` for a failed run with no reply, else a ``stream_end``.
 
 Changes:
 - 2026-09-27 (fix/run-stream-session-readers) — the stream admits a reader of
@@ -93,6 +95,19 @@ async def get_run_stream(
         # hasn't XADD'd its first event yet.
         is_terminal = doc.status not in ("queued", "running")
         if is_terminal and not await transport.stream_exists(run_id):
+            # A failed run with no reply replays its error: a bare stream_end
+            # reads as success and the client shows nothing.
+            if doc.status == "failed" and not doc.assistant_message_id:
+                yield sse_frame(
+                    "0-0",
+                    "error",
+                    {
+                        "code": "run.failed",
+                        "message": doc.error or "This reply failed. Send your message again.",
+                        "from_history": True,
+                    },
+                )
+                return
             yield sse_frame(
                 "0-0",
                 "stream_end",

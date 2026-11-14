@@ -658,6 +658,7 @@ _PREVIEW_CONFIG_KEYS = {
     "voice",
     "poweredBy",
     "expandable",
+    "movable",
 }
 
 
@@ -717,6 +718,7 @@ async def test_preview_config_of_no_draft_is_the_preview_frame_config(client):
         concierge_disclosure="Hello",
         concierge_privacy_url="https://brewco.com/privacy",
         concierge_expandable=False,
+        concierge_movable=False,
     )
     site.concierge_appearance.colors.surface = "#f7f7fb"
     site.concierge_appearance.launcher.style = "icon"

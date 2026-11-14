@@ -53,6 +53,10 @@ PUBLIC_KEYS = {
     "created_at",
     "media_kind",
     "media_url",
+    "tags",
+    "updated_at",
+    "creator",
+    "remixed_from",
 }
 SYNCED = {"site_template.saved", "site_template.updated", "site_template.deleted"}
 
@@ -89,7 +93,10 @@ async def _sync(bus) -> None:
 
 
 async def _listing(template_id: str) -> DiscoverListing | None:
-    return await DiscoverListing.find_one({"source": "site_template", "source_id": template_id})
+    """The template's listing while it is listed (a withdrawn row reads None)."""
+    return await DiscoverListing.find_one(
+        {"source": "site_template", "source_id": template_id, "withdrawn": {"$ne": True}}
+    )
 
 
 async def _upsert(source_id: str, **fields: Any) -> str:
@@ -584,10 +591,11 @@ async def test_reindex_is_idempotent() -> None:
     await _template(name="Private one")
     await _upsert("650000000000000000000000")  # a template that no longer exists
 
+    listed = {"withdrawn": {"$ne": True}}
     first = await service_admin.reindex("site_template")
-    rows = await DiscoverListing.find_all().to_list()
+    rows = await DiscoverListing.find(listed).to_list()
     second = await service_admin.reindex("site_template")
-    again = await DiscoverListing.find_all().to_list()
+    again = await DiscoverListing.find(listed).to_list()
 
     assert first == {
         "source": "site_template",

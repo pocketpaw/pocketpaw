@@ -1,28 +1,28 @@
 # ee/pocketpaw_ee/cloud/media/storage.py — where generated + uploaded media lives.
 #
-# The /studio gallery (direct generations + the canvas "save edited image"
-# upload + the legacy agent-side file list) is backed by the SAME storage swap
-# the Files / Knowledge Base uploads use: ``pocketpaw.uploads.build_adapter``.
+# The /studio gallery (direct generations, agent-side media MCP output, the
+# canvas "save edited image" upload) is backed by the SAME storage swap the
+# Files / Knowledge Base uploads use: ``pocketpaw.uploads.build_adapter``.
 #
 #   * POCKETPAW_UPLOAD_ADAPTER=local (default) — files land under
 #     ~/.pocketpaw/generated/<name> (key prefix "generated/", local root
-#     ~/.pocketpaw). This is exactly the layout the studio shipped with, so the
-#     agent-side media MCP files (which write that dir directly) still surface.
+#     ~/.pocketpaw).
 #   * POCKETPAW_UPLOAD_ADAPTER=s3 — keys "generated/<name>" in S3_PRIVATE_BUCKET.
-#     Durable + shared across instances; the media MCP's local files do NOT
-#     surface in this mode (that agent path still writes local disk).
 #
-# Generated filenames carry a unix-ms timestamp prefix ("<ms>-<uuid>.png") so a
-# remote adapter listing (which has no mtime) can still sort newest-first and
-# report a meaningful ``modified``.
+# The key is flat (``serve_media`` refuses any name with a slash), so a file's
+# owning workspace travels IN THE FILENAME as an opaque digest token:
+#   * "ws-<token>-…"      gallery file (generation or upload). Listed only to
+#                         its workspace; READS stay capability-based so a
+#                         published site embedding the URL keeps working.
+#   * "browser-<token>-…" /browser capture. Never listed; ``serve_media``
+#                         refuses it to any other workspace.
+# ``save_generated`` requires ``workspace_id`` so no write path can produce an
+# unowned file, and an untagged (legacy) name is listed to NOBODY — see
+# ``visible_to``.
 #
-# Created 2026-08-17 (studio-media-s3): new storage module.
-# Updated 2026-09-06 (BR-4, feat/browser-surface-extract): ``save_generated``
-# takes a ``name_prefix`` so a /browser screenshot lands as
-# "browser-<owner-token>-<ms>-<uuid>.png". The token is the ONLY place a
-# capture carries its tenant (the serve route rejects slashes, so a
-# per-workspace subdirectory would have no URL); ``router.serve_media``
-# enforces it and the gallery listings skip captures entirely.
+# Generated names carry a unix-ms timestamp after the owner token
+# ("ws-<token>-<ms>-<uuid>.png") so a remote listing (no mtime) can still sort
+# newest-first; ``modified_from_name`` reads past the owner prefix.
 
 from __future__ import annotations
 
@@ -55,8 +55,11 @@ def name_from_key(key: str) -> str:
 
 def modified_from_name(name: str) -> int:
     """Best-effort ``modified`` (unix ms) from a timestamp-prefixed filename —
-    "<ms>-<uuid>.png". Returns 0 for names without the prefix (uploads, old
+    "<ms>-<uuid>.png", optionally behind an owner prefix ("ws-<token>-" or
+    "browser-<token>-"). Returns 0 for names without a timestamp (uploads, old
     files) so remote listing still returns a number the frontend expects."""
+    if owner_of(name) is not None or capture_owner_of(name) is not None:
+        name = name.split("-", 2)[2] if name.count("-") >= 2 else ""
     first = name.split("-", 1)[0]
     return int(first) if first.isdigit() else 0
 
@@ -120,11 +123,13 @@ def capture_owner_of(name: str) -> str | None:
 # makes a file ATTRIBUTABLE so the LISTING can be scoped. Reads stay
 # capability-based on an unguessable name, exactly like /uploads.
 #
-# Files written before this existed carry no token. They stay visible to every
-# workspace's listing, which matches what ``studio.service.list_generations``
-# already does with untagged history records (``_workspace is None`` is shown
-# to everyone). Consistency with the neighbouring subsystem beats a private
-# rule here, and hiding them instead would empty existing galleries.
+# LEGACY POLICY: an untagged name is listed to NO workspace. Files written
+# before every write path stamped an owner (notably the agent media MCP, which
+# saved untagged) cannot be attributed, and showing them to everyone put one
+# tenant's generations in every other tenant's gallery. There is no
+# single-tenant mode to keep them for: the listing route needs an authenticated
+# cloud workspace to run at all. They still SERVE by URL (published sites embed
+# them) and direct /studio generations still appear via the generation history.
 OWNED_PREFIX = "ws-"
 _OWNED_TOKEN_RE = re.compile(r"[0-9a-f]{16}\Z")
 
@@ -148,25 +153,33 @@ def owner_of(name: str) -> str | None:
 
 
 def visible_to(name: str, workspace_id: str | None) -> bool:
-    """Whether ``name`` belongs in ``workspace_id``'s gallery listing."""
+    """Whether ``name`` belongs in ``workspace_id``'s gallery listing.
+
+    Only a file stamped with ``workspace_id``'s token. An untagged (legacy) name
+    is visible to nobody: see the LEGACY POLICY note above."""
     owner = owner_of(name)
-    if owner is None:
-        return True  # legacy, untagged — see the note above
-    return workspace_id is not None and owner == capture_owner_token(workspace_id)
+    if owner is None or not workspace_id:
+        return False
+    return owner == capture_owner_token(workspace_id)
 
 
-async def save_generated(data: bytes, *, mime: str, ext: str = "png", name_prefix: str = "") -> str:
+async def save_generated(
+    data: bytes, *, mime: str, workspace_id: str, ext: str = "png", capture: bool = False
+) -> str:
     """Persist a freshly generated blob (image / audio / …) through the media
     adapter and return its backend-relative ``/api/v1/media/<name>`` URL.
 
-    The name carries a unix-ms prefix so a remote listing can sort newest-first
-    and report ``modified``. Used by BOTH the direct /studio path and the
-    agent-side media MCP so every generated asset lands on the configured
-    storage (local disk in dev, S3 in a POCKETPAW_UPLOAD_ADAPTER=s3 deploy).
+    ``workspace_id`` is REQUIRED: it is stamped into the name as the owner token
+    (``owned_name_prefix``), which is the only thing that scopes the gallery
+    listing. ``capture=True`` stamps a /browser capture prefix instead
+    (``capture_name_prefix``), private on read and never listed.
 
-    ``name_prefix`` prepends to that name — /browser captures use
-    ``capture_name_prefix(workspace_id)`` so the file carries its owner."""
-    name = f"{name_prefix}{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}.{ext.lstrip('.')}"
+    After the owner token the name carries a unix-ms timestamp so a remote
+    listing can sort newest-first and report ``modified``."""
+    if not workspace_id:
+        raise ValueError("save_generated needs the owning workspace_id")
+    prefix = capture_name_prefix(workspace_id) if capture else owned_name_prefix(workspace_id)
+    name = f"{prefix}{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}.{ext.lstrip('.')}"
     await get_adapter().put(media_key(name), bytes_stream(data), mime)
     return f"/api/v1/media/{name}"
 
@@ -200,6 +213,9 @@ __all__ = [
     "capture_name_prefix",
     "capture_owner_of",
     "capture_owner_token",
+    "owned_name_prefix",
+    "owner_of",
+    "visible_to",
     "save_generated",
     "get_adapter",
     "local_generated_dir",

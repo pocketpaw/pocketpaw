@@ -4,7 +4,7 @@
 # Five Site fields (disclosure line, privacy link, consent, voice, full-screen) and
 # the appearance's bar ``size`` go through PATCH /paw-bar/admin/site/{id}/settings
 # and come out of both frames' ``window.__PAWBAR__`` as ``disclosure``,
-# ``privacyHref``, ``consentRequired``, ``voice``, ``expandable`` and ``barSize``.
+# ``privacyHref``, ``consentRequired``, ``voice``, ``expandable``, ``movable`` and ``barSize``.
 # These tests pin:
 #
 #   * validation: the disclosure cap and one-line cleaning, the https-only privacy
@@ -101,6 +101,7 @@ async def test_patch_round_trips_every_visitor_option(client):
         "concierge_consent_required": True,
         "concierge_voice": False,
         "concierge_expandable": False,
+        "concierge_movable": False,
     }
     res = await c.patch(_settings_url(site), json=body)
     assert res.status_code == 200, res.text
@@ -111,6 +112,7 @@ async def test_patch_round_trips_every_visitor_option(client):
         assert out["concierge_consent_required"] is True
         assert out["concierge_voice"] is False
         assert out["concierge_expandable"] is False
+        assert out["concierge_movable"] is False
 
 
 @pytest.mark.asyncio
@@ -141,6 +143,23 @@ async def test_patch_is_partial_for_visitor_options(client):
     assert res.json()["concierge_disclosure"] == "Kept"
 
 
+@pytest.mark.asyncio
+async def test_concierge_movable_round_trips_to_the_frame(client):
+    c, _store = client
+    site = await _site()
+    with patch(_ENTITLED, new=AsyncMock(return_value=False)):
+        assert (await _frame(c))["movable"] is True
+    res = await c.patch(_settings_url(site), json={"concierge_movable": False})
+    assert res.status_code == 200, res.text
+    assert (await c.get(_settings_url(site))).json()["concierge_movable"] is False
+    # The public frame memoises the Site for 30 s; a fresh read is what a visitor gets after that.
+    from pocketpaw_ee.paw_bar import router as paw_bar_router
+
+    paw_bar_router._frame_site_memo.clear()
+    with patch(_ENTITLED, new=AsyncMock(return_value=False)):
+        assert (await _frame(c))["movable"] is False
+
+
 def test_bar_size_is_an_enum_that_coerces():
     assert ConciergeAppearance().size == "sm"
     assert ConciergeAppearance(size="lg").size == "lg"
@@ -164,6 +183,7 @@ async def test_a_default_site_boots_todays_bar(client):
     assert boot["consentRequired"] is False
     assert boot["voice"] is True
     assert boot["expandable"] is True
+    assert boot["movable"] is True
     assert boot["poweredBy"] is True
     # Every key that was there before is still there.
     for key in ("siteKey", "greeting", "tokens", "tokensDark", "scheme", "launcher", "logo"):
@@ -179,6 +199,7 @@ async def test_the_public_frame_carries_the_owner_options(client):
         concierge_consent_required=True,
         concierge_voice=False,
         concierge_expandable=False,
+        concierge_movable=False,
         concierge_appearance=ConciergeAppearance(size="lg"),
     )
     boot = await _frame(c)
@@ -188,6 +209,7 @@ async def test_the_public_frame_carries_the_owner_options(client):
     assert boot["consentRequired"] is True
     assert boot["voice"] is False
     assert boot["expandable"] is False
+    assert boot["movable"] is False
 
 
 @pytest.mark.asyncio

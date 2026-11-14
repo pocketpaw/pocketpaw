@@ -121,11 +121,11 @@ async def test_publish_promotes_newer_version(beanie_test_db):
     v1 = await versions.write_draft(
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 1}
     )
-    v2 = await versions.write_draft(
-        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 2}
-    )
     await versions.publish(
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 2}
     )
     # Promote v2 — the published pointer follows the higher version_no.
     await versions.publish(

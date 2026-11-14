@@ -38,7 +38,7 @@
 #     is MARKED, so the agent never reasons about half a page believing it saw
 #     all of it.
 #   * ``screenshot`` now also SAVES the PNG through the studio media storage
-#     (``cloud.media.storage.save_generated``) and returns its
+#     (``cloud.media.storage.save_generated(..., capture=True)``) and returns its
 #     ``/api/v1/media/<name>`` URL alongside the image block, so a capture can
 #     go into a Ripple image widget instead of only being looked at. The file
 #     name carries a per-workspace owner token (``capture_name_prefix``) and the
@@ -422,7 +422,7 @@ async def _screenshot_handler(_args: dict) -> dict:
         from pocketpaw_ee.cloud.media import storage as media_storage
 
         media_url = await media_storage.save_generated(
-            png, mime="image/png", name_prefix=media_storage.capture_name_prefix(workspace_id)
+            png, mime="image/png", workspace_id=workspace_id, capture=True
         )
     except Exception:  # noqa: BLE001 — the image itself is still useful
         logger.warning("browser: saving the screenshot failed", exc_info=True)

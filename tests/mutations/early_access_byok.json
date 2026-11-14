@@ -1,0 +1,161 @@
+[
+  {
+    "label": "the guard ignores who pays, so a BYOK turn at wallet 0 is refused",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not workspace_id or source == \"byok\":\n",
+    "replace": "    if not workspace_id:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_byok_run_at_wallet_zero_proceeds_and_bills_zero",
+      "tests/cloud/credits/test_early_access_byok.py::test_byok_chat_http_at_wallet_zero_is_admitted"
+    ]
+  },
+  {
+    "label": "a BYOK run is debited as if the platform paid",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "    if byok:\n        micro = 0\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_byok_run_at_wallet_zero_proceeds_and_bills_zero"
+    ]
+  },
+  {
+    "label": "a resolver failure runs the turn free instead of gating it as platform",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        return byok_service.TurnCredentials(source=\"platform\")\n",
+    "replace": "        return byok_service.TurnCredentials(source=\"byok\")\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_resolver_failure_is_gated_and_charged_as_platform",
+      "tests/cloud/credits/test_early_access_byok.py::test_chat_http_resolver_failure_returns_402"
+    ]
+  },
+  {
+    "label": "a rejected gateway address degrades to platform instead of refusing the turn",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    except byok_service.GatewayEgressRejected:\n        raise\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_gateway_egress_rejection_refuses_the_turn_not_the_wallet",
+      "tests/cloud/test_agent_router_run_start_gates.py::test_a_rejected_gateway_address_is_refused_not_gated_as_platform"
+    ]
+  },
+  {
+    "label": "the executor gates before resolving who pays",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if await _resolve_payer_or_refuse(spec, ctx, transport):\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_byok_run_at_wallet_zero_proceeds_and_bills_zero"
+    ]
+  },
+  {
+    "label": "the run doc is never stamped, so a BYOK run bills as platform",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        await run_service.set_credential_source(spec.run_id, ctx.credential_source)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_byok_run_at_wallet_zero_proceeds_and_bills_zero"
+    ]
+  },
+  {
+    "label": "the loop resolves again instead of reusing the gate's answer",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            byok_creds = getattr(ctx, \"turn_credentials\", None)\n",
+    "replace": "            byok_creds = None\n",
+    "tests": [
+      "tests/cloud/runs/test_run_core_byok_wiring.py::test_credentials_resolved_by_the_gate_are_reused_not_resolved_again"
+    ]
+  },
+  {
+    "label": "the route gates without the resolved source",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "        await guards.assert_within_billing(workspace_id, source, one_active_run=True)\n",
+    "replace": "        await guards.assert_within_billing(workspace_id, one_active_run=True)\n",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_a_byok_turn_skips_the_wallet",
+      "tests/cloud/credits/test_early_access_byok.py::test_byok_chat_http_at_wallet_zero_is_admitted"
+    ]
+  },
+  {
+    "label": "the run context prints the plaintext key",
+    "file": "ee/pocketpaw_ee/cloud/byok/service.py",
+    "find": "    api_key: str | None = field(default=None, repr=False)\n",
+    "replace": "    api_key: str | None = None\n",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_turn_credentials_never_print_the_key"
+    ]
+  },
+  {
+    "label": "a stored key skips the wallet whatever backend serves the turn, so claude_agent_sdk runs free on our key",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        return \"byok\" if spends_byok_key(backend) else \"platform\"\n",
+    "replace": "        return \"byok\"\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_byok.py::test_a_stored_key_on_a_backend_that_ignores_it_is_gated_and_charged",
+      "tests/cloud/credits/test_early_access_byok.py::test_chat_http_key_on_a_backend_that_ignores_it_returns_402"
+    ]
+  },
+  {
+    "label": "an unknown agent is treated as spending the key",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        if doc is None:\n            return \"platform\"\n",
+    "replace": "        if doc is None:\n            return \"byok\"\n",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_a_byok_answer_without_a_spending_backend_is_gated"
+    ]
+  },
+  {
+    "label": "legacy backend names are not canonicalised, so claude_code counts as its own backend",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "    return _LEGACY_BACKENDS.get(name, name) == \"pydantic_ai\"\n",
+    "replace": "    return name != \"claude_agent_sdk\"\n",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py::test_spends_byok_key",
+      "tests/cloud/credits/test_early_access_byok.py::test_a_legacy_or_sdk_backend_with_a_key_is_admitted_and_billed_when_funded"
+    ]
+  },
+  {
+    "label": "a failed BYOK build falls back to the shared backend and runs on our credentials",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if byok_build_failed:\n                yield AgentEvent(type=\"error\", content=BYOK_BACKEND_FAILED_MESSAGE)\n                return\n",
+    "replace": "",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py::test_a_failed_byok_build_refuses_the_turn"
+    ]
+  },
+  {
+    "label": "the route resolves the payer even with billing off",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "        if not (settings.billing_enforced or settings.credits_enforced):\n            return\n        payer",
+    "replace": "        payer",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_billing_off_skips_the_payer_lookup"
+    ]
+  },
+  {
+    "label": "the route never treats a deny-by-default surface as spending the key",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "        return bool(resolve_profile(surface_context.kind, surface_context.meta).exclusive_tools)\n",
+    "replace": "        return False\n",
+    "tests": [
+      "tests/cloud/test_agent_router_run_start_gates.py::test_only_a_deny_by_default_surface_is_exclusive"
+    ]
+  },
+  {
+    "label": "a key billed as platform skips the model catalog",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            and (getattr(ctx, \"credential_source\", None) or byok_creds.source) != \"byok\"\n",
+    "replace": "            and byok_creds.source != \"byok\"\n",
+    "tests": [
+      "tests/cloud/runs/test_run_core_byok_wiring.py::test_a_key_billed_as_platform_still_faces_the_model_catalog"
+    ]
+  },
+  {
+    "label": "every failed BYOK build is refused, even on a backend that never spends the key",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "                    byok_build_failed = spends_byok_key(own_backend)\n",
+    "replace": "                    byok_build_failed = True\n",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py::test_a_failed_byok_build_on_a_backend_that_ignores_the_key_falls_back"
+    ]
+  }
+]

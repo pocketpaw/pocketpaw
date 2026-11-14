@@ -1,38 +1,29 @@
 [
   {
-    "label": "the react engine stops being selectable (create falls back to html, the skill is unreachable, and a react refine loses its own branch)",
+    "label": "a new-site create (react hint included) asks with a ui-spec ripple widget the ripple-off surface renders as raw JSON",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\", \"react\", \"project\")",
-    "replace": "_SITE_ENGINES: tuple[str, ...] = (\"html\", \"svelte\", \"ripple\", \"project\")",
-    "tests": [
-      "tests/cloud/surface/test_sites_handler.py::test_create_mode_engine_react_prefers_create_react_site_skill"
-    ]
-  },
-  {
-    "label": "react-create keeps inline ripple, so the preamble teaches a ui-spec ask the surface renders as raw JSON",
-    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "    ripple_on = engine == \"ripple\"",
-    "replace": "    ripple_on = engine in (\"ripple\", \"react\")",
+    "find": "        \"call the `mcp__pocketpaw_ask__ask_user` tool (inline ripple is OFF on \"",
+    "replace": "        \"render an `ask-user-questions` ripple widget (inline ripple is OFF on \"",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py::test_react_create_uses_ask_user_tool_not_ripple"
     ]
   },
   {
-    "label": "the react profile keeps ripple and surfaces no authoring skill (the agent authors by hand)",
+    "label": "the new-site create profile keeps inline ripple on, so ~10k tokens of widget catalog ride a turn that hand-authors files",
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
-    "find": "    \"react\": \"pocketpaw-create-react-site\",",
-    "replace": "",
+    "find": "    return SurfaceProfile(\n        ripple_mode=\"off\",\n        allow_mcp_tool_ids=sites_allow,\n        deny_mcp_tool_ids=_SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY,",
+    "replace": "    return SurfaceProfile(\n        ripple_mode=\"on\",\n        allow_mcp_tool_ids=sites_allow,\n        deny_mcp_tool_ids=_SITES_LEGACY_AUTHORING_DENY | _SITES_BUILTIN_DENY,",
     "tests": [
-      "tests/cloud/surface/test_surface_registry.py::test_sites_react_create_drops_ripple_and_denies"
+      "tests/cloud/surface/test_surface_registry.py::test_sites_create_is_one_profile_for_every_engine_hint"
     ]
   },
   {
-    "label": "react-create is handed the SVELTE brain instead of its own",
+    "label": "a new-site create is handed an old per-engine authoring brain instead of pocketpaw-site",
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
-    "find": "    \"react\": \"pocketpaw-create-react-site\",",
-    "replace": "    \"react\": \"pocketpaw-create-svelte-site\",",
+    "find": "_SITES_CREATE_SKILL = \"pocketpaw-site\"",
+    "replace": "_SITES_CREATE_SKILL = \"pocketpaw-create-svelte-site\"",
     "tests": [
-      "tests/cloud/surface/test_surface_registry.py::test_sites_component_engines_get_exactly_one_authoring_skill"
+      "tests/cloud/surface/test_surface_registry.py::test_sites_create_never_offers_an_old_engine_authoring_skill"
     ]
   },
   {

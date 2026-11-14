@@ -1,0 +1,74 @@
+[
+  {
+    "label": "the bridge skips the early-access check, so a free workspace gets unbilled agent replies",
+    "file": "ee/pocketpaw_ee/cloud/shared/agent_bridge.py",
+    "find": "    billing_reject = await over_billing_limit(workspace_id) or await early_access_denial(\n        workspace_id\n    )\n",
+    "replace": "    billing_reject = await over_billing_limit(workspace_id)\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_unbilled_paths.py"
+    ]
+  },
+  {
+    "label": "the planner skips the early-access check, so a free workspace runs unbilled plan tasks",
+    "file": "ee/pocketpaw_ee/cloud/planner/service.py",
+    "find": "    billing_reject = await over_billing_limit(workspace_id) or await early_access_denial(\n        workspace_id\n    )\n",
+    "replace": "    billing_reject = await over_billing_limit(workspace_id)\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_unbilled_paths.py"
+    ]
+  },
+  {
+    "label": "the document edit route skips the early-access check",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/router.py",
+    "find": "    # Document edits are not billed, so an unpaid early-access workspace is refused.\n    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    # Document edits are not billed, so an unpaid early-access workspace is refused.\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_unbilled_paths.py"
+    ]
+  },
+  {
+    "label": "the spreadsheet edit route skips the early-access check",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/router.py",
+    "find": "    # Spreadsheet edits are not billed, so an unpaid early-access workspace is refused.\n    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    # Spreadsheet edits are not billed, so an unpaid early-access workspace is refused.\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_unbilled_paths.py"
+    ]
+  },
+  {
+    "label": "the slides edit route skips the early-access check",
+    "file": "ee/pocketpaw_ee/cloud/file_versions/router.py",
+    "find": "    # Slides edits are not billed, so an unpaid early-access workspace is refused.\n    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    # Slides edits are not billed, so an unpaid early-access workspace is refused.\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_unbilled_paths.py"
+    ]
+  },
+  {
+    "label": "the denial ignores the enforcement flags, so self-host free workspaces are refused",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not (settings.billing_enforced or settings.credits_enforced) or not workspace_id:\n        return None\n    if not await is_platform_funded_free(workspace_id):\n        return None\n\n    from pocketpaw_ee.cloud._core.errors import EarlyAccessNotAvailable\n",
+    "replace": "    if not workspace_id:\n        return None\n    if not await is_platform_funded_free(workspace_id):\n        return None\n\n    from pocketpaw_ee.cloud._core.errors import EarlyAccessNotAvailable\n",
+    "tests": [
+      "tests/cloud/credits/test_billing_enforce_smoke.py"
+    ]
+  },
+  {
+    "label": "a forced free run drops the agent's ToolPolicy, losing its planner opt-in",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "                \"pydantic_ai\", own.settings, settings_override=override, policy=policy\n",
+    "replace": "                \"pydantic_ai\", own.settings, settings_override=override\n",
+    "tests": [
+      "tests/test_agent_pool_backend_lifecycle.py"
+    ]
+  },
+  {
+    "label": "every run that hits a usage limit gets the plain text, hiding the setting to raise",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        if per_run_limit and isinstance(exc, UsageLimitExceeded):\n",
+    "replace": "        if isinstance(exc, UsageLimitExceeded):\n",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py"
+    ]
+  }
+]

@@ -473,6 +473,12 @@ async def complete_callback(
         }
 
     user = await _resolve_user(identity)
+    # Early access credits land on Google (or any social) sign-in, including
+    # for accounts that already own a workspace from before launch. Idempotent
+    # per user, so a repeat sign-in costs one field check.
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    await credits_service.grant_early_access_best_effort(user)
     return {
         "mode": "login",
         "user": user,

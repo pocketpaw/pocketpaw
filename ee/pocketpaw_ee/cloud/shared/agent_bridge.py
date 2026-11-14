@@ -9,7 +9,9 @@ service (``chat.group_service`` for group lookup, ``agents.service`` for persona
 ``_dispatch_agent_responses`` runs the shared run-start billing gate
 (``credits.guards.over_billing_limit``) BEFORE respond-mode evaluation, so an
 over-budget tenant triggers no model call (not even ``_smart_relevance_check``'s
-pre-classifier); a rejection emits one ``agent.error``. It then checks each
+pre-classifier), then refuses an unpaid early-access workspace outright
+(``early_access_denial``): these replies never reach the credit ledger, so the
+wallet cannot bound them. A rejection emits one ``agent.error``. It then checks each
 agent's respond_mode (silent, auto, mention_only, smart).
 
 ``_run_agent_response`` streams one agent's reply over the WS:
@@ -130,14 +132,20 @@ async def _dispatch_agent_responses(data: dict) -> None:
     # ``_should_agent_respond`` -> ``_smart_relevance_check``: that pre-classifier
     # is itself a (cheap Haiku) model call, so gating only before ``pool.run``
     # would still let an over-budget workspace spend on the relevance check. The
-    # shared guard is flag-gated (a no-op unless ``billing_enforced``) and runs
-    # both the empty-wallet and monthly-ceiling assertions; on rejection we emit a
+    # shared guard is flag-gated (a no-op unless ``billing_enforced`` or
+    # ``credits_enforced``) and runs both the empty-wallet and monthly-ceiling
+    # assertions; on rejection we emit a
     # single terminal ``agent.error`` to the group (best-effort — no run_id /
     # stream transport on this event-bus path) and return without dispatching any
     # agent. An empty ``workspace_id`` is a no-op (no wallet to attribute).
-    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+    # An unpaid early-access workspace is refused after that (403
+    # ``early_access.not_available``): this path is not billed, so a positive
+    # wallet would never run down and the replies would be unbounded.
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial, over_billing_limit
 
-    billing_reject = await over_billing_limit(workspace_id)
+    billing_reject = await over_billing_limit(workspace_id) or await early_access_denial(
+        workspace_id
+    )
     if billing_reject is not None:
         logger.warning(
             "Agent bridge: workspace %s over billing limit (%s) — skipping all agents in group %s",

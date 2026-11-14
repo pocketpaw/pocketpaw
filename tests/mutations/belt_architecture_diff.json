@@ -1,0 +1,138 @@
+[
+  {
+    "label": "architecture diff: nested lists count as changed fields",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "    return {k: v for k, v in el.items() if k not in _NESTED}\n",
+    "replace": "    return dict(el)\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_a_child_list_change_is_not_a_field_change_but_a_move_is_parent"
+    ]
+  },
+  {
+    "label": "architecture diff: a move is not reported",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "        if parent != was_parent:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_a_child_list_change_is_not_a_field_change_but_a_move_is_parent"
+    ]
+  },
+  {
+    "label": "architecture diff: every removed element is carried, not just the topmost",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "    top = [i for i in removed if before[i][1] not in gone]\n",
+    "replace": "    top = removed\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_removed_elements_carry_the_topmost_one_with_its_parent_and_pruned_subtree"
+    ]
+  },
+  {
+    "label": "architecture diff: a surviving descendant is drawn twice",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "        kids = [c for c in kids if c.get(\"id\") not in keep]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_removed_elements_carry_the_topmost_one_with_its_parent_and_pruned_subtree"
+    ]
+  },
+  {
+    "label": "architecture diff: from/to relationships are not matched",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "ends = (str(r.get(\"source\", r.get(\"from\"))), str(r.get(\"target\", r.get(\"to\"))))",
+    "replace": "ends = (str(r.get(\"source\")), str(r.get(\"target\")))",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_relationships_match_by_their_ends_and_accept_from_to"
+    ]
+  },
+  {
+    "label": "architecture diff: a second relationship between the same ends is invisible",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "            out.setdefault(ends, []).append(r)\n",
+    "replace": "            out.setdefault(ends, [r])\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_a_second_relationship_between_the_same_ends_is_its_own"
+    ]
+  },
+  {
+    "label": "architecture diff: a relabel reads as removed plus added",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "        out += alone[len(theirs) :]\n",
+    "replace": "        out += alone\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_relationships_match_by_their_ends_and_accept_from_to",
+      "tests/cloud/test_belt_architecture_diff.py::test_a_second_relationship_between_the_same_ends_is_its_own"
+    ]
+  },
+  {
+    "label": "architecture diff: counts leave relationships out",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_diff.py",
+    "find": "        \"added\": len(diff[\"added\"]) + len(rels[\"added\"]),\n",
+    "replace": "        \"added\": len(diff[\"added\"]),\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_diff.py::test_counts_add_relationships_to_elements"
+    ]
+  },
+  {
+    "label": "architecture history: counts are recomputed on every request",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "    if key in _COUNTS:\n        return _COUNTS[key]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_history_rows_count_against_the_parent_once_per_commit"
+    ]
+  },
+  {
+    "label": "architecture history: counts are against the commit itself, not its parent",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "read_repo_model(path, f\"{sha}^\")",
+    "replace": "read_repo_model(path, sha)",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_history_rows_count_against_the_parent_once_per_commit"
+    ]
+  },
+  {
+    "label": "architecture history: a git timeout escapes as a 500",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "        return await _read_at(repo, at, gh)\n    except (OSError, RuntimeError) as exc:",
+    "replace": "        return await _read_at(repo, at, gh)\n    except LookupError as exc:",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_git_missing_or_timing_out_is_503"
+    ]
+  },
+  {
+    "label": "architecture history: the at cache never drops",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "    if len(_CACHE) >= _CACHE_MAX:\n        _CACHE.clear()\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_the_at_cache_drops_whole_at_its_max"
+    ]
+  },
+  {
+    "label": "architecture diff route: diff is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "        return await architecture_history.read_diff(repo, diff, body) if diff else body\n",
+    "replace": "        return body\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_route_diff_adds_the_diff_and_a_bad_one_is_404"
+    ]
+  },
+  {
+    "label": "architecture diff: the diff mutates the cached read",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "    return {**body, \"diff\": diff_models(old[\"model\"][\"model\"], body[\"model\"][\"model\"])}\n",
+    "replace": "    body[\"diff\"] = diff_models(old[\"model\"][\"model\"], body[\"model\"][\"model\"])\n    return body\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_diff_returns_the_read_plus_what_changed_since_the_commit"
+    ]
+  },
+  {
+    "label": "architecture diff: a bad diff sha shares at's 404 code",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_history.py",
+    "find": "        code = \"belt.diff_commit_not_found\" if exc.code == \"belt.commit_not_found\" else exc.code\n",
+    "replace": "        code = exc.code\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_history.py::test_diff_guards_its_sha_like_at_with_its_own_code"
+    ]
+  }
+]

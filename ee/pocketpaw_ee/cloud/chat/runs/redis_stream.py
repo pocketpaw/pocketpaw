@@ -3,6 +3,8 @@
 Key layout:
   run:{run_id}:events   XADD stream of SSE events (resumable log)
   run:{run_id}:cancel   string flag; presence = cancellation requested
+  scope:{key}:stop      random token rewritten on every stop of a chat scope
+                        (short TTL); a changed value = a stop landed meanwhile
 
 Two clients: appends and flags go through the shared client; ``read_events``
 parks in ``XREAD BLOCK`` and so goes through the blocking client (see
@@ -24,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import date, datetime
 from pathlib import PurePath
@@ -79,6 +82,10 @@ def _events_key(run_id: str) -> str:
 
 def _cancel_key(run_id: str) -> str:
     return f"run:{run_id}:cancel"
+
+
+def _scope_stop_key(scope_key: str) -> str:
+    return f"scope:{scope_key}:stop"
 
 
 class RedisStreamTransport:
@@ -140,3 +147,9 @@ class RedisStreamTransport:
 
     async def stream_exists(self, run_id: str) -> bool:
         return bool(await self._redis.exists(_events_key(run_id)))
+
+    async def request_scope_stop(self, scope_key: str, ttl_seconds: int) -> None:
+        await self._redis.set(_scope_stop_key(scope_key), uuid.uuid4().hex, ex=ttl_seconds)
+
+    async def scope_stop_token(self, scope_key: str) -> str | None:
+        return await self._redis.get(_scope_stop_key(scope_key))

@@ -126,7 +126,9 @@ async def _get_widget_spec_handler(args: dict) -> dict:
             "is_error": True,
         }
 
-    block = format_for_prompt({"widgets": matched})
+    block = format_for_prompt(
+        {"widgets": matched, "actions": manifest.get("actions"), "motion": manifest.get("motion")}
+    )
     if missing:
         block += f"\n\n_Note: unknown types skipped: {', '.join(missing)}_"
 

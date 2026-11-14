@@ -24,7 +24,7 @@ import pytest
 from pocketpaw_ee.sites import daytona_build as db
 from pocketpaw_ee.sites import daytona_runner as dr
 
-from tests.ee.sites.faults import clean_artifact
+from tests.ee.sites.faults import USAGE_PROBE_MARKER, clean_artifact
 
 REACT_FILES = {"src/App.tsx": "export default function App() { return <p>hi</p>; }"}
 
@@ -76,6 +76,10 @@ class FakeClient:
         self.uploaded = files
 
     async def execute_command(self, sandbox_id: str, command: str, timeout: int = 30) -> Any:
+        if USAGE_PROBE_MARKER in command:
+            # The end-of-build usage probe, kept apart from the build exec.
+            self.calls.append("measure")
+            return None
         self.calls.append("exec")
         self.exec_timeout = timeout
         if self._exec_raises:
@@ -192,6 +196,7 @@ class TestSequencingIsTheContract:
             "exec",
             "read_sentinel",
             "download_artifact",
+            "measure",
             "delete",
         ]
 

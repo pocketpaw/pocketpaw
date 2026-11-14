@@ -1,7 +1,9 @@
 # ee/pocketpaw_ee/integrations/settings.py: per-site settings checked against a
 # provider's ``settings_fields``.
 #
-#   merge_put(provider, incoming, current)  the PUT body's ``settings`` -> stored dict
+#   merge_put(provider, incoming, current, remote)  the PUT body's ``settings`` -> stored dict
+#   remote_keys_to_check(provider, incoming, current)  remote selects a PUT changes
+#   drop_remote(provider, settings)         settings minus remote selects (on relink)
 #   missing_required(provider, settings)    required keys with no valid value
 #   field_views(provider)                   the ``settings_fields`` wire list
 #   visible(provider, settings)             stored settings minus hidden fields
@@ -14,11 +16,21 @@
 # whitespace, control character, quote or angle bracket anywhere (so a browser
 # can't read a different host than ``urlsplit`` does), and one of the field's
 # ``allowed_hosts`` exactly when it lists any. ``select`` must be one of
-# the options (comma-separated for a ``multi`` field, normalised to "a,b"). Every
-# value is capped at the field's ``max_length``.
+# the options (comma-separated for a ``multi`` field, normalised to "a,b"). A
+# ``remote`` select is checked against the provider's live options, which the
+# caller loads (field_options.py) for every remote key the PUT changes and passes
+# as ``remote``; a changed remote key with no loaded list is refused (fail closed).
+# A stored remote value is only re-checked when it changes; a relink to another
+# connection drops stored remote values first (``drop_remote``), so every remote
+# key in that PUT is new and a required one reads missing until re-picked. A
+# remote select with ``depends_on`` (an Airtable table on its base) is re-checked
+# whenever a PUT changes one of those settings, and dropped when the PUT changes
+# them without sending it: its stored value named something under the old one.
+# Every value is capped at the field's ``max_length``.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -53,8 +65,20 @@ def _fields(provider: IntegrationProvider) -> dict[str, SettingsField]:
     return {f.key: f for f in getattr(provider, "settings_fields", ()) or ()}
 
 
-def check_value(spec: SettingsField, value: Any) -> str:
-    """The normalised value, or ValueError with an owner-facing reason."""
+def field(provider: IntegrationProvider, key: str) -> SettingsField | None:
+    return _fields(provider).get(key)
+
+
+def is_remote_select(spec: SettingsField) -> bool:
+    return spec.type == "select" and spec.options_source == "remote"
+
+
+def check_value(spec: SettingsField, value: Any, allowed: Collection[str] | None = None) -> str:
+    """The normalised value, or ValueError with an owner-facing reason.
+
+    ``allowed`` overrides a select's static options (a remote select's live list).
+    A remote select with no ``allowed`` is only normalised: its membership was
+    checked when it was stored."""
     if not isinstance(value, str):
         raise ValueError(f"{spec.label} must be text.")
     value = value.strip()
@@ -68,17 +92,73 @@ def check_value(spec: SettingsField, value: Any) -> str:
         if spec.allowed_hosts and host not in spec.allowed_hosts:
             raise ValueError(f"{spec.label} must be a {' or '.join(spec.allowed_hosts)} link.")
     elif spec.type == "select":
-        allowed = {o.value for o in spec.options}
+        if allowed is None and not is_remote_select(spec):
+            allowed = {o.value for o in spec.options}
         picked = [v.strip() for v in value.split(",")] if spec.multi else [value]
         picked = list(dict.fromkeys(v for v in picked if v))
-        if not picked or any(v not in allowed for v in picked):
+        if not picked or (allowed is not None and any(v not in allowed for v in picked)):
             raise ValueError(f"Pick {spec.label} from the list.")
         value = ",".join(picked)
     return value
 
 
-def merge_put(
+def _clears(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _unchanged(value: Any, stored: Any) -> bool:
+    return isinstance(value, str) and isinstance(stored, str) and value.strip() == stored
+
+
+def drop_remote(provider: IntegrationProvider, settings: dict[str, Any]) -> dict[str, Any]:
+    """``settings`` without remote select values: they belong to the old account."""
+    fields = _fields(provider)
+    return {
+        k: v
+        for k, v in (settings or {}).items()
+        if not ((spec := fields.get(k)) is not None and is_remote_select(spec))
+    }
+
+
+def deps_changed(spec: SettingsField, incoming: dict[str, Any], current: dict[str, Any]) -> bool:
+    """True when the PUT changes a setting ``spec``'s options depend on."""
+    for dep in spec.depends_on:
+        if dep not in incoming:
+            continue
+        value, stored = incoming[dep], (current or {}).get(dep)
+        if _clears(value):
+            if stored is not None:
+                return True
+        elif not _unchanged(value, stored):
+            return True
+    return False
+
+
+def remote_keys_to_check(
     provider: IntegrationProvider, incoming: dict[str, Any], current: dict[str, Any]
+) -> list[str]:
+    """Remote select keys whose PUT value is new (or whose ``depends_on`` setting
+    is), so their live options must load. Dependencies come first."""
+    fields = _fields(provider)
+    keys = [
+        key
+        for key, value in incoming.items()
+        if (spec := fields.get(key)) is not None
+        and is_remote_select(spec)
+        and not (spec.readonly or spec.hidden)
+        and not _clears(value)
+        and (
+            not _unchanged(value, (current or {}).get(key)) or deps_changed(spec, incoming, current)
+        )
+    ]
+    return sorted(keys, key=lambda k: len(fields[k].depends_on))
+
+
+def merge_put(
+    provider: IntegrationProvider,
+    incoming: dict[str, Any],
+    current: dict[str, Any],
+    remote: Mapping[str, Collection[str]] | None = None,
 ) -> dict[str, Any]:
     fields = _fields(provider)
     unknown = sorted(k for k in incoming if k not in fields)
@@ -89,13 +169,23 @@ def merge_put(
         spec = fields[key]
         if spec.readonly or spec.hidden:
             continue
-        if value is None or (isinstance(value, str) and not value.strip()):
+        if _clears(value):
             merged.pop(key, None)
             continue
+        allowed = None
+        if is_remote_select(spec) and (
+            not _unchanged(value, merged.get(key)) or deps_changed(spec, incoming, current)
+        ):
+            allowed = (remote or {}).get(key)
+            if allowed is None:
+                raise ValidationError(INVALID, f"Pick {spec.label} from the list.")
         try:
-            merged[key] = check_value(spec, value)
+            merged[key] = check_value(spec, value, allowed)
         except ValueError as exc:
             raise ValidationError(INVALID, str(exc)) from None
+    for key, spec in fields.items():
+        if key not in incoming and spec.depends_on and deps_changed(spec, incoming, current):
+            merged.pop(key, None)
     return merged
 
 
@@ -146,6 +236,8 @@ def field_views(provider: IntegrationProvider) -> list[dict[str, Any]]:
             "multi": f.multi,
             "allowed_hosts": list(f.allowed_hosts) or None,
             "max_length": f.max_length,
+            "options_source": f.options_source,
+            "depends_on": list(f.depends_on) or None,
         }
         for f in _fields(provider).values()
         if not f.hidden

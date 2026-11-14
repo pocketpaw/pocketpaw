@@ -1,61 +1,42 @@
-# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
-# cloud.realtime re-export shim is deleted.
-"""FastAPI REST router for LiveKit call management.
+"""FastAPI REST router for LiveKit call management (``/api/v1/livekit``).
 
-Endpoints:
-- ``POST /api/v1/livekit/rooms`` — create/get a call room for a group
-- ``POST /api/v1/livekit/token`` — generate participant access token
-- ``POST /api/v1/livekit/rooms/{group_id}/leave`` — announce a participant left
-- ``DELETE /api/v1/livekit/rooms/{group_id}`` — end a call
-- ``GET /api/v1/livekit/rooms/{group_id}`` — get room status
-- ``POST /api/v1/livekit/rooms/{group_id}/recording/start`` — start recording (owner only)
-- ``POST /api/v1/livekit/rooms/{group_id}/recording/stop`` — stop recording (owner only)
-- ``GET /api/v1/livekit/rooms/{group_id}/recording`` — get recording status
-- ``POST /api/v1/livekit/rooms/{group_id}/invite`` — create meeting invite link
-- ``GET /api/v1/livekit/invites/{token}`` — validate invite (public, no auth)
-- ``POST /api/v1/livekit/invites/{token}/join`` — join as guest (public, no auth)
-- ``GET /api/v1/livekit/rooms/{group_id}/invites`` — list active invites
-- ``DELETE /api/v1/livekit/rooms/{group_id}/invites/{invite_id}`` — revoke invite
+Rooms and tokens: ``POST /rooms`` (create or fetch a group's call room),
+``POST /token``, ``GET`` / ``DELETE /rooms/{group_id}``,
+``POST /rooms/{group_id}/leave``. Recording (workspace owner only):
+``POST /rooms/{group_id}/recording/start|stop``, ``GET .../recording``.
+Guest invites: ``POST`` / ``GET /rooms/{group_id}/invite(s)``,
+``DELETE .../invites/{invite_id}``, and the public ``GET /invites/{token}`` and
+``POST /invites/{token}/join``. Ask Paw: ``POST /rooms/{group_id}/ask``,
+``.../ask/listen`` (push-to-talk start/end), ``.../ask/stop``.
 
-All routes require an active enterprise license, user authentication,
-and group membership, EXCEPT the public invite validate/join endpoints
-which allow external guests without a Pocketpaw account. Recording endpoints
-additionally require workspace ownership.
+Every route except the two public invite routes needs a license, an
+authenticated user, and the audited ``service.require_call_group`` check (the
+group is in the caller's workspace and has them as a member; one 403
+``livekit.room_forbidden`` for all failures, so it is no existence oracle).
+``/token`` mints only for ``group-call-<id>`` rooms, always with the caller's
+user id as the LiveKit identity, and clamps the TTL to an hour; the call-bot's
+token never leaves the server. Invite join enforces the invite's email
+allow-list. ``POST /rooms`` on a hidden meeting room runs the meeting's own row
+(410 ``meeting.ended`` once it is over).
 
-``/rooms/{group_id}/leave`` was the one exception to that guarantee until
-2026-08-11 — it emitted ``CallParticipantLeft`` to the group's members with
-no license and no membership check, so any authenticated user could inject a
-fabricated participant-left event into any group in any workspace. It now
-carries the same guard as its siblings; see
-``tests/cloud/livekit/test_leave_route_guard.py``.
-
-2026-09-30 (fix/livekit-call-security): ``/token`` now refuses any room name
-that isn't ``group-call-<id>`` for a group the caller belongs to in their
-workspace (it used to check only ``group-call-*`` names). See
-``tests/cloud/livekit/test_token_room_access.py``. It also takes the LiveKit
-identity from the authenticated user (the body's ``identity`` is ignored) and
-clamps ``ttl_seconds`` to at most an hour. ``POST /rooms`` no longer returns
-the call-bot's token, and the room and recording routes use the same audited
-workspace + membership check as ``/token`` (``service.require_call_group``;
-``test_room_routes_guard.py``). The public invite join
-takes an optional ``email`` and the server enforces the invite's allow-list;
-validate returns ``requires_email`` instead of the list
-(``test_invite_email_allowlist.py``).
-
-2026-10-01 (feat/meetings-by-code, MC-2): ``POST /rooms`` on a hidden
-``type="meeting"`` room goes through ``meetings.service.start_meeting_room_call``:
-no "Instant call" row, the meeting's own row takes the room name, budget
-deadline and ``in_progress``, and an ended/expired meeting is 410
-``meeting.ended``. Other rooms are unchanged."""
+Ask Paw also needs the bot allowed for the workspace (403
+``livekit.assistant_unavailable``) and a bot in the call (409
+``livekit.assistant_offline``); it takes one question per call (409
+``livekit.assistant_busy``), only the asker may end their push-to-talk (409
+``livekit.assistant_ask_mismatch``), each member gets 10 asks a minute (429),
+and Redis being down is 503 ``livekit.assistant_offline``.
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable
+from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, Forbidden, RateLimited
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     CallEnded,
@@ -68,6 +49,7 @@ from pocketpaw_ee.cloud.chat.group_service import (
     _require_domain_group_member,
 )
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.livekit import assistant
 from pocketpaw_ee.cloud.livekit import service as livekit_service
 from pocketpaw_ee.cloud.shared.deps import current_user, current_workspace_id
 
@@ -415,6 +397,180 @@ async def end_call(
         logger.warning("Failed to emit CallEnded event for group %s", group_id)
 
     return EndCallResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Ask Paw endpoints
+# ---------------------------------------------------------------------------
+
+_T = TypeVar("_T")
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=500)
+
+
+class AskListenRequest(BaseModel):
+    phase: Literal["start", "end"]
+    ask_id: str | None = Field(default=None, max_length=64)
+
+
+class AskResponse(BaseModel):
+    ask_id: str
+
+
+async def _assistant_redis(op: Awaitable[_T]) -> _T:
+    """Ask Paw's lock, rate limit and bot channel all live in Redis."""
+    try:
+        return await op
+    except CloudError:
+        raise
+    except Exception as exc:
+        raise _offline(exc) from exc
+
+
+def _offline(exc: Exception) -> CloudError:
+    logger.warning("Ask Paw: Redis unavailable: %s", exc)
+    return CloudError(503, "livekit.assistant_offline", "Paw can't take questions right now.")
+
+
+async def _require_ask_access(group_id: str, user: Any, workspace_id: str) -> None:
+    await require_license()
+    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)
+    if not await livekit_service._meeting_notes_allowed(workspace_id):
+        raise Forbidden(
+            "livekit.assistant_unavailable", "Paw isn't available for calls in this workspace."
+        )
+
+
+async def _claim_ask_slot(group_id: str, user_id: str) -> str:
+    if not await _assistant_redis(assistant.bot_in_call(group_id)):
+        raise ConflictError("livekit.assistant_offline", "Paw isn't in this call.")
+    if not await _assistant_redis(assistant.allow_ask(user_id)):
+        raise RateLimited(
+            "livekit.assistant_rate_limited", "Too many questions - wait a moment and try again."
+        )
+    ask_id = assistant.new_ask_id()
+    if not await _assistant_redis(assistant.acquire_ask_lock(group_id, ask_id, user_id)):
+        raise ConflictError(
+            "livekit.assistant_busy", "Paw is already answering a question in this call."
+        )
+    return ask_id
+
+
+def _display_name(user: Any) -> str:
+    return getattr(user, "full_name", None) or str(user.id)
+
+
+@router.post("/rooms/{group_id}/ask", response_model=AskResponse, status_code=202)
+async def ask_paw(
+    group_id: str,
+    body: AskRequest,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Ask Paw a typed question; the answer is spoken in the call and posted to chat."""
+    await _require_ask_access(group_id, user, workspace_id)
+    ask_id = await _claim_ask_slot(group_id, str(user.id))
+    assistant.start_ask_task(
+        group_id,
+        assistant.answer_call_question(
+            group_id=group_id,
+            workspace_id=workspace_id,
+            user_id=str(user.id),
+            asked_by_name=_display_name(user),
+            question=body.question.strip() or body.question,
+            ask_id=ask_id,
+        ),
+    )
+    return AskResponse(ask_id=ask_id)
+
+
+@router.post("/rooms/{group_id}/ask/listen", response_model=AskResponse, status_code=202)
+async def ask_paw_listen(
+    group_id: str,
+    body: AskListenRequest,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Push-to-talk: ``start`` opens a capture window on the caller's mic, ``end`` answers it.
+
+    The caller's LiveKit identity is their user id (see ``/token``), which is
+    what the bot keys the capture window on.
+    """
+    await _require_ask_access(group_id, user, workspace_id)
+    user_id = str(user.id)
+
+    name = _display_name(user)
+
+    if body.phase == "start":
+        ask_id = await _claim_ask_slot(group_id, user_id)
+        try:
+            await assistant.begin_listening(ask_id)
+            await assistant.publish_bot_command(
+                group_id, {"type": "listen_start", "ask_id": ask_id, "identity": user_id}
+            )
+        except Exception as exc:
+            await assistant.abort_claimed_ask(group_id, ask_id, user_id, name)
+            raise _offline(exc) from exc
+        await assistant.emit_assistant_state(
+            group_id=group_id,
+            state="listening",
+            ask_id=ask_id,
+            asked_by=user_id,
+            asked_by_name=name,
+        )
+        assistant.start_listen_watchdog(group_id, ask_id, user_id, name)
+        return AskResponse(ask_id=ask_id)
+
+    mismatch = ConflictError(
+        "livekit.assistant_ask_mismatch", "That question is no longer being listened for."
+    )
+    if not body.ask_id:
+        raise mismatch
+    holder = await _assistant_redis(assistant.ask_lock_holder(group_id))
+    asker = await _assistant_redis(assistant.ask_asker(body.ask_id))
+    if holder != body.ask_id or asker != user_id:
+        raise mismatch
+    if not await _assistant_redis(assistant.end_listening(body.ask_id)):
+        raise mismatch
+    try:
+        await assistant.publish_bot_command(
+            group_id, {"type": "listen_end", "ask_id": body.ask_id, "identity": user_id}
+        )
+    except Exception as exc:
+        await assistant.abort_claimed_ask(group_id, body.ask_id, user_id, name)
+        raise _offline(exc) from exc
+    assistant.start_ask_task(
+        group_id,
+        assistant.answer_spoken_question(
+            group_id=group_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            asked_by_name=name,
+            ask_id=body.ask_id,
+        ),
+    )
+    return AskResponse(ask_id=body.ask_id)
+
+
+@router.post("/rooms/{group_id}/ask/stop")
+async def ask_paw_stop(
+    group_id: str,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Silence Paw: any member may stop the current answer, not only the asker."""
+    await _require_ask_access(group_id, user, workspace_id)
+    holder = await _assistant_redis(assistant.stop_ask(group_id))
+    await assistant.emit_assistant_state(
+        group_id=group_id,
+        state="idle",
+        ask_id=holder,
+        asked_by=str(user.id),
+        asked_by_name=_display_name(user),
+    )
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

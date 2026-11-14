@@ -137,6 +137,27 @@ async def test_delete_answers_202_with_the_job_handle(beanie_test_db, _no_real_e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("query", "expected"), [("", False), ("?force=true", True)])
+async def test_delete_threads_force_to_the_job(beanie_test_db, monkeypatch, query, expected):
+    """``force`` (delete even when the data export fails) is opt-in per request."""
+    site = await _seed()
+    seen: list[bool] = []
+
+    async def _fake(doc: Any, *, force: bool = False, **_kw: Any) -> str:
+        seen.append(force)
+        return "job-1"
+
+    monkeypatch.setattr(delete_job_mod, "enqueue_site_delete", _fake)
+    app = _build_app(WORKSPACE)
+
+    async with _client(app) as c:
+        res = await c.delete(f"/api/v1/sites/{site.id}{query}")
+
+    assert res.status_code == 202
+    assert seen == [expected]
+
+
+@pytest.mark.asyncio
 async def test_delete_stamps_the_row_so_a_reload_can_find_the_attempt(
     beanie_test_db, _no_real_enqueue
 ):

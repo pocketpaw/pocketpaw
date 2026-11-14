@@ -1,0 +1,55 @@
+{
+  "cardsV2": [
+    {
+      "card": {
+        "header": {
+          "subtitle": "Bright Smile",
+          "title": "A visitor asked for a person"
+        },
+        "sections": [
+          {
+            "widgets": [
+              {
+                "decoratedText": {
+                  "text": "Priya Sharma",
+                  "topLabel": "Name",
+                  "wrapText": true
+                }
+              },
+              {
+                "decoratedText": {
+                  "text": "priya@example.com",
+                  "topLabel": "Email",
+                  "wrapText": true
+                }
+              },
+              {
+                "decoratedText": {
+                  "text": "Can I talk to someone about a bulk order before Friday?",
+                  "topLabel": "Message",
+                  "wrapText": true
+                }
+              },
+              {
+                "buttonList": {
+                  "buttons": [
+                    {
+                      "onClick": {
+                        "openLink": {
+                          "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+                        }
+                      },
+                      "text": "Open in Paw"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cardId": "concierge-handoff"
+    }
+  ],
+  "text": "A visitor asked for a person · Bright Smile"
+}

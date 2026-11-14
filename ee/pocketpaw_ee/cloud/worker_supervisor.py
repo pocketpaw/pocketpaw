@@ -25,6 +25,14 @@
 # ``paw.automation.*`` span attributes per job. Interactive chat runs are excluded — they are
 # not automations, and ``execute_run`` stamps their workspace itself.
 #
+# DRAIN ON SIGTERM. A stop signal does not cancel running jobs. Every lane first stops
+# claiming new ones (arq's ``allow_pick_jobs``) and keeps its poll loop alive, so the
+# health key stays fresh, while in-flight jobs finish, for up to
+# ``POCKETPAW_WORKER_DRAIN_SECONDS`` (default 300; 0 = cancel at once). Whatever is still
+# running then is cancelled, after ``_core.shutdown.mark_stopping()`` so a cancelled chat
+# run knows the worker is going away and requeues itself for the next one. The container's
+# stop grace period must exceed the drain window, or Docker SIGKILLs mid-drain.
+#
 # EXIT CODES. 0 only when a signal asked us to stop. Non-zero when a lane ended on its
 # own, whether it raised or returned — an arq Worker's ``async_run`` is not supposed to
 # return while the process is meant to be serving, so a clean return is just as wrong as
@@ -46,12 +54,69 @@ from arq.worker import create_worker, func
 
 from pocketpaw.lens_checkins import automation_run
 from pocketpaw.lens_checkins import flush as flush_lens_checkins
+from pocketpaw_ee.cloud._core import shutdown
 
 logger = logging.getLogger(__name__)
 
 #: Signals a container runtime uses to ask for a graceful stop. SIGINT is here for the
 #: interactive case; SIGTERM is the one Docker actually sends.
 _STOP_SIGNALS = ("SIGTERM", "SIGINT")
+
+_DRAIN_ENV = "POCKETPAW_WORKER_DRAIN_SECONDS"
+#: Five minutes covers nearly every chat run. Kept well short of the 30-minute job
+#: timeout on purpose: until the worker deploys separately, no new worker starts while
+#: this one drains, so new messages wait in the queue for the whole window.
+_DEFAULT_DRAIN_SECONDS = 300.0
+_DRAIN_POLL_SECONDS = 0.1
+
+
+def drain_seconds() -> float:
+    """How long a stop signal waits for in-flight jobs, from ``POCKETPAW_WORKER_DRAIN_SECONDS``.
+
+    Fail-soft like the other worker knobs: unparseable or negative falls back to the
+    default. ``0`` is honoured and means "cancel at once", the pre-drain behaviour.
+    """
+    raw = os.environ.get(_DRAIN_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_DRAIN_SECONDS
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %ss", _DRAIN_ENV, raw, _DEFAULT_DRAIN_SECONDS)
+        return _DEFAULT_DRAIN_SECONDS
+    if val < 0:
+        logger.warning("%s=%s is negative; using %ss", _DRAIN_ENV, val, _DEFAULT_DRAIN_SECONDS)
+        return _DEFAULT_DRAIN_SECONDS
+    return val
+
+
+def _in_flight(worker: Any) -> int:
+    """Jobs a lane is still running. arq keeps them in ``Worker.tasks`` until they end."""
+    return sum(not t.done() for t in (getattr(worker, "tasks", None) or {}).values())
+
+
+async def _drain(workers: list[Any], lane_tasks: list[asyncio.Task], timeout: float) -> None:
+    """Stop every lane taking jobs, then wait up to ``timeout`` for running ones to end.
+
+    Returns early when nothing is in flight, or when a lane dies (its jobs died with it
+    and there is nothing left to wait for on that lane).
+    """
+    for worker in workers:
+        worker.allow_pick_jobs = False
+    pending = sum(_in_flight(w) for w in workers)
+    if not pending or timeout <= 0:
+        return
+    logger.info("supervisor: draining %d in-flight job(s) for up to %ss", pending, timeout)
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if not any(_in_flight(w) for w in workers) or any(t.done() for t in lane_tasks):
+            break
+        await asyncio.sleep(_DRAIN_POLL_SECONDS)
+    left = sum(_in_flight(w) for w in workers)
+    if left:
+        logger.warning("supervisor: drain window over; cancelling %d job(s)", left)
+    else:
+        logger.info("supervisor: drained")
 
 
 def default_lanes() -> list[type]:
@@ -193,8 +258,12 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
                 logger.error("supervisor: lane %s returned on its own; stopping the process", name)
         if exit_code == 0:
             logger.info("supervisor: stop requested; draining %d lane(s)", len(names))
+            await _drain(workers, lane_tasks, drain_seconds())
         return exit_code
     finally:
+        # Set before any job is cancelled: a chat run's cancel cleanup reads it to
+        # requeue itself rather than end ``interrupted``.
+        shutdown.mark_stopping()
         stop_task.cancel()
         for task in lane_tasks:
             task.cancel()

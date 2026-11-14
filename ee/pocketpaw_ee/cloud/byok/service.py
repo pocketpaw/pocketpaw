@@ -67,7 +67,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
@@ -192,7 +192,9 @@ class TurnCredentials:
     """
 
     source: Literal["platform", "byok"]
-    api_key: str | None = None
+    # Kept out of repr: the run carries this object on ``ctx.turn_credentials``
+    # for its whole life, so a logged or printed ctx must not print the key.
+    api_key: str | None = field(default=None, repr=False)
     provider: str = "anthropic"
     #: Only set for ``provider="openai_compatible"`` — where the key spends,
     #: and which model id that gateway knows it by.

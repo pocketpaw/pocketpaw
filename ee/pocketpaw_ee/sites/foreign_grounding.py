@@ -14,7 +14,11 @@
 # NO EXTRACTOR LIVES HERE. The crawler already emits exactly the shape the html
 # lane consumes (a path → HTML map), so this module hands that map to
 # ``kb_ingest.extract_site_documents(engine="html", ...)`` and stops. A reader who
-# finds themselves parsing markup in this file has duplicated the lane.
+# finds themselves parsing markup in this file has duplicated the lane. What it
+# does own is policy: which origin, how many pages, and that the crawl ranks
+# them (``rank_pages``: the site's own menu, then its sitemap, then other links,
+# shallow paths first), so /apply or /inscription beats the thirtieth event page
+# to the budget without a word list that only knows English.
 #
 # WHEN IT RUNS, AND THE PROPERTY THAT DEPENDS ON IT. At bind (the concierge
 # provisioning trigger) and on the owner's explicit re-sync. NEVER during a
@@ -106,7 +110,10 @@ VERIFICATION_MAX_AGE = timedelta(days=30)
 #
 # 25 pages: about double the measured site's entire navigation. Past that a site
 # is a catalogue or a blog whose long tail dilutes BM25 more than it answers
-# anything. Truncation is reported on the crawl warnings, not silent.
+# anything. Truncation is reported on the crawl warnings, not silent. The budget
+# is spent KEY PAGES FIRST (``_KEY_PAGE_WORDS``): a homepage that links thirty
+# event pages before /apply would otherwise use it all on events, and the
+# concierge could only send a visitor asking "how do I apply?" somewhere else.
 # 0 assets: ``fetch_assets=False`` — the 90% above, not fetched at all.
 # 8 MB: 25 pages at ~320 KB of markup each, an order of magnitude past the
 # measured 3.5 KB/page. Crossing it aborts and reports rather than half-filling a
@@ -300,6 +307,7 @@ async def harvest_foreign_site(
                 max_pages=GROUNDING_MAX_PAGES,
                 fetch_assets=False,
                 user_agent=GROUNDING_USER_AGENT,
+                rank_pages=True,
             )
     except TimeoutError:
         # ITS OWN CODE, ahead of the catch-all below. "The crawl failed" and "your
