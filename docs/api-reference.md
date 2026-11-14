@@ -10472,7 +10472,8 @@ repo and day in `growth_social_repo_metrics`:
   stars and forks are still stored and the traffic fields are 0.
 
 Each repo is read once per run. A rerun on the same day refreshes that day's row
-instead of adding one. A repo that cannot be read is skipped (no row) and the
+instead of adding one. If the rerun cannot read traffic, the traffic an earlier run
+stored is kept. A repo that cannot be read is skipped (no row) and the
 others still run. There is no route yet; the rows feed the Today strip and the
 weekly review later.
 

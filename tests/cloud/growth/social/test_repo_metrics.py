@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -95,12 +96,14 @@ async def test_reader_without_token_stores_stars_only(monkeypatch):
 @pytest.mark.asyncio
 async def test_reader_traffic_403_keeps_stars_and_never_logs_the_token(monkeypatch, caplog):
     monkeypatch.setenv(TOKEN_ENV, "sekrit-token")
+    caplog.set_level(logging.DEBUG)
     seen: list[httpx.Request] = []
     async with _client(seen, traffic_status=403) as client:
         snap = await github_repo_metrics("acme/app", day=YESTERDAY, client=client)
     assert snap == RepoSnapshot("acme/app", YESTERDAY, stars=120, forks=7)
     assert snap.traffic_available is False
     assert seen and all(r.headers["authorization"] == "Bearer sekrit-token" for r in seen)
+    assert "acme/app traffic unavailable (403)" in caplog.text
     assert "sekrit-token" not in caplog.text
 
 
@@ -214,6 +217,25 @@ async def test_sweep_rerun_refreshes_the_same_days_row(mongo_db: Any):
     assert len(rows) == 1
     assert rows[0].stars == 2  # the second run's read
     assert rows[0].day == YESTERDAY
+
+
+@pytest.mark.asyncio
+async def test_sweep_rerun_without_traffic_keeps_the_stored_traffic(mongo_db: Any):
+    reads = iter([True, False])
+
+    async def _fn(repo: str, *, day: str) -> RepoSnapshot:
+        ok = next(reads)
+        return RepoSnapshot(
+            repo, day, stars=10 if ok else 11, views=5 if ok else 0, traffic_available=ok
+        )
+
+    set_production_repo_metrics_fn(_fn)
+    await _profile("w1", ["acme/app"])
+    await social_service.run_repo_metrics(now=NOW)
+    await social_service.run_repo_metrics(now=NOW.replace(hour=9))
+
+    (row,) = await _rows()
+    assert (row.stars, row.views, row.traffic_available) == (11, 5, True)
 
 
 @pytest.mark.asyncio

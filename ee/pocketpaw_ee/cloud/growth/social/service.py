@@ -43,7 +43,8 @@
 # Repo metrics: ``run_repo_metrics`` (the 06:30 UTC cron, a cross-workspace read)
 # stores one ``RepoMetric`` per (workspace, repo, yesterday UTC) for every active
 # profile's valid ``github_repos``, reading each repo once per run. A rerun the same
-# day refreshes that day's row in place, never a second row. ``repo_metrics`` reads
+# day refreshes that day's row in place, never a second row, and keeps traffic
+# an earlier run stored when its own traffic read failed. ``repo_metrics`` reads
 # one workspace's rows back.
 #
 # Accounts: each profile's social accounts live in its own Postiz org, created
@@ -820,7 +821,8 @@ _SNAPSHOT_FIELDS = (
 
 
 async def _store_metric(workspace_id: str, snap: RepoSnapshot, now: datetime) -> None:
-    """Write the day's row, or refresh it in place when a rerun finds one."""
+    """Write the day's row, or refresh it in place when a rerun finds one. A rerun that
+    could not read traffic keeps the traffic an earlier run stored and refreshes the rest."""
     fields: dict[str, Any] = {k: getattr(snap, k) for k in _SNAPSHOT_FIELDS}
     fields["referrers"] = [dict(r) for r in snap.referrers]
     fields["captured_at"] = now
@@ -834,6 +836,8 @@ async def _store_metric(workspace_id: str, snap: RepoSnapshot, now: datetime) ->
             doc = await _MetricDoc.find_one(key)
             if doc is None:
                 raise
+    if doc.traffic_available and not snap.traffic_available:
+        fields = {k: fields[k] for k in ("stars", "forks", "captured_at")}
     for k, v in fields.items():
         setattr(doc, k, v)
     await doc.save()
