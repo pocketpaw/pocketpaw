@@ -6,7 +6,9 @@
 # ideas agent and reviewed in Blitz. ``source`` says who asked: "manual" (a
 # person) or "daily" (the morning drafting sweep, which also stamps
 # ``suggested_at``, the time it suggests posting). Rows written before
-# ``source`` existed have no key and read as "manual".
+# ``source`` existed have no key and read as "manual". ``post_ids`` are the
+# Postiz post ids of every successful post made from the idea (now or
+# scheduled); older rows read as empty.
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).
@@ -43,6 +45,7 @@ class SocialIdea(TimestampedDocument):
     media_choice: str = ""
     source: str = "manual"
     suggested_at: datetime | None = None
+    post_ids: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "growth_social_ideas"

@@ -53,6 +53,11 @@
 # channel where the platform needs one) before Postiz is asked to publish, so a
 # bad target never leaves a half-sent post. Media rides the first value entry,
 # thread parts follow; a video is dropped for platforms outside VIDEO_PLATFORMS.
+# A post with ``scheduled_at`` goes to Postiz as ``type: "schedule"`` at that
+# UTC time (Postiz's own workflow holds it until then); without one it is
+# ``type: "now"``. Only after Postiz returns created posts are their ids added to
+# the linked idea's ``post_ids`` (workspace-filtered write), so a failed post
+# leaves the idea untouched.
 # Media is stored on the deployment's public bucket (not in Postiz, whose storage
 # is local or R2-only), content-addressed under the workspace and profile. The
 # posts list never creates an org.
@@ -283,6 +288,7 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         media_choice=doc.media_choice,
         source=doc.source,
         suggested_at=doc.suggested_at,
+        post_ids=tuple(doc.post_ids or ()),
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -309,6 +315,7 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         media_choice=i.media_choice,
         source=i.source,
         suggested_at=iso_utc(i.suggested_at),
+        post_ids=list(i.post_ids),
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -1784,6 +1791,7 @@ async def create_post(
     has_video = _check_post_media(body)
     postiz = _require_postiz()
     profile = await _require_profile_doc(workspace_id, profile_id)
+    idea: _IdeaDoc | None = None
     if body.idea_id is not None:
         idea = await _fetch_idea_in_workspace(workspace_id, body.idea_id)
         if idea.profile != str(profile.id):
@@ -1822,9 +1830,10 @@ async def create_post(
                 "settings": settings,
             }
         )
+    when = body.scheduled_at or datetime.now(UTC)
     payload = {
-        "type": "now",
-        "date": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "type": "now" if body.scheduled_at is None else "schedule",
+        "date": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "shortLink": False,
         "tags": [],
         "posts": posts,
@@ -1844,6 +1853,11 @@ async def create_post(
     ]
     if not items:
         raise _upstream(PostizError("postiz.bad_response", "Postiz created no post."))
+    if idea is not None:
+        # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
+        await _IdeaDoc.find_one({"_id": idea.id, "workspace": workspace_id}).update(
+            {"$addToSet": {"post_ids": {"$each": [i.post_id for i in items]}}}
+        )
     return CreateSocialPostResponse(items=items)
 
 

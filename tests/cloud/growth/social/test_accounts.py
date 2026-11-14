@@ -5,10 +5,12 @@
 # errors, tenant and profile isolation, disconnect, the encrypted key, the
 # Telegram code flow (a fake Bot API read through
 # ``set_production_telegram_updates``, including the cross-workspace sweep),
-# posting now (Slack channels, X settings, thread parts, media on the first entry,
-# the Slack video skip, the idea link, every refusal before Postiz is called, the
-# posts list and tenant isolation), media upload to a faked public bucket
-# (sniffing, size caps, no bucket, the workspace/profile key), and the Postiz
+# posting now or at a ``scheduled_at`` (the Postiz ``type``/``date`` payload, a
+# past time refused), Slack channels, X settings, thread parts, media on the first
+# entry, the Slack video skip, the idea link and the Postiz ids written back onto
+# it (only on success, round-tripped through both idea mappers), every refusal
+# before Postiz is called, the posts list and tenant isolation, media upload to
+# a faked public bucket (sniffing, size caps, no bucket, the workspace/profile key), and the Postiz
 # client's JWT signer, create-org failure and the Bot API read's token scrubbing
 # (``httpx.MockTransport``).
 
@@ -18,7 +20,7 @@ import base64
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -525,6 +527,8 @@ def _media(name: str, base: str = CDN) -> dict[str, str]:
         ({**SLACK, "parts": ["ok", "  "]}, 422, None),
         ({**SLACK, "parts": ["p"] * 26}, 422, None),
         ({**SLACK, "media": [_media("a.png")] * 5}, 422, None),
+        ({**SLACK, "scheduled_at": "2020-01-01T00:00:00Z"}, 422, None),
+        ({**SLACK, "scheduled_at": "not a date"}, 422, None),
         ({**SLACK, "media": [_media("a.mp4"), _media("b.png")]}, 422, "social.media_mixed"),
         ({**SLACK, "media": [_media("a.mp4"), _media("b.mp4")]}, 422, "social.media_mixed"),
         *[
@@ -613,6 +617,87 @@ async def test_post_links_only_an_idea_of_this_profile(w1, w2, postiz):
     resp = await w1.post(POSTS, json={**SLACK, "idea_id": str(own.id)})
     assert resp.status_code == 200, resp.text
     assert "idea_id" not in json.dumps(postiz.posted)
+    assert (await SocialIdea.get(own.id)).post_ids == ["post-sl-1"]
+    for untouched in (other_profile, foreign):
+        assert (await SocialIdea.get(untouched.id)).post_ids == []
+    idea = (await w1.get(f"{BASE}/ideas/{own.id}")).json()
+    assert idea["post_ids"] == ["post-sl-1"]
+
+
+def _iso(when: datetime) -> str:
+    return when.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+async def test_scheduled_post_sends_the_slot_in_utc(w1, postiz):
+    await _connected(w1, postiz)
+    slot = (datetime.now(UTC) + timedelta(hours=3)).replace(microsecond=250000)
+    ist = slot.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    naive = (slot + timedelta(hours=1)).replace(tzinfo=None)
+    for sent in (ist.isoformat(), naive.isoformat()):
+        resp = await w1.post(POSTS, json={**SLACK, "scheduled_at": sent})
+        assert resp.status_code == 200, resp.text
+    (_, first), (_, second) = postiz.posted
+    assert (first["type"], first["date"]) == ("schedule", _iso(slot))
+    assert first["date"].endswith(".250Z")
+    assert (second["type"], second["date"]) == ("schedule", _iso(slot + timedelta(hours=1)))
+    assert {k: v for k, v in first.items() if k not in ("type", "date")} == {
+        "shortLink": False,
+        "tags": [],
+        "posts": [
+            {
+                "integration": {"id": "sl-1"},
+                "value": [{"content": "hi", "image": []}],
+                "settings": {"__type": "slack", "channel": "C1"},
+            }
+        ],
+    }
+
+
+async def test_schedule_allows_a_little_clock_skew(w1, postiz):
+    await _connected(w1, postiz)
+    just_now = datetime.now(UTC) - timedelta(seconds=20)
+    resp = await w1.post(POSTS, json={**SLACK, "scheduled_at": just_now.isoformat()})
+    assert resp.status_code == 200, resp.text
+    assert postiz.posted[0][1]["type"] == "schedule"
+
+
+async def test_reposting_an_idea_keeps_every_post_id(w1, postiz):
+    await _connected(w1, postiz)
+    pid = (await w1.get(f"{BASE}/profile")).json()["id"]
+    idea = await SocialIdea(workspace="w1", profile=pid, format="x_post", hook="h").insert()
+    body = {**SLACK, "targets": [*SLACK["targets"], {"account_id": "x-1"}], "idea_id": str(idea.id)}
+    assert (await w1.post(POSTS, json=body)).status_code == 200
+    assert (await w1.post(POSTS, json=body)).status_code == 200
+    assert (await SocialIdea.get(idea.id)).post_ids == ["post-sl-1", "post-x-1"]
+
+
+async def test_failed_post_writes_no_ids_onto_the_idea(w1, postiz):
+    await _connected(w1, postiz)
+    pid = (await w1.get(f"{BASE}/profile")).json()["id"]
+    idea = await SocialIdea(workspace="w1", profile=pid, format="x_post", hook="h").insert()
+
+    async def boom(api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raise PostizError("postiz.http_error", "boom")
+
+    async def nothing(api_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return []
+
+    for fake in (boom, nothing):
+        postiz.create_posts = fake  # type: ignore[method-assign]
+        resp = await w1.post(POSTS, json={**SLACK, "idea_id": str(idea.id)})
+        assert resp.status_code == 502, resp.text
+    assert (await SocialIdea.get(idea.id)).post_ids == []
+
+
+async def test_idea_mappers_carry_post_ids(mongo_db):
+    from pocketpaw_ee.cloud.growth.social import service as social_service
+
+    doc = await SocialIdea(
+        workspace="w1", profile="p", format="x_post", hook="h", post_ids=["a", "b"]
+    ).insert()
+    domain = social_service._idea_to_domain(doc)
+    assert domain.post_ids == ("a", "b")
+    assert social_service._idea_to_response(domain).post_ids == ["a", "b"]
 
 
 class _FakeBucket:

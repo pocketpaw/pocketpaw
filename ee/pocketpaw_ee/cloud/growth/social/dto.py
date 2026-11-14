@@ -18,12 +18,14 @@
 # names 1–10 distinct accounts and trimmed, non-empty content of at most 10000
 # characters, plus up to 25 thread parts held to the same rule and up to 4
 # media items; whether the media is public and unmixed is the service's check,
-# so it carries an error code.
+# so it carries an error code. A post's optional ``scheduled_at`` is read as UTC
+# when it has no offset, normalised to UTC, and must not be more than
+# ``SCHEDULE_SKEW`` in the past.
 
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -49,6 +51,7 @@ MAX_HASHTAGS = 15
 MAX_ANALYSIS_ITEMS = 20
 MAX_GITHUB_REPOS = 5
 MAX_WEEKLY_POST_QUOTA = 21
+SCHEDULE_SKEW = timedelta(minutes=1)
 _GITHUB_REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 
 _AnalysisItem = Annotated[str, StringConstraints(max_length=300)]
@@ -290,6 +293,7 @@ class SocialIdeaResponse(BaseModel):
     media_choice: Literal["", "poster", "reel"]
     source: IdeaSource
     suggested_at: str | None
+    post_ids: list[str]
     created_at: str | None
     updated_at: str | None
 
@@ -494,6 +498,17 @@ class CreateSocialPostRequest(BaseModel):
     parts: list[_PostContent] = Field(default_factory=list, max_length=25)
     media: list[SocialPostMedia] = Field(default_factory=list, max_length=MAX_POST_IMAGES)
     idea_id: str | None = Field(default=None, min_length=1, max_length=64)
+    scheduled_at: datetime | None = None
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def _future(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        when = (v if v.tzinfo else v.replace(tzinfo=UTC)).astimezone(UTC)
+        if when < datetime.now(UTC) - SCHEDULE_SKEW:
+            raise ValueError("scheduled_at must be in the future")
+        return when
 
     @model_validator(mode="after")
     def _unique_accounts(self) -> CreateSocialPostRequest:

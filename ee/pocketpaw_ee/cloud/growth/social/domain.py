@@ -15,7 +15,7 @@
 # refuses private hosts. ``MEDIA_EXTENSIONS`` is the upload allowlist.
 # ``DAILY_SLOT_HOURS_UTC`` and ``DAILY_DRAFTS_PER_DAY`` shape the daily X
 # drafting sweep; an idea's ``source`` says whether a person or that sweep
-# asked for it.
+# asked for it, and its ``post_ids`` are the Postiz posts made from it.
 
 from __future__ import annotations
 
@@ -220,6 +220,7 @@ class SocialIdea:
     media_choice: str = ""
     source: str = "manual"
     suggested_at: datetime | None = None
+    post_ids: tuple[str, ...] = ()
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
