@@ -170,7 +170,7 @@ from pocketpaw_ee.cloud.growth.social.repo_metrics import (
     is_repo_slug,
     resolve_repo_metrics_fn,
 )
-from pocketpaw_ee.cloud.models.repo_metric import RepoMetric as _MetricDoc
+from pocketpaw_ee.cloud.models.repo_metric import RepoMetric as _RepoMetricDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as _MetricDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
@@ -840,13 +840,13 @@ async def _store_metric(workspace_id: str, snap: RepoSnapshot, now: datetime) ->
     fields["referrers"] = [dict(r) for r in snap.referrers]
     fields["captured_at"] = now
     key = {"workspace": workspace_id, "repo": snap.repo, "day": snap.day}
-    doc = await _MetricDoc.find_one(key)
+    doc = await _RepoMetricDoc.find_one(key)
     if doc is None:
         try:
-            await _MetricDoc(**key, **fields).insert()
+            await _RepoMetricDoc(**key, **fields).insert()
             return
         except DuplicateKeyError:  # a parallel run inserted it first
-            doc = await _MetricDoc.find_one(key)
+            doc = await _RepoMetricDoc.find_one(key)
             if doc is None:
                 raise
     if doc.traffic_available and not snap.traffic_available:
@@ -901,7 +901,7 @@ async def run_repo_metrics(now: datetime | None = None) -> dict[str, int]:
 async def repo_metrics(workspace_id: str, repo: str, since: date) -> list[RepoSnapshot]:
     """This workspace's stored days for one repo from ``since`` (inclusive), oldest first."""
     docs = (
-        await _MetricDoc.find(
+        await _RepoMetricDoc.find(
             {"workspace": workspace_id, "repo": repo, "day": {"$gte": since.isoformat()}}
         )
         .sort("day")

@@ -49,8 +49,8 @@ from pocketpaw_ee.cloud.growth.domain import (
     GROWTH_PULSE_SWEEP_JOB_NAME,
     GROWTH_QUEUE_NAME,
     GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
-    GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
     GROWTH_SOCIAL_POST_METRICS_JOB_NAME,
+    GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
 )
 from pocketpaw_ee.cloud.growth.followups import (
     GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
@@ -96,6 +96,8 @@ async def social_repo_metrics(ctx: dict[str, Any]) -> dict[str, int]:
     if repo_metrics.resolve_repo_metrics_fn() is None:
         repo_metrics.set_production_repo_metrics_fn(repo_metrics.github_repo_metrics)
     return await run_repo_metrics()
+
+
 async def social_post_metrics(ctx: dict[str, Any]) -> dict[str, int]:
     """Record published X posts and snapshot their metrics. Reads only, never posts.
 
