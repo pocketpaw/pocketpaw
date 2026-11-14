@@ -349,5 +349,14 @@
     "tests": [
       "tests/cloud/growth/social/test_links.py"
     ]
+  },
+  {
+    "label": "tracked links: the request log stops skipping /go (stores clickers' IP and UA)",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "_SKIP_PREFIXES = (\"/static/\", \"/uploads/\", \"/assets/\", \"/api/v1/go/\")",
+    "replace": "_SKIP_PREFIXES = (\"/static/\", \"/uploads/\", \"/assets/\")",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
   }
 ]

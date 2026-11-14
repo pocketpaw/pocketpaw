@@ -335,3 +335,25 @@ async def test_a_refused_post_mints_no_link(w1, postiz, link_base):
     assert (await w1.post(POSTS, json=body)).status_code == 422
     assert await SocialLink.find_all().count() == 0
     assert postiz.posted == []
+
+
+async def test_the_mounted_app_redirects_anonymously_and_logs_nothing(mongo_db):
+    """Through mount_cloud's real middleware stack (CSRF, request log, auth bridge):
+    no session needed, and the request log, which keeps IP and UA, skips /go."""
+    from pocketpaw_ee.cloud import mount_cloud
+    from pocketpaw_ee.cloud._core.request_log import shutdown_request_log
+
+    app = FastAPI()
+    mount_cloud(app)
+    link = await _link()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        resp = await client.get(f"/api/v1/go/{link.code}", headers=HUMAN)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == TARGET
+        # Control: an ordinary API request IS logged, so an empty log means skipped.
+        await client.get(f"{BASE}/profiles", headers=HUMAN)
+    await shutdown_request_log()
+    paths = [row["path"] async for row in mongo_db["request_logs"].find({})]
+    assert paths and not [p for p in paths if p.startswith("/api/v1/go")], paths
+    assert (await SocialLink.get(link.id)).clicks == 1

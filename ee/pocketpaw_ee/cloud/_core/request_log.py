@@ -11,7 +11,9 @@ is NOT the workspace audit, so API traffic stays out of the Activity feed.
 Websockets and lifespan pass through.
 
 Skipped from the log (still timed): health probes, the CSRF token fetch and
-static assets. They carry no audit value and were the bulk of the volume.
+static assets, which carry no audit value and were the bulk of the volume, and
+the public tracked-link redirect ``/api/v1/go/``, whose clickers are anonymous
+people whose IP and user agent must never be stored.
 
 Writes are batched and bounded. Entries go onto a queue of ``_QUEUE_MAX``;
 ONE consumer task drains it into ``insert_many`` (up to ``_BATCH_MAX``,
@@ -70,7 +72,7 @@ _SKIP_EXACT = frozenset(
         "/api/v1/auth/csrf",
     }
 )
-_SKIP_PREFIXES = ("/static/", "/uploads/", "/assets/")
+_SKIP_PREFIXES = ("/static/", "/uploads/", "/assets/", "/api/v1/go/")
 
 
 def _is_skipped(path: str) -> bool:
