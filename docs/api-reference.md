@@ -10231,7 +10231,8 @@ route `growth.write` (MEMBER).
 | `POST /api/v1/growth/social/profile/analyze` | Read the website and run the analyst, in the request (below). |
 | `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
 | `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
-| `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`; omitted returns every idea. Any other value is a 422. |
+| `POST /api/v1/growth/social/ideas/daily` | Run today's daily X drafting for one product now (below). |
+| `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`, `platform=x\|reddit` and `source=manual\|daily`; omitted returns every idea. Any other value is a 422. Ideas stored before `source` existed count as `manual`. |
 | `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). `media_choice` (`poster` or `reel`) picks which media goes with the post when it has both. |
 | `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
 | `POST /api/v1/growth/social/ideas/{idea_id}/unschedule` | Clear the date and delete the idea's calendar event. |
@@ -10392,6 +10393,8 @@ stored with `status: "new"` and returned as `{items}`:
       "script": ["Open on the waiting room", "Chair goes back", "Counting teeth", "Sticker"],
       "hashtags": ["#kidsdentist", "#firstvisit"],
       "status": "new",
+      "source": "manual",
+      "suggested_at": null,
       "created_at": "2026-10-06T10:05:00+00:00",
       "updated_at": "2026-10-06T10:05:00+00:00"
     }
@@ -10407,6 +10410,45 @@ stored with `status: "new"` and returned as `{items}`:
 | 409 | `social.onboarding_incomplete` | No profile, or onboarding not completed. |
 | 502 | `social.ideas_failed` | The run failed or returned no usable idea. Nothing is stored. |
 | 422 | — | `count` outside 1–12. |
+
+Every idea carries `source`: `manual` when a person asked for it, `daily` when
+the daily drafting below wrote it. `suggested_at` is the UTC time the daily
+drafting suggests posting it, and `null` on manual ideas.
+
+### `POST /api/v1/growth/social/ideas/daily`
+
+No body; `?profile_id=` like the other routes. Requires `growth.write`. Drafts
+X posts for one product the same way the morning sweep does, and returns only
+the ideas it just created as `{items}` (an empty list once the quota is used).
+
+- The product must be onboarded and `active`.
+- At most `weekly_post_quota` daily drafts per rolling 7 days and two per UTC
+  day. Manual ideas never count against either.
+- The drafts are built on what changed in the product's `github_repos` in the
+  last 24 hours (merged pull requests and published releases, read from the
+  public GitHub API; set `POCKETPAW_GROWTH_GITHUB_TOKEN` for private repos or a
+  higher rate limit). A failed GitHub read drafts without changes.
+- X only, never Reddit.
+- A draft that uses an em or en dash, or a number that is not in those changes
+  (hook, caption, thread parts and hashtags are all checked), is dropped. When
+  that leaves the day short, the model is asked once more with the reasons.
+- Each draft is stored `status: "new"`, `source: "daily"`, with `suggested_at`
+  set to the next free slot of 14:00 or 17:00 UTC (tomorrow's once today's has
+  passed). Nothing is posted; a person reviews them in Blitz.
+
+| Status | Code | When |
+|---|---|---|
+| 503 | `social.ideas_unavailable` | No ideas writer is wired on this deployment. |
+| 404 | `social_profile.not_found` | No such profile in this workspace. |
+| 409 | `social.onboarding_incomplete` | Onboarding not completed. |
+| 409 | `social.profile_inactive` | The product is not `active`. |
+| 502 | `social.ideas_failed` | The run failed. |
+
+The growth worker runs the same drafting for every active, onboarded product
+daily at 05:30 UTC (`growth.social_daily_drafts`), after the 05:00 Pulse
+refresh, so drafts read a fresh Pulse. It needs the growth worker
+(`POCKETPAW_GROWTH_WORKER_ENABLED`); one failing product never stops the
+others.
 
 ### `PATCH /api/v1/growth/social/ideas/{idea_id}`
 

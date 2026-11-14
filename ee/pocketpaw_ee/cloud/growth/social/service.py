@@ -31,6 +31,15 @@
 # ``# no-event:`` markers: Growth › Social has no realtime subscriber; the
 # dashboard re-fetches.
 #
+# Daily X drafts: ``run_daily_drafts`` (the growth worker's 05:30 UTC cron, the
+# one cross-workspace read here) and ``draft_daily`` (the on-demand route) both
+# go through ``_draft_daily``: an active, onboarded profile gets at most its
+# ``weekly_post_quota`` daily drafts per rolling 7 days and two per UTC day,
+# built on the last 24 h of its GitHub changes, for X only. Every draft must
+# pass ``ideas.check_draft`` (one retry carries the reasons); the rest are
+# dropped. Survivors are stored ``new`` with ``source="daily"`` and a
+# ``suggested_at`` slot from ``DAILY_SLOT_HOURS_UTC``. Nothing here posts.
+#
 # Accounts: each profile's social accounts live in its own Postiz org, created
 # on the first connect and never on a read. Its API key is stored encrypted, and
 # the key is checked before Postiz is called, because org creation is not
@@ -70,8 +79,11 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
 )
 from pocketpaw_ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text, resolve_changes_fn
 from pocketpaw_ee.cloud.growth.social.domain import (
     CHANNEL_PLATFORMS,
+    DAILY_DRAFTS_PER_DAY,
+    DAILY_SLOT_HOURS_UTC,
     DESCRIPTION_FIELDS,
     MEDIA_EXTENSIONS,
     POSTABLE_PLATFORMS,
@@ -79,6 +91,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     VIDEO_PLATFORMS,
     AnalysisOutcome,
     AnalysisRequest,
+    GeneratedIdea,
     SocialAnalysis,
     SocialIdea,
     SocialProfile,
@@ -268,6 +281,8 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         poster_svg=doc.poster_svg,
         reel_html=doc.reel_html,
         media_choice=doc.media_choice,
+        source=doc.source,
+        suggested_at=doc.suggested_at,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -292,6 +307,8 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         poster_svg=i.poster_svg,
         reel_html=i.reel_html,
         media_choice=i.media_choice,
+        source=i.source,
+        suggested_at=iso_utc(i.suggested_at),
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -574,6 +591,7 @@ async def list_ideas(
     status: str | None = None,
     profile_id: str | None = None,
     platform: str | None = None,
+    source: str | None = None,
 ) -> SocialIdeaListResponse:
     workspace_id = _require_workspace(ctx)
     doc = await _profile_doc(workspace_id, profile_id)
@@ -584,6 +602,9 @@ async def list_ideas(
         query["status"] = status
     if platform is not None:
         query["platform"] = platform
+    if source is not None:
+        # Rows from before ``source`` existed carry no key; they are manual.
+        query["source"] = "daily" if source == "daily" else {"$ne": "daily"}
     docs = (
         await _IdeaDoc.find(query)
         .sort([("createdAt", -1), ("_id", -1)])
@@ -591,6 +612,217 @@ async def list_ideas(
         .to_list()
     )
     return SocialIdeaListResponse(items=[_idea_to_response(_idea_to_domain(d)) for d in docs])
+
+
+# ---------------------------------------------------------------------------
+# Daily X drafts
+# ---------------------------------------------------------------------------
+
+
+def _day_start(now: datetime) -> datetime:
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+async def _daily_count(workspace_id: str, profile: str, since: datetime) -> int:
+    return await _IdeaDoc.find(
+        {
+            "workspace": workspace_id,
+            "profile": profile,
+            "source": "daily",
+            "createdAt": {"$gte": since},
+        }
+    ).count()
+
+
+async def _free_slots(workspace_id: str, profile: str, now: datetime) -> list[datetime]:
+    """Today's and tomorrow's slot times still ahead of ``now`` that no daily draft holds."""
+    today = _day_start(now)
+    held = await _IdeaDoc.find(
+        {
+            "workspace": workspace_id,
+            "profile": profile,
+            "source": "daily",
+            "suggested_at": {"$gte": today},
+        }
+    ).to_list()
+    taken = {_aware(d.suggested_at) for d in held if d.suggested_at is not None}
+    slots = [
+        today + timedelta(days=day, hours=hour) for day in (0, 1) for hour in DAILY_SLOT_HOURS_UTC
+    ]
+    return [slot for slot in slots if slot > now and slot not in taken]
+
+
+async def _gather_changes(repos: list[str], since: datetime) -> list[Change]:
+    changes_fn = resolve_changes_fn()
+    if changes_fn is None or not repos:
+        return []
+    try:
+        return list(await changes_fn(repos, since=since))
+    except Exception:  # noqa: BLE001
+        logger.warning("daily drafts: reading GitHub changes failed", exc_info=True)
+        return []
+
+
+async def _draft_daily(
+    workspace_id: str, profile_id: str, now: datetime
+) -> tuple[list[_IdeaDoc], int]:
+    """The daily drafts this profile is owed right now, and how many drafts were dropped."""
+    from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
+
+    ideas_fn = social_ideas.resolve_ideas_fn()
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    if ideas_fn is None or not doc.active or doc.onboarding_completed_at is None:
+        return [], 0
+    profile_key = str(doc.id)
+    left_week = doc.weekly_post_quota - await _daily_count(
+        workspace_id, profile_key, now - timedelta(days=7)
+    )
+    left_today = DAILY_DRAFTS_PER_DAY - await _daily_count(
+        workspace_id, profile_key, _day_start(now)
+    )
+    n = min(left_week, left_today)
+    if n <= 0:
+        return [], 0
+
+    profile = _profile_to_domain(doc)
+    changes = await _gather_changes(list(doc.github_repos or ()), now - timedelta(hours=24))
+    source_text = changes_text(changes)
+    hooks = await _recent_hooks(workspace_id, profile_key)
+    pulse = await _pulse_themes(workspace_id, profile_key)
+    kept: list[GeneratedIdea] = []
+    reasons: list[str] = []
+    dropped = 0
+    retry_note: str | None = None
+    for _attempt in range(2):  # the first call, then at most one retry
+        generated = await ideas_fn(
+            profile,
+            n - len(kept),
+            hooks,
+            platform="x",
+            pulse=pulse,
+            changes=changes,
+            retry_note=retry_note,
+        )
+        for idea in generated:
+            problems = social_ideas.check_draft(idea, source_text)
+            if problems:
+                dropped += 1
+                reasons += [r for r in problems if r not in reasons]
+            elif len(kept) < n:
+                kept.append(idea)
+        if len(kept) >= n:
+            break
+        retry_note = "; ".join(reasons) or None
+    if dropped:
+        logger.info("daily drafts: dropped %d draft(s) for profile=%s", dropped, profile_key)
+
+    slots = await _free_slots(workspace_id, profile_key, now)
+    docs: list[_IdeaDoc] = []
+    for item, slot in zip(kept, slots, strict=False):
+        idea_doc = _IdeaDoc(
+            workspace=workspace_id,
+            profile=profile_key,
+            format=item.format,
+            hook=item.hook,
+            on_screen_text=item.on_screen_text,
+            caption=item.caption,
+            why=item.why,
+            script=list(item.script),
+            hashtags=list(item.hashtags),
+            platform="x",
+            status="new",
+            source="daily",
+            suggested_at=slot,
+        )
+        await idea_doc.insert()
+        docs.append(idea_doc)
+    return docs, dropped
+
+
+async def draft_daily_for_profile(
+    workspace_id: str, profile_id: str, *, now: datetime | None = None
+) -> list[SocialIdea]:
+    """Draft this profile's X posts for today, within its weekly quota and two a day.
+
+    Skips (returns []) an inactive or not-yet-onboarded profile and one whose quota is used.
+    Drafts that break ``check_draft`` are dropped; one retry is asked for with the reasons.
+    Every draft is stored as ``new``: nothing here posts."""
+    docs, _ = await _draft_daily(workspace_id, profile_id, now or datetime.now(UTC))
+    # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
+    return [_idea_to_domain(d) for d in docs]
+
+
+async def run_daily_drafts(now: datetime | None = None) -> dict[str, int]:
+    """Draft today's X posts for every active, onboarded profile. One failing profile never
+    stops the rest. Runs from the growth worker's cron."""
+    from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
+
+    now = now or datetime.now(UTC)
+    counts = {"profiles": 0, "drafted": 0, "dropped": 0, "failed": 0}
+    if social_ideas.resolve_ideas_fn() is None:
+        return counts
+    # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+    docs = await _ProfileDoc.find(
+        {"active": True, "onboarding_completed_at": {"$ne": None}}
+    ).to_list()
+    counts["profiles"] = len(docs)
+    for doc in docs:
+        try:
+            made, dropped = await _draft_daily(doc.workspace, str(doc.id), now)
+            counts["drafted"] += len(made)
+            counts["dropped"] += dropped
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("daily drafts: profile=%s failed", doc.id, exc_info=True)
+    logger.info(
+        "daily drafts: profiles=%d drafted=%d dropped=%d failed=%d",
+        counts["profiles"],
+        counts["drafted"],
+        counts["dropped"],
+        counts["failed"],
+    )
+    # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
+    return counts
+
+
+async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> SocialIdeaListResponse:
+    """Run today's X drafting for one profile now. 503 with no ideas writer, 409 before
+    onboarding or while the profile is inactive, 502 when the run fails; an empty list when
+    the quota is used up."""
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+    from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
+
+    workspace_id = _require_workspace(ctx)
+    if social_ideas.resolve_ideas_fn() is None:
+        raise CloudError(
+            503, "social.ideas_unavailable", "Idea generation is not configured on this deployment"
+        )
+    doc = await _profile_doc(workspace_id, profile_id)
+    if doc is None:
+        raise NotFound("social_profile")
+    if doc.onboarding_completed_at is None:
+        raise ConflictError(
+            "social.onboarding_incomplete", "Finish the Social setup before drafting posts"
+        )
+    if not doc.active:
+        raise ConflictError(
+            "social.profile_inactive", "Turn this product on before drafting its daily posts"
+        )
+    try:
+        made = await draft_daily_for_profile(workspace_id, str(doc.id))
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "social.ideas_failed", f"Idea generation failed: {exc}") from exc
+    except CloudError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("daily drafts: run failed for ws=%s", workspace_id, exc_info=True)
+        raise CloudError(502, "social.ideas_failed", "The drafting run failed") from exc
+    # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
+    return SocialIdeaListResponse(items=[_idea_to_response(i) for i in made])
 
 
 async def update_idea(
@@ -1694,6 +1926,9 @@ __all__ = [
     "schedule_ideas",
     "unschedule_idea",
     "generate_ideas",
+    "draft_daily",
+    "draft_daily_for_profile",
+    "run_daily_drafts",
     "get_profile",
     "list_ideas",
     "update_idea",

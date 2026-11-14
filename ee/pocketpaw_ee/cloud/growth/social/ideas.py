@@ -26,7 +26,9 @@
 # Ideas can also be built on what changed in the product's GitHub repos
 # (``changes``, rendered by ``changes.changes_text``). ``check_draft`` holds two
 # hard rules in code rather than only in the prompt: no em or en dash anywhere
-# in a draft, and no number that is not in that source text.
+# in a draft (hashtags included), and no number that is not in that source text.
+# ``retry_note`` is the one retry's seam: the reasons the previous drafts were
+# rejected, appended to the prompt so the model fixes exactly that.
 
 from __future__ import annotations
 
@@ -133,6 +135,7 @@ def build_ideas_prompt(
     platform: str | None = None,
     pulse: list[dict[str, Any]] | None = None,
     changes: list[Change] | None = None,
+    retry_note: str | None = None,
 ) -> str:
     lines = [f"Write {count} post ideas for this business."]
     if platform in _PLATFORM_BRIEFS:
@@ -195,6 +198,12 @@ def build_ideas_prompt(
     if hooks:
         lines += ["", "Hooks already used (do not repeat or reword these):"]
         lines += [f"- {fence(h)}" for h in hooks]
+    if retry_note:
+        lines += [
+            "",
+            "Your previous drafts were rejected for these reasons. Write new ones that fix this:",
+            fence(retry_note),
+        ]
     lines += ["", "Return only the JSON object."]
     return "\n".join(lines)
 
@@ -271,6 +280,7 @@ class IdeasFn(Protocol):
         platform: str | None = None,
         pulse: list[dict[str, Any]] | None = None,
         changes: list[Change] | None = None,
+        retry_note: str | None = None,
     ) -> tuple[GeneratedIdea, ...]: ...
 
 
@@ -282,10 +292,13 @@ async def agent_generate_ideas(
     platform: str | None = None,
     pulse: list[dict[str, Any]] | None = None,
     changes: list[Change] | None = None,
+    retry_note: str | None = None,
 ) -> tuple[GeneratedIdea, ...]:
     """The production ``IdeasFn``. Raises ``ResearchUnavailable`` when the agent
     cannot be set up or the run errors."""
-    prompt = build_ideas_prompt(profile, count, recent_hooks, platform, pulse, changes)
+    prompt = build_ideas_prompt(
+        profile, count, recent_hooks, platform, pulse, changes, retry_note=retry_note
+    )
     text = await run_pinned_agent(
         profile.workspace_id, GROWTH_SOCIAL_IDEAS_AGENT, prompt, GROWTH_SOCIAL_IDEAS_SLUG
     )
@@ -301,13 +314,13 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 def check_draft(idea: GeneratedIdea, source_text: str) -> list[str]:
     """Why this draft breaks the hard rules; empty when it is fine.
 
-    Checks hook, caption, on_screen_text and every script part. A draft may not use
+    Checks hook, caption, on_screen_text, every script part and every hashtag. A draft may not use
     an em or en dash, and every number token in it must appear in ``source_text``
     with no digit directly before or after it (so "16" does not pass on "2016").
     A number inside a URL passes when that URL is in the source, since the URL's
     digits are then in the source too.
     """
-    parts = [idea.hook, idea.caption, idea.on_screen_text, *idea.script]
+    parts = [idea.hook, idea.caption, idea.on_screen_text, *idea.script, *idea.hashtags]
     reasons: list[str] = []
     if any(d in part for part in parts for d in _DASHES):
         reasons.append("uses an em or en dash")

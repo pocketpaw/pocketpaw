@@ -5,7 +5,9 @@
 # RBAC guard (pinned by the guard-coverage test in tests/cloud/growth/
 # test_gate.py): GETs ``growth.read``, workspace-internal writes
 # ``growth.write``, and connecting or disconnecting a social account, uploading
-# media or posting (which reach an outside platform) ``growth.manage``. The
+# media or posting (which reach an outside platform) ``growth.manage``.
+# ``POST /ideas/daily`` runs the daily X drafting for one product on demand
+# (the same code the growth worker's morning cron runs); it only drafts. The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
@@ -20,7 +22,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import service as social_service
-from pocketpaw_ee.cloud.growth.social.domain import IdeaStatus, Platform
+from pocketpaw_ee.cloud.growth.social.domain import IdeaSource, IdeaStatus, Platform
 from pocketpaw_ee.cloud.growth.social.dto import (
     CheckTelegramRequest,
     CheckTelegramResponse,
@@ -149,6 +151,21 @@ async def generate_ideas(
     return await social_service.generate_ideas(ctx, body or GenerateIdeasRequest(), profile_id)
 
 
+@router.post(
+    "/ideas/daily",
+    response_model=SocialIdeaListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def draft_daily(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialIdeaListResponse:
+    """Draft today's X posts for this product now, within its weekly quota and two a day.
+    Drafts are stored as ``new`` with ``source="daily"``; nothing is posted. 503 with no
+    ideas writer, 409 before onboarding or while the product is inactive, 502 when the run
+    fails; an empty list once the quota is used."""
+    return await social_service.draft_daily(ctx, profile_id)
+
+
 @router.get(
     "/ideas",
     response_model=SocialIdeaListResponse,
@@ -157,12 +174,13 @@ async def generate_ideas(
 async def list_ideas(
     status: IdeaStatus | None = Query(default=None),
     platform: Platform | None = Query(default=None),
+    source: IdeaSource | None = Query(default=None),
     profile_id: str | None = _PROFILE_ID,
     ctx: RequestContext = Depends(request_context),
 ) -> SocialIdeaListResponse:
-    """One profile's ideas, newest first, optionally one status."""
+    """One profile's ideas, newest first, optionally one status, platform and source."""
     return await social_service.list_ideas(
-        ctx, status=status, profile_id=profile_id, platform=platform
+        ctx, status=status, profile_id=profile_id, platform=platform, source=source
     )
 
 

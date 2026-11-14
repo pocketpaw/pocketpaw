@@ -1,49 +1,29 @@
 # ee/pocketpaw_ee/cloud/growth/worker.py — arq worker for the dedicated
 # ``growth`` queue.
 #
-# Created 2026-07-27 (feat/growth-g1): registration seam only (a no-op
-# heartbeat so arq would boot).
-# Updated 2026-07-27 (feat/growth-g4): the heartbeat is replaced by the real
-# ``growth.dispatch`` job entrypoint — registered under its explicit dotted
-# name via ``arq.worker.func`` so the enqueue side
-# (``growth.executor.execute_approved_growth_send``) and the worker agree on
-# the name. The job body is a deliberate STUB in this slice: it logs and marks
-# NOTHING sent — G-5 (email via provider) and G-6 (follow-ups) fill in the
-# actual delivery and the draft's ``sent`` flip (via the service's
-# ``gate_transition`` seam). The job only ever EXISTS for a draft whose
-# ``_growth_send`` proposal a human approved — that is the whole gate.
-# Updated 2026-07-27 (feat/growth-g5): the ``email`` branch is live — it hands
-# off to ``growth/email_dispatch.dispatch_email`` (per-channel module, so each
-# channel's delivery stays in its own file and the job body keeps one branch
-# per channel). Other channels still log the stub.
-# Updated 2026-07-27 (feat/growth-g7): the daily follow-up sweep joins the
-# queue as arq's first CRON job (``cron_jobs``, ``unique=True`` so only one
-# worker in a horizontally-scaled deploy runs a given tick). It PROPOSES
-# follow-ups into the Instinct tray and never sends — same gate, same human.
-# Updated 2026-07-27 (feat/growth-g6): the ``channel="whatsapp"`` branch is
-# live — it delegates to ``growth.whatsapp.dispatch_whatsapp``, which enforces
-# the hard ``prospect.opted_in`` guard (no opt-in ⇒ NO provider call at all),
-# the hourly ``GROWTH_WHATSAPP_MAX_PER_HOUR`` cap, the MSG91 send, and the
-# approved→sent flip through ``service.gate_transition``. Only ``linkedin``
-# keeps the stub — it is manual by design (G-8's queue + mark-sent route).
+# One job and four crons. ``growth.dispatch`` delivers a draft whose
+# ``_growth_send`` proposal a human approved (the approval is the only producer
+# of the job): email through ``email_dispatch``, WhatsApp through ``whatsapp``
+# (hard opt-in guard and hourly cap), LinkedIn stays manual and only logs. The
+# crons, all ``unique=True`` so a scaled fleet runs each tick once, in UTC:
+# 05:00 the Pulse refresh, 05:30 the Growth › Social daily X drafts (drafts
+# only, never posts), 06:00 discovery, 13:00 the follow-up sweep (proposes,
+# never sends). The worker process never runs ``cloud.__init__``'s wiring, so
+# the Pulse and daily-drafts jobs install their production fns when missing.
 #
-# Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
-# worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
-# so a burst of outbound work can never starve interactive chat runs. Enqueue
-# with ``_queue_name=GROWTH_QUEUE_NAME`` (arq's selector is the
-# underscore-prefixed kwarg; a bare ``queue=`` is forwarded to the job function
-# and crashes it — see the jobs/domain.py history).
+# Growth gets its OWN queue and worker process so a burst of outbound work can
+# never starve interactive chat runs. Enqueue with
+# ``_queue_name=GROWTH_QUEUE_NAME`` (arq's selector is the underscore-prefixed
+# kwarg; a bare ``queue=`` is forwarded to the job function and crashes it).
 #
 # Deploy as a separate process alongside the web service::
 #
 #     arq pocketpaw_ee.cloud.growth.worker.WorkerSettings
 #
-# The startup/shutdown pair mirrors ``chat/runs/worker.py``: pin the xproc role
-# BEFORE anything emits, init the cloud DB + realtime bus, close the DB on the
-# way out. ``redis_settings`` is evaluated eagerly at class-body time because
-# arq reads ``settings_cls.__dict__`` directly (bypassing descriptors) — the
-# same shape + rationale as the chat-runs worker; tests set a stub
-# ``POCKETPAW_REDIS_URL`` in ``tests/cloud/conftest.py`` before import.
+# Startup pins the xproc role BEFORE anything emits, then inits the cloud DB and
+# realtime bus. ``redis_settings`` is evaluated eagerly at class-body time
+# because arq reads ``settings_cls.__dict__`` directly (bypassing descriptors);
+# tests set a stub ``POCKETPAW_REDIS_URL`` in ``tests/cloud/conftest.py``.
 
 """arq worker entry point for the dedicated ``growth`` queue."""
 
@@ -65,6 +45,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     GROWTH_DISPATCH_JOB_NAME,
     GROWTH_PULSE_SWEEP_JOB_NAME,
     GROWTH_QUEUE_NAME,
+    GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
 )
 from pocketpaw_ee.cloud.growth.followups import (
     GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
@@ -84,6 +65,20 @@ async def pulse_sweep(ctx: dict[str, Any]) -> dict[str, int]:
     if pulse.resolve_pulse_fn() is None:
         pulse.set_production_pulse_fn(pulse.agent_build_pulse)
     return await refresh_due_pulses()
+
+
+async def social_daily_drafts(ctx: dict[str, Any]) -> dict[str, int]:
+    """Draft today's X posts for every active Growth › Social product. Drafts only.
+
+    Installs the production ideas and GitHub changes fns when missing, like ``pulse_sweep``."""
+    from pocketpaw_ee.cloud.growth.social import changes, ideas
+    from pocketpaw_ee.cloud.growth.social.service import run_daily_drafts
+
+    if ideas.resolve_ideas_fn() is None:
+        ideas.set_production_ideas_fn(ideas.agent_generate_ideas)
+    if changes.resolve_changes_fn() is None:
+        changes.set_production_changes_fn(changes.github_changes)
+    return await run_daily_drafts()
 
 
 logger = logging.getLogger(__name__)
@@ -256,6 +251,15 @@ class WorkerSettings:
             name=GROWTH_PULSE_SWEEP_JOB_NAME,
             hour=5,
             minute=0,
+            unique=True,
+            run_at_startup=False,
+        ),
+        # The daily X drafts at 05:30 UTC, after the Pulse refresh so drafts read a fresh Pulse.
+        cron(
+            social_daily_drafts,
+            name=GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
+            hour=5,
+            minute=30,
             unique=True,
             run_at_startup=False,
         ),
