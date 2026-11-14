@@ -341,6 +341,7 @@ from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea
+from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse
@@ -778,6 +779,7 @@ def get_all_documents():
         SocialIdea,
         SocialPulse,
         SocialPostizOrg,
+        SocialPostMetric,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
