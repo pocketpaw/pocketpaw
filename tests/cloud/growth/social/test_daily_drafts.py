@@ -56,6 +56,9 @@ async def w2(mongo_db: Any):
 
 @pytest.fixture(autouse=True)
 def _reset_seams():
+    # Clear before too: anything that ran ``mount_cloud`` on this worker installed the real fns.
+    set_production_ideas_fn(None)
+    set_production_changes_fn(None)
     try:
         yield
     finally:
