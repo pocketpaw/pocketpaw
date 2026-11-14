@@ -9,7 +9,10 @@
 # ``POST /ideas/daily`` runs the daily X drafting for one product on demand
 # (the same code the growth worker's morning cron runs); it only drafts.
 # ``/replies`` lists reply cards, ``PATCH /replies/{id}`` edits one or records what
-# was done with it, and ``POST /replies/draft`` drafts them now; nothing posts. The
+# was done with it, and ``POST /replies/draft`` drafts them now; nothing posts.
+# ``/experiments`` (create, list, close; no update route), ``/review`` (read-only)
+# and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
+# growth.read, writes growth.write. The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
@@ -24,13 +27,22 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import service as social_service
-from pocketpaw_ee.cloud.growth.social.domain import IdeaSource, IdeaStatus, Platform, ReplyStatus
+from pocketpaw_ee.cloud.growth.social.domain import (
+    IdeaSource,
+    IdeaStatus,
+    LearningStatus,
+    Platform,
+    ReplyStatus,
+)
 from pocketpaw_ee.cloud.growth.social.dto import (
     CheckTelegramRequest,
     CheckTelegramResponse,
+    CloseExperimentRequest,
+    CloseExperimentResponse,
     ConnectSocialAccountRequest,
     ConnectSocialAccountResponse,
     CreateCharacterRequest,
+    CreateExperimentRequest,
     CreateSocialPostRequest,
     CreateSocialPostResponse,
     GenerateIdeasRequest,
@@ -43,14 +55,20 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     ScheduleIdeasRequest,
     SocialAccountListResponse,
     SocialChannelListResponse,
+    SocialExperimentListResponse,
+    SocialExperimentResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialLearningListResponse,
+    SocialLearningResponse,
     SocialMediaResponse,
     SocialPostListResponse,
     SocialProfileListResponse,
     SocialProfileResponse,
     SocialPulseResponse,
+    SocialReviewResponse,
     UpdateIdeaRequest,
+    UpdateLearningRequest,
     UpdateReplyRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
@@ -169,6 +187,106 @@ async def draft_daily(
     ideas writer, 409 before onboarding or while the product is inactive, 502 when the run
     fails; an empty list once the quota is used."""
     return await social_service.draft_daily(ctx, profile_id)
+
+
+# --- Learning loop: experiments, the weekly review and learnings ------------------------
+# No route updates an experiment's hypothesis, variable, arms, metric or keep rule.
+
+_WEEK = Query(default=None, description="ISO week, e.g. 2026-W07; omitted = this week (UTC)")
+
+
+@router.post(
+    "/experiments",
+    response_model=SocialExperimentResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def create_experiment(
+    body: CreateExperimentRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialExperimentResponse:
+    """Start an experiment; 409 ``social.experiment_running`` while one is running."""
+    return await social_service.create_experiment(ctx, body, profile_id)
+
+
+@router.get(
+    "/experiments",
+    response_model=SocialExperimentListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_experiments(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialExperimentListResponse:
+    return await social_service.list_experiments(ctx, profile_id)
+
+
+@router.post(
+    "/experiments/{experiment_id}/close",
+    response_model=CloseExperimentResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def close_experiment(
+    experiment_id: str,
+    body: CloseExperimentRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CloseExperimentResponse:
+    """Close a running experiment; a keep or no-difference verdict proposes a learning."""
+    return await social_service.close_experiment(ctx, experiment_id, body)
+
+
+@router.get(
+    "/review",
+    response_model=SocialReviewResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_review(
+    profile_id: str | None = _PROFILE_ID,
+    week: str | None = _WEEK,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialReviewResponse:
+    """The week's published posts, tag averages, experiment arms and repo numbers."""
+    return await social_service.get_review(ctx, profile_id, week)
+
+
+@router.get(
+    "/learnings",
+    response_model=SocialLearningListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_learnings(
+    profile_id: str | None = _PROFILE_ID,
+    status: LearningStatus | None = Query(default=None),
+    ctx: RequestContext = Depends(request_context),
+) -> SocialLearningListResponse:
+    return await social_service.list_learnings(ctx, profile_id, status)
+
+
+@router.post(
+    "/learnings/propose",
+    response_model=SocialLearningListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def propose_learnings(
+    profile_id: str | None = _PROFILE_ID,
+    week: str | None = _WEEK,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialLearningListResponse:
+    """At most three learnings from the week's review, stored as ``proposed``."""
+    return await social_service.propose_learnings(ctx, profile_id, week)
+
+
+@router.patch(
+    "/learnings/{learning_id}",
+    response_model=SocialLearningResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def update_learning(
+    learning_id: str,
+    body: UpdateLearningRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialLearningResponse:
+    """Edit the text, approve, reject (retire a proposed one) or retire an approved one."""
+    return await social_service.update_learning(ctx, learning_id, body)
 
 
 @router.get(

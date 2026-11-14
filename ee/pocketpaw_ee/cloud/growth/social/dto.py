@@ -18,13 +18,17 @@
 # deduped ignoring case), ``reply_queries`` (at most 5, each trimmed and at most
 # 200 characters) and ``reply_cards_per_day`` (1..25, default 15). A reply edit
 # needs ``draft_text`` (at most 280 characters) and/or ``status``. Idea edits need at
-# least one field; script beats and hashtags are trimmed and capped. A post
+# least one field; script beats and hashtags are trimmed and capped, and the
+# ``pillar`` / ``hook_type`` tags are trimmed and cut to 40 characters. A post
 # names 1–10 distinct accounts and trimmed, non-empty content of at most 10000
 # characters, plus up to 25 thread parts held to the same rule and up to 4
 # media items; whether the media is public and unmixed is the service's check,
 # so it carries an error code. A post's optional ``scheduled_at`` is read as UTC
 # when it has no offset, normalised to UTC, and must not be more than
-# ``SCHEDULE_SKEW`` in the past.
+# ``SCHEDULE_SKEW`` in the past. Learning loop: an experiment is created whole
+# (extra keys refused, two distinct arms, format arms limited to X formats,
+# ``min_posts_per_arm`` 1..50) and only ever closed with a verdict; a learning
+# edit carries text (at most 300 characters) and/or a status.
 
 from __future__ import annotations
 
@@ -33,27 +37,42 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from pocketpaw_ee.cloud.growth.social.domain import (
     DEFAULT_IDEA_COUNT,
     MAX_IDEA_COUNT,
+    MAX_LEARNING_CHARS,
     MAX_POST_IMAGES,
     MAX_REPLY_CARDS_PER_DAY,
     MAX_REPLY_CHARS,
     MAX_REPLY_QUERIES,
     MAX_REPLY_QUERY_CHARS,
     MAX_REPLY_WATCH_HANDLES,
+    MIN_POSTS_PER_ARM_DEFAULT,
+    PLATFORM_FORMATS,
     AnalysisStatus,
     BusinessModel,
+    ExperimentMetric,
+    ExperimentVariable,
+    ExperimentVerdict,
     IdeaFormat,
     IdeaSource,
     IdeaStatus,
+    LearningStatus,
     MonthlyRevenue,
     Platform,
     ReplyStatus,
     SocialRole,
     TeamSize,
+    clean_tag,
 )
 
 MAX_SCRIPT_BEATS = 12
@@ -292,6 +311,13 @@ class UpdateIdeaRequest(BaseModel):
     hashtags: list[str] | None = Field(default=None, max_length=50)
     poster_svg: str | None = Field(default=None, min_length=1, max_length=2_000_000)
     media_choice: Literal["poster", "reel"] | None = None
+    pillar: str | None = Field(default=None, max_length=200)
+    hook_type: str | None = Field(default=None, max_length=200)
+
+    @field_validator("pillar", "hook_type")
+    @classmethod
+    def _tag(cls, v: str | None) -> str | None:
+        return clean_tag(v) if v is not None else v
 
     @field_validator("hook")
     @classmethod
@@ -317,7 +343,7 @@ class UpdateIdeaRequest(BaseModel):
         ):
             raise ValueError(
                 "provide at least one of status / hook / on_screen_text / caption / "
-                "script / hashtags"
+                "script / hashtags / pillar / hook_type"
             )
         return self
 
@@ -346,6 +372,9 @@ class SocialIdeaResponse(BaseModel):
     published_url: str
     published_at: str | None
     x_post_id: str
+    pillar: str = ""
+    hook_type: str = ""
+    experiment_id: str = ""
     created_at: str | None
     updated_at: str | None
 
@@ -393,6 +422,191 @@ class UpdateReplyRequest(BaseModel):
         if self.draft_text is None and self.status is None:
             raise ValueError("provide draft_text and/or status")
         return self
+
+
+# --- Learning loop: experiments, learnings and the weekly review ---------------------
+
+
+class CreateExperimentRequest(BaseModel):
+    """A new experiment. Nothing here can be changed after create; only the verdict moves."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hypothesis: str = Field(min_length=1, max_length=500)
+    variable: ExperimentVariable
+    arm_a: str = Field(min_length=1, max_length=200)
+    arm_b: str = Field(min_length=1, max_length=200)
+    metric: ExperimentMetric
+    keep_rule: str = Field(default="", max_length=500)
+    keep_threshold: float = 0.0
+    min_posts_per_arm: int = Field(default=MIN_POSTS_PER_ARM_DEFAULT, ge=1, le=50)
+    start: datetime | None = None
+    end: datetime | None = None
+
+    @field_validator("hypothesis", "keep_rule")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("arm_a", "arm_b")
+    @classmethod
+    def _arm(cls, v: str) -> str:
+        return clean_tag(v)
+
+    @field_validator("start", "end")
+    @classmethod
+    def _utc(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return v
+        return v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def _check(self) -> CreateExperimentRequest:
+        if not self.hypothesis:
+            raise ValueError("hypothesis must not be blank")
+        if not self.arm_a or not self.arm_b or self.arm_a == self.arm_b:
+            raise ValueError("arm_a and arm_b must be two different, non-blank values")
+        if self.variable == "format":
+            allowed = PLATFORM_FORMATS["x"]
+            if self.arm_a not in allowed or self.arm_b not in allowed:
+                raise ValueError(f"format arms must be X formats: {', '.join(allowed)}")
+        if self.start and self.end and self.end <= self.start:
+            raise ValueError("end must be after start")
+        return self
+
+
+class CloseExperimentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["keep_a", "keep_b", "no_difference", "stopped"]
+
+
+class SocialExperimentResponse(BaseModel):
+    id: str
+    workspace_id: str
+    profile_id: str
+    hypothesis: str
+    variable: ExperimentVariable
+    arm_a: str
+    arm_b: str
+    metric: ExperimentMetric
+    keep_rule: str
+    keep_threshold: float
+    min_posts_per_arm: int
+    start: str | None
+    end: str | None
+    verdict: ExperimentVerdict
+    closed_at: str | None
+    created_at: str | None
+
+
+class SocialExperimentListResponse(BaseModel):
+    items: list[SocialExperimentResponse]
+
+
+class SocialLearningResponse(BaseModel):
+    id: str
+    workspace_id: str
+    profile_id: str
+    text: str
+    source_experiment: str
+    evidence: str
+    status: LearningStatus
+    approved_at: str | None
+    retired_at: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class SocialLearningListResponse(BaseModel):
+    items: list[SocialLearningResponse]
+
+
+class CloseExperimentResponse(BaseModel):
+    experiment: SocialExperimentResponse
+    learning: SocialLearningResponse | None = None
+
+
+class UpdateLearningRequest(BaseModel):
+    """Edit a learning's text (while proposed or approved) and/or move its status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = Field(default=None, min_length=1, max_length=MAX_LEARNING_CHARS)
+    status: Literal["approved", "retired"] | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _text(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("text must not be blank")
+        return v.strip() if v is not None else v
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> UpdateLearningRequest:
+        if self.text is None and self.status is None:
+            raise ValueError("provide text and/or status")
+        return self
+
+
+class ReviewPostResponse(BaseModel):
+    idea_id: str
+    hook: str
+    format: str
+    pillar: str
+    hook_type: str
+    experiment_id: str
+    published_url: str
+    published_at: str | None
+    age_bucket: int | None
+    impressions: int
+    likes: int
+    replies: int
+    reposts: int
+    quotes: int
+    clicks: int
+    clicks_per_1k_views: float | None
+    engagement_rate: float | None
+    repo_uniques_week: int
+
+
+class TagAverageResponse(BaseModel):
+    value: str
+    posts: int
+    clicks_per_1k_views: float | None
+    engagement_rate: float | None
+
+
+class ArmResponse(BaseModel):
+    arm: Literal["a", "b"]
+    value: str
+    posts: int
+    metric_average: float | None
+
+
+class ReviewExperimentResponse(BaseModel):
+    experiment: SocialExperimentResponse
+    arms: list[ArmResponse]
+    min_posts_met: bool
+
+
+class RepoWeekResponse(BaseModel):
+    repo: str
+    stars: int
+    stars_week_before: int
+    uniques: int
+    uniques_week_before: int
+
+
+class SocialReviewResponse(BaseModel):
+    profile_id: str
+    week: str
+    start: str
+    end: str
+    posts: list[ReviewPostResponse]
+    tags: dict[str, list[TagAverageResponse]]
+    experiment: ReviewExperimentResponse | None
+    repos: list[RepoWeekResponse]
 
 
 class SocialProfileListResponse(BaseModel):

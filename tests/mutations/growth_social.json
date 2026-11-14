@@ -9,6 +9,78 @@
     ]
   },
   {
+    "label": "learning loop: proposed and retired learnings leak into the ideas prompt",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "\"profile\": profile, \"status\": \"approved\"}",
+    "replace": "\"profile\": profile}",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "learning loop: a second experiment may start while one is running",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    if running is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "learning loop: arm alternation always picks arm A",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    return exp.arm_b if count_b < count_a else exp.arm_a\n",
+    "replace": "    return exp.arm_a\n",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "tenancy: the review's snapshot read drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():",
+    "replace": "    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"idea\": {\"$in\": ids}}).to_list():",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "learning loop: the review's min-posts gate always passes",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/review.py",
+    "find": "    min_posts_met = all(arm[\"posts\"] >= min_posts_per_arm for arm in arms)\n",
+    "replace": "    min_posts_met = True\n",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "learning loop: engagement rate counts bookmarks",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/review.py",
+    "find": "    return (m.likes + m.replies + m.reposts + m.quotes) / m.impressions\n",
+    "replace": "    return (m.likes + m.replies + m.reposts + m.quotes + m.bookmarks) / m.impressions\n",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "learning loop: a closed experiment can be closed again",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    if doc.verdict != \"running\":\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
+    "label": "learning loop: proposed learnings with a dash are kept",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if not text or has_dash(text) or has_dash(evidence):\n",
+    "replace": "        if not text:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_learning_loop.py"
+    ]
+  },
+  {
     "label": "tenancy: the latest-profile read drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
     "find": "            await _ProfileDoc.find({\"workspace\": workspace_id})",
@@ -200,8 +272,8 @@
   {
     "label": "daily drafts: drafts are stored approved, not new",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "            platform=\"x\",\n            status=\"new\",\n            source=\"daily\",",
-    "replace": "            platform=\"x\",\n            status=\"approved\",\n            source=\"daily\",",
+    "find": "            hook_type=item.hook_type,\n            status=\"new\",\n            source=\"daily\",",
+    "replace": "            hook_type=item.hook_type,\n            status=\"approved\",\n            source=\"daily\",",
     "tests": [
       "tests/cloud/growth/social/test_daily_drafts.py"
     ]

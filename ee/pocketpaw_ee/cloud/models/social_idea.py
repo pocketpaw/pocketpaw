@@ -10,7 +10,10 @@
 # Postiz post ids of every successful post made from the idea (now or
 # scheduled); older rows read as empty. ``published_url`` / ``published_at`` /
 # ``x_post_id`` record the live X post once the metrics sweep finds it in
-# Postiz; empty until then (and on older rows).
+# Postiz; empty until then (and on older rows). ``pillar`` / ``hook_type`` are
+# short free-text tags (at most 40 characters) the review averages over;
+# ``experiment_id`` names the experiment whose arm this daily draft was written
+# for. All three read as "" on older rows.
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).
@@ -51,6 +54,9 @@ class SocialIdea(TimestampedDocument):
     published_url: str = ""
     published_at: datetime | None = None
     x_post_id: str = ""
+    pillar: str = ""
+    hook_type: str = ""
+    experiment_id: str = ""
 
     class Settings:
         name = "growth_social_ideas"
