@@ -996,7 +996,7 @@ async def metrics_summary(
     published = {"$gte": yesterday_start, "$lt": today_start}
     ideas = (
         await _IdeaDoc.find({**summary_query, "published_at": published})
-        .sort([("published_at", 1), ("_id", 1)])
+        .sort("published_at", "_id")
         .to_list()
     )
     ids = [str(d.id) for d in ideas]
@@ -1004,6 +1004,8 @@ async def metrics_summary(
     clicks = await link_clicks(workspace_id, ids)
     posts = []
     for d in ideas:
+        if d.published_at is None:  # excluded by the query; narrows the type
+            continue
         m = snaps.get(str(d.id))
         posts.append(
             MetricsPostResponse(
