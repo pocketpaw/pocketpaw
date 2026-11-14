@@ -250,5 +250,59 @@
     "tests": [
       "tests/cloud/growth/social/test_accounts.py"
     ]
+  },
+  {
+    "label": "x reader: the daily read cap is skipped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
+    "find": "        cap=metering.growth_x_read_cap(),",
+    "replace": "        cap=None,",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics.py"
+    ]
+  },
+  {
+    "label": "x reader: a missing token still calls X",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
+    "find": "    if not token:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics.py"
+    ]
+  },
+  {
+    "label": "post metrics: batch size unbounded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/metrics.py",
+    "find": "X_BATCH_SIZE = 100",
+    "replace": "X_BATCH_SIZE = 10_000",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics.py"
+    ]
+  },
+  {
+    "label": "tenancy: latest_metrics drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    rows = await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": idea_ids}}).to_list()",
+    "replace": "    rows = await _MetricDoc.find({\"idea\": {\"$in\": idea_ids}}).to_list()",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics.py"
+    ]
+  },
+  {
+    "label": "post metrics: a stored bucket is read and written again",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if bucket is not None and (str(doc.id), bucket) not in stored:",
+    "replace": "        if bucket is not None:",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics.py"
+    ]
+  },
+  {
+    "label": "post metrics: an unread post is stored as zeros",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        counts = read.get(doc.x_post_id)\n",
+    "replace": "        counts = read.get(doc.x_post_id) or {\"impressions\": 0}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics.py"
+    ]
   }
 ]
