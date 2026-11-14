@@ -10396,6 +10396,9 @@ stored with `status: "new"` and returned as `{items}`:
       "source": "manual",
       "suggested_at": null,
       "post_ids": [],
+      "published_url": "",
+      "published_at": null,
+      "x_post_id": "",
       "created_at": "2026-10-06T10:05:00+00:00",
       "updated_at": "2026-10-06T10:05:00+00:00"
     }
@@ -10417,7 +10420,10 @@ the daily drafting below wrote it. `suggested_at` is the UTC time the daily
 drafting suggests posting it, and `null` on manual ideas. `post_ids` lists the
 Postiz post ids of every successful `POST /posts` made with this idea's
 `idea_id` (posted now or scheduled), oldest first, with no repeats; it is `[]`
-until the idea is posted.
+until the idea is posted. `published_url`, `published_at` and `x_post_id` are the
+live X post (its URL, when it went live, and its numeric X id) once the post
+metrics sweep below finds it published in Postiz; until then they are `""`,
+`null` and `""`.
 
 ### `POST /api/v1/growth/social/ideas/daily`
 
@@ -10476,6 +10482,29 @@ instead of adding one. If the rerun cannot read traffic, the traffic an earlier 
 stored is kept. A repo that cannot be read is skipped (no row) and the
 others still run. There is no route yet; the rows feed the Today strip and the
 weekly review later.
+
+#### Post metrics (07:00 UTC cron)
+
+The growth worker's `growth.social_post_metrics` job runs daily at 07:00 UTC.
+It only reads; nothing in it posts or writes to X.
+
+1. For each X idea posted in the last 30 days with `post_ids` and no
+   `x_post_id`, it asks Postiz (when Postiz is configured) for the idea's posts
+   and, for one that is published with an `x.com` or `twitter.com`
+   `.../status/<id>` URL, fills `published_url`, `published_at` and `x_post_id`.
+2. For each X idea published in the last 31 days, it stores one snapshot of the
+   post's public metrics (impressions, likes, replies, reposts, quotes,
+   bookmarks) at the largest age it has reached of 1, 3, 7 and 28 days, unless
+   that age is already stored. Snapshots are append-only (one per idea and age,
+   never updated); a missed smaller age is not filled in later. A post X did
+   not return gets no snapshot that day.
+
+X is read with `POCKETPAW_GROWTH_X_BEARER_TOKEN` (an X API app bearer token;
+unset means no reads and no snapshots), in batches of up to 100 posts, one read
+per batch. `POCKETPAW_GROWTH_X_DAILY_READ_CAP` (default `100`, `0` disables) caps
+those reads per workspace per UTC day on the `growth_x_reads` daily meter; at
+the cap the remaining posts wait for the next run. One failing workspace never
+stops the others.
 
 ### `PATCH /api/v1/growth/social/ideas/{idea_id}`
 

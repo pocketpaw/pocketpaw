@@ -16,6 +16,8 @@
 # ``DAILY_SLOT_HOURS_UTC`` and ``DAILY_DRAFTS_PER_DAY`` shape the daily X
 # drafting sweep; an idea's ``source`` says whether a person or that sweep
 # asked for it, and its ``post_ids`` are the Postiz posts made from it.
+# ``METRIC_AGE_BUCKETS`` are the post ages (days) a ``PostMetrics`` snapshot of
+# a published X post is taken at.
 
 from __future__ import annotations
 
@@ -139,6 +141,7 @@ DEFAULT_IDEA_COUNT = 6
 # unused one of these UTC hours (rolling to tomorrow once today's has passed).
 DAILY_SLOT_HOURS_UTC: tuple[int, ...] = (14, 17)
 DAILY_DRAFTS_PER_DAY = 2
+METRIC_AGE_BUCKETS: tuple[int, ...] = (1, 3, 7, 28)
 MAX_IDEA_COUNT = 12
 
 
@@ -221,6 +224,9 @@ class SocialIdea:
     source: str = "manual"
     suggested_at: datetime | None = None
     post_ids: tuple[str, ...] = ()
+    published_url: str = ""
+    published_at: datetime | None = None
+    x_post_id: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -256,3 +262,20 @@ class AnalysisOutcome:
 
     analysis: SocialAnalysis | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class PostMetrics:
+    """One published X post's public metrics at ``age_bucket`` days old."""
+
+    workspace_id: str
+    idea_id: str
+    x_post_id: str
+    age_bucket: int
+    impressions: int = 0
+    likes: int = 0
+    replies: int = 0
+    reposts: int = 0
+    quotes: int = 0
+    bookmarks: int = 0
+    captured_at: datetime | None = None

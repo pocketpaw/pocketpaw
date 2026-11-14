@@ -25,8 +25,8 @@
 # Daily caps. ``try_spend`` / ``refund`` / ``used`` over the single
 # ``DailyUsage`` collection, plus the per-meter cap resolvers, for every daily
 # budget (turn, upload, comprehension, transcription, illustration, guest
-# turn). One rule: ``None`` = uncapped, ``0`` = disabled, ``n > 0`` = cap; each
-# resolver maps its legacy env var onto it. See "DAILY CAPS" below.
+# turn, Growth X read). One rule: ``None`` = uncapped, ``0`` = disabled,
+# ``n > 0`` = cap; each resolver maps its legacy env var onto it. See "DAILY CAPS" below.
 #
 # Early-access ceiling. ``reserve_early_access`` claims a free run's estimate on
 # ``DailyMeter.EARLY_ACCESS_CREDITS`` for the one platform subject
@@ -542,6 +542,12 @@ def illustration_cap() -> int | None:
     return _env_cap("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", 20, zero_means_uncapped=False)
 
 
+def growth_x_read_cap() -> int | None:
+    """X API reads per workspace per UTC day for Growth › Social post metrics
+    (``POCKETPAW_GROWTH_X_DAILY_READ_CAP``, default 100). ``0`` disables."""
+    return _env_cap("POCKETPAW_GROWTH_X_DAILY_READ_CAP", 100, zero_means_uncapped=False)
+
+
 def today() -> str:
     """The UTC day a claim made right now is charged to. Public because a caller
     holding a claim across requests (multipart uploads) must persist the day it
@@ -769,6 +775,7 @@ __all__ = [
     "early_access_credits_used_today",
     "file_comprehension_cap",
     "file_transcription_cap",
+    "growth_x_read_cap",
     "illustration_cap",
     "load_rate_card",
     "refund",

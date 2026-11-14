@@ -1,16 +1,18 @@
 # ee/pocketpaw_ee/cloud/growth/worker.py — arq worker for the dedicated
 # ``growth`` queue.
 #
-# One job and five crons. ``growth.dispatch`` delivers a draft whose
+# One job and six crons. ``growth.dispatch`` delivers a draft whose
 # ``_growth_send`` proposal a human approved (the approval is the only producer
 # of the job): email through ``email_dispatch``, WhatsApp through ``whatsapp``
 # (hard opt-in guard and hourly cap), LinkedIn stays manual and only logs. The
 # crons, all ``unique=True`` so a scaled fleet runs each tick once, in UTC:
 # 05:00 the Pulse refresh, 05:30 the Growth › Social daily X drafts (drafts
 # only, never posts), 06:00 discovery, 06:30 the daily copy of each product
-# repo's stars and traffic, 13:00 the follow-up sweep (proposes, never sends).
-# The worker process never runs ``cloud.__init__``'s wiring, so the Pulse,
-# daily-drafts and repo-metrics jobs install their production fns when missing.
+# repo's stars and traffic, 07:00 the Growth › Social post metrics (reads
+# Postiz and X, never writes to X), 13:00 the follow-up sweep (proposes, never
+# sends). The worker process never runs ``cloud.__init__``'s wiring, so the
+# Pulse, daily-drafts, repo-metrics and post-metrics jobs install their
+# production fns when missing.
 #
 # Growth gets its OWN queue and worker process so a burst of outbound work can
 # never starve interactive chat runs. Enqueue with
@@ -48,6 +50,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     GROWTH_QUEUE_NAME,
     GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
     GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
+    GROWTH_SOCIAL_POST_METRICS_JOB_NAME,
 )
 from pocketpaw_ee.cloud.growth.followups import (
     GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
@@ -93,6 +96,16 @@ async def social_repo_metrics(ctx: dict[str, Any]) -> dict[str, int]:
     if repo_metrics.resolve_repo_metrics_fn() is None:
         repo_metrics.set_production_repo_metrics_fn(repo_metrics.github_repo_metrics)
     return await run_repo_metrics()
+async def social_post_metrics(ctx: dict[str, Any]) -> dict[str, int]:
+    """Record published X posts and snapshot their metrics. Reads only, never posts.
+
+    Installs the production metrics fn when missing, like ``pulse_sweep``."""
+    from pocketpaw_ee.cloud.growth.social import metrics
+    from pocketpaw_ee.cloud.growth.social.service import run_post_metrics
+
+    if metrics.resolve_metrics_fn() is None:
+        metrics.set_production_metrics_fn(metrics.x_post_metrics)
+    return await run_post_metrics()
 
 
 logger = logging.getLogger(__name__)
@@ -274,6 +287,15 @@ class WorkerSettings:
             name=GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
             hour=6,
             minute=30,
+            unique=True,
+            run_at_startup=False,
+        ),
+        # Post metrics at 07:00 UTC: record what got published, snapshot X metrics (reads only).
+        cron(
+            social_post_metrics,
+            name=GROWTH_SOCIAL_POST_METRICS_JOB_NAME,
+            hour=7,
+            minute=0,
             unique=True,
             run_at_startup=False,
         ),
