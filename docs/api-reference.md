@@ -10421,6 +10421,9 @@ stored with `status: "new"` and returned as `{items}`:
       "published_url": "",
       "published_at": null,
       "x_post_id": "",
+      "pillar": "build in public",
+      "hook_type": "question",
+      "experiment_id": "",
       "created_at": "2026-10-06T10:05:00+00:00",
       "updated_at": "2026-10-06T10:05:00+00:00"
     }
