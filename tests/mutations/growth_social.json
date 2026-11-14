@@ -304,5 +304,50 @@
     "tests": [
       "tests/cloud/growth/social/test_metrics.py"
     ]
+  },
+  {
+    "label": "repo metrics: the read drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "{\"workspace\": workspace_id, \"repo\": repo, \"day\": {\"$gte\": since.isoformat()}}",
+    "replace": "{\"repo\": repo, \"day\": {\"$gte\": since.isoformat()}}",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: the sweep reads inactive profiles too",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "await _ProfileDoc.find({\"active\": True}).to_list()",
+    "replace": "await _ProfileDoc.find({}).to_list()",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: the sweep stores today's partial day, not yesterday",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "day = (now - timedelta(days=1)).date().isoformat()",
+    "replace": "day = now.date().isoformat()",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: traffic picks the first entry up to the day, not that day's",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/repo_metrics.py",
+    "find": "str(row.get(\"timestamp\") or \"\")[:10] == day",
+    "replace": "str(row.get(\"timestamp\") or \"\")[:10] <= day",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: a traffic 403 fails the repo instead of keeping stars",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/repo_metrics.py",
+    "find": "except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:",
+    "replace": "except (ValueError, TypeError, AttributeError) as exc:",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
   }
 ]
