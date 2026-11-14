@@ -484,5 +484,32 @@
     "tests": [
       "tests/cloud/growth/social/test_links.py"
     ]
+  },
+  {
+    "label": "tenancy: the metrics summary drops its workspace filter on ideas",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    summary_query = {\"workspace\": workspace_id, \"profile\": str(doc.id), \"platform\": \"x\"}",
+    "replace": "    summary_query = {\"profile\": str(doc.id), \"platform\": \"x\"}",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics_summary.py"
+    ]
+  },
+  {
+    "label": "metrics summary: the yesterday window starts a day early",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    yesterday_start = today_start - timedelta(days=1)",
+    "replace": "    yesterday_start = today_start - timedelta(days=2)",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics_summary.py"
+    ]
+  },
+  {
+    "label": "metrics summary: the yesterday window includes today's midnight",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    published = {\"$gte\": yesterday_start, \"$lt\": today_start}",
+    "replace": "    published = {\"$gte\": yesterday_start, \"$lte\": today_start}",
+    "tests": [
+      "tests/cloud/growth/social/test_metrics_summary.py"
+    ]
   }
 ]

@@ -9,7 +9,8 @@
 # ``POST /ideas/daily`` runs the daily X drafting for one product on demand
 # (the same code the growth worker's morning cron runs); it only drafts.
 # ``/replies`` lists reply cards, ``PATCH /replies/{id}`` edits one or records what
-# was done with it, and ``POST /replies/draft`` drafts them now; nothing posts. The
+# was done with it, and ``POST /replies/draft`` drafts them now; nothing posts.
+# ``GET /metrics/summary`` is the Today strip's pure read of stored metrics. The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
@@ -37,6 +38,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     MakeMediaRequest,
     MakeMemeRequest,
     MemeFormatListResponse,
+    MetricsSummaryResponse,
     RefreshPulseRequest,
     ReplyDraftListResponse,
     ReplyDraftResponse,
@@ -469,6 +471,18 @@ async def list_posts(
 ) -> SocialPostListResponse:
     """Posts from the last 7 days, newest first; ``ids`` narrows to those post ids."""
     return await social_service.list_posts(ctx, profile_id, ids)
+
+
+@router.get(
+    "/metrics/summary",
+    response_model=MetricsSummaryResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def metrics_summary(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> MetricsSummaryResponse:
+    """The Today strip: yesterday's X posts with their numbers, and the repos' last 14 days."""
+    return await social_service.metrics_summary(ctx, profile_id)
 
 
 @router.get(

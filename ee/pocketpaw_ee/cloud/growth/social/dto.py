@@ -440,6 +440,40 @@ class MemeFormatListResponse(BaseModel):
     items: list[MemeFormatResponse]
 
 
+class MetricsPostResponse(BaseModel):
+    """One X post published yesterday, with its latest snapshot and tracked-link clicks."""
+
+    idea_id: str
+    hook: str
+    published_url: str
+    published_at: datetime
+    impressions: int = 0
+    likes: int = 0
+    replies: int = 0
+    reposts: int = 0
+    clicks: int = 0
+
+
+class RepoStarsPointResponse(BaseModel):
+    day: str
+    stars: int
+
+
+class MetricsRepoResponse(BaseModel):
+    repo: str
+    traffic_available: bool = False
+    uniques_week: int = 0
+    stars_week_delta: int = 0
+    stars: list[RepoStarsPointResponse] = Field(default_factory=list)
+
+
+class MetricsSummaryResponse(BaseModel):
+    """The Today page's morning strip: yesterday's posts and the profile's repos."""
+
+    posts: list[MetricsPostResponse] = Field(default_factory=list)
+    repos: list[MetricsRepoResponse] = Field(default_factory=list)
+
+
 class PulseSourceModel(BaseModel):
     platform: Literal["reddit", "x"]
     kind: Literal["subreddit", "search"]

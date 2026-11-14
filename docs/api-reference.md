@@ -10235,6 +10235,7 @@ route `growth.write` (MEMBER).
 | `GET /api/v1/growth/social/replies` | One product's reply cards (`?profile_id=`, optional `status=new\|posted\|skipped`), newest first (below). |
 | `POST /api/v1/growth/social/replies/draft` | Draft this product's reply cards now (below). Never posts. |
 | `PATCH /api/v1/growth/social/replies/{reply_id}` | Edit a card's `draft_text` and/or set its `status` (below). |
+| `GET /api/v1/growth/social/metrics/summary` | The Today strip: yesterday's X posts with their latest numbers and clicks, and each repo's last 14 days (below). |
 | `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`, `platform=x\|reddit` and `source=manual\|daily`; omitted returns every idea. Any other value is a 422. Ideas stored before `source` existed count as `manual`. |
 | `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). `media_choice` (`poster` or `reel`) picks which media goes with the post when it has both. |
 | `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
@@ -10495,8 +10496,8 @@ repo and day in `growth_social_repo_metrics`:
 Each repo is read once per run. A rerun on the same day refreshes that day's row
 instead of adding one. If the rerun cannot read traffic, the traffic an earlier run
 stored is kept. A repo that cannot be read is skipped (no row) and the
-others still run. There is no route yet; the rows feed the Today strip and the
-weekly review later.
+others still run. `GET /growth/social/metrics/summary` (below) reads them for the
+Today strip.
 
 #### Post metrics (07:00 UTC cron)
 
@@ -10520,6 +10521,31 @@ per batch. `POCKETPAW_GROWTH_X_DAILY_READ_CAP` (default `100`, `0` disables) cap
 those reads per workspace per UTC day on the `growth_x_reads` daily meter; at
 the cap the remaining posts wait for the next run. One failing workspace never
 stops the others.
+
+#### Morning summary: `GET /api/v1/growth/social/metrics/summary`
+
+`growth.read`, `?profile_id=` (omitted = the most recently updated profile). The
+Today page's morning strip. A pure read of what the two crons above stored: no
+writes, no X or GitHub calls. No profile returns `{posts: [], repos: []}`.
+
+```json
+{
+  "posts": [{"idea_id", "hook", "published_url", "published_at",
+             "impressions", "likes", "replies", "reposts", "clicks"}],
+  "repos": [{"repo", "traffic_available", "uniques_week", "stars_week_delta",
+             "stars": [{"day", "stars"}]}]
+}
+```
+
+- `posts`: the profile's X ideas whose `published_at` falls on yesterday's UTC
+  date, oldest first. The counts come from the idea's most recent metric
+  snapshot, 0 when it has none yet. `clicks` is the total over the idea's
+  tracked links.
+- `repos`: one entry per valid `github_repos` slug, in profile order. `stars` is
+  the stored rows of the last 14 days, oldest first. `stars_week_delta` is the
+  latest row's stars minus the row 7 days before it, 0 when that row is missing.
+  `uniques_week` sums `uniques` over the last 7 days. `traffic_available` is the
+  latest row's flag, false with no rows.
 
 ### Reply cards — `/api/v1/growth/social/replies`
 
