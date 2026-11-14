@@ -36,6 +36,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     AnalysisStatus,
     BusinessModel,
     IdeaFormat,
+    IdeaSource,
     IdeaStatus,
     MonthlyRevenue,
     Platform,
@@ -287,6 +288,8 @@ class SocialIdeaResponse(BaseModel):
     poster_svg: str
     reel_html: str
     media_choice: Literal["", "poster", "reel"]
+    source: IdeaSource
+    suggested_at: str | None
     created_at: str | None
     updated_at: str | None
 

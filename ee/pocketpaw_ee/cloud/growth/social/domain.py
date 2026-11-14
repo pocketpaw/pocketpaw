@@ -13,6 +13,9 @@
 # ``VIDEO_PLATFORMS`` accept video. Media must sit at a public http(s) URL
 # (``is_public_media_url``): Slack fetches it itself and Postiz's X provider
 # refuses private hosts. ``MEDIA_EXTENSIONS`` is the upload allowlist.
+# ``DAILY_SLOT_HOURS_UTC`` and ``DAILY_DRAFTS_PER_DAY`` shape the daily X
+# drafting sweep; an idea's ``source`` says whether a person or that sweep
+# asked for it.
 
 from __future__ import annotations
 
@@ -48,6 +51,7 @@ IdeaFormat = Literal[
 ]
 Platform = Literal["x", "reddit"]
 IdeaStatus = Literal["new", "approved", "skipped"]
+IdeaSource = Literal["manual", "daily"]
 
 IDEA_FORMATS: tuple[str, ...] = get_args(IdeaFormat)
 PLATFORMS: tuple[str, ...] = get_args(Platform)
@@ -131,6 +135,10 @@ def is_public_media_url(url: str) -> bool:
 
 
 DEFAULT_IDEA_COUNT = 6
+# The daily X drafts: at most this many a day per profile, each suggested for the next
+# unused one of these UTC hours (rolling to tomorrow once today's has passed).
+DAILY_SLOT_HOURS_UTC: tuple[int, ...] = (14, 17)
+DAILY_DRAFTS_PER_DAY = 2
 MAX_IDEA_COUNT = 12
 
 
@@ -210,6 +218,8 @@ class SocialIdea:
     poster_svg: str = ""
     reel_html: str = ""
     media_choice: str = ""
+    source: str = "manual"
+    suggested_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
