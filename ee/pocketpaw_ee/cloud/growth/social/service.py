@@ -45,7 +45,8 @@
 # profile's valid ``github_repos``, reading each repo once per run. A rerun the same
 # day refreshes that day's row in place, never a second row, and keeps traffic
 # an earlier run stored when its own traffic read failed. ``repo_metrics`` reads
-# one workspace's rows back.
+# one workspace's rows back. ``metrics_summary`` (the Today strip) is a pure read of
+# yesterday's X posts with their latest snapshot and clicks, plus 14 days per repo.
 #
 # Accounts: each profile's social accounts live in its own Postiz org, created
 # on the first connect and never on a read. Its API key is stored encrypted, and
@@ -147,11 +148,15 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     MakeMemeRequest,
     MemeFormatListResponse,
     MemeFormatResponse,
+    MetricsPostResponse,
+    MetricsRepoResponse,
+    MetricsSummaryResponse,
     PulseSourceModel,
     PulseThemeResponse,
     RefreshPulseRequest,
     ReplyDraftListResponse,
     ReplyDraftResponse,
+    RepoStarsPointResponse,
     ScheduleIdeasRequest,
     SocialAccountListResponse,
     SocialAccountPlatformResponse,
@@ -955,6 +960,74 @@ async def repo_metrics(workspace_id: str, repo: str, since: date) -> list[RepoSn
         )
         for d in docs
     ]
+
+
+SUMMARY_REPO_DAYS = 14
+
+
+def _repo_summary(repo: str, rows: list[RepoSnapshot], today: date) -> MetricsRepoResponse:
+    if not rows:
+        return MetricsRepoResponse(repo=repo)
+    latest = rows[-1]
+    week_ago = (date.fromisoformat(latest.day) - timedelta(days=7)).isoformat()
+    base = next((r for r in rows if r.day == week_ago), None)
+    week_start = (today - timedelta(days=7)).isoformat()
+    return MetricsRepoResponse(
+        repo=repo,
+        traffic_available=latest.traffic_available,
+        uniques_week=sum(r.uniques for r in rows if r.day >= week_start),
+        stars_week_delta=latest.stars - base.stars if base is not None else 0,
+        stars=[RepoStarsPointResponse(day=r.day, stars=r.stars) for r in rows],
+    )
+
+
+async def metrics_summary(
+    ctx: RequestContext, profile_id: str | None = None, now: datetime | None = None
+) -> MetricsSummaryResponse:
+    """The Today strip: the profile's X posts published yesterday (UTC) with their latest
+    snapshot and tracked-link clicks, and its repos' last 14 days. A pure read."""
+    workspace_id = _require_workspace(ctx)
+    doc = await _profile_doc(workspace_id, profile_id)
+    if doc is None:
+        return MetricsSummaryResponse()
+    today_start = _day_start(_aware(now or datetime.now(UTC)).astimezone(UTC))
+    yesterday_start = today_start - timedelta(days=1)
+    summary_query = {"workspace": workspace_id, "profile": str(doc.id), "platform": "x"}
+    published = {"$gte": yesterday_start, "$lt": today_start}
+    ideas = (
+        await _IdeaDoc.find({**summary_query, "published_at": published})
+        .sort("published_at", "_id")
+        .to_list()
+    )
+    ids = [str(d.id) for d in ideas]
+    snaps = await latest_metrics(workspace_id, ids)
+    clicks = await link_clicks(workspace_id, ids)
+    posts = []
+    for d in ideas:
+        if d.published_at is None:  # excluded by the query; narrows the type
+            continue
+        m = snaps.get(str(d.id))
+        posts.append(
+            MetricsPostResponse(
+                idea_id=str(d.id),
+                hook=d.hook,
+                published_url=d.published_url,
+                published_at=_aware(d.published_at),
+                impressions=m.impressions if m else 0,
+                likes=m.likes if m else 0,
+                replies=m.replies if m else 0,
+                reposts=m.reposts if m else 0,
+                clicks=clicks.get(str(d.id), 0),
+            )
+        )
+    today = today_start.date()
+    since = today - timedelta(days=SUMMARY_REPO_DAYS)
+    repos = [
+        _repo_summary(repo, await repo_metrics(workspace_id, repo, since), today)
+        for repo in doc.github_repos or ()
+        if is_repo_slug(repo)
+    ]
+    return MetricsSummaryResponse(posts=posts, repos=repos)
 
 
 async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> SocialIdeaListResponse:
@@ -2685,6 +2758,7 @@ __all__ = [
     "run_daily_drafts",
     "run_repo_metrics",
     "repo_metrics",
+    "metrics_summary",
     "get_profile",
     "list_ideas",
     "update_idea",
