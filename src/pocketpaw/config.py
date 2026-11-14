@@ -2644,6 +2644,15 @@ class Settings(BaseSettings):
             "Set via POCKETPAW_POSTIZ_TELEGRAM_BOT_NAME."
         ),
     )
+    growth_link_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Prefix of Growth › Social tracked links: a link is <base>/<code>, so the base "
+            "must reach GET /api/v1/go/{code} (e.g. https://api.example.com/api/v1/go, or a "
+            "short host proxied there). Unset uses POCKETPAW_PUBLIC_BASE_URL + /api/v1/go. "
+            "Set via POCKETPAW_GROWTH_LINK_BASE_URL."
+        ),
+    )
 
     # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
     # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).

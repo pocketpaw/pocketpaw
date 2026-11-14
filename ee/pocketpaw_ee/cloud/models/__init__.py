@@ -341,6 +341,7 @@ from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea
+from pocketpaw_ee.cloud.models.social_link import SocialLink
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile
@@ -780,6 +781,9 @@ def get_all_documents():
         SocialPulse,
         SocialPostizOrg,
         SocialPostMetric,
+        # Tracked short links behind /api/v1/go/{code}; counts only, nothing
+        # about the requester. Same import boundary.
+        SocialLink,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
