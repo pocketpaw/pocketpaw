@@ -349,7 +349,12 @@ async def test_dry_run_changes_nothing(mongo_db):
     report = await _script().backfill(dry_run=True)
 
     assert report["w1"]["created"] and report["w1"]["profile_id"] is None
-    assert report["w1"]["counts"] == {"prospects": 1, "icps": 1, "drafts": 1}
+    assert report["w1"]["counts"] == {
+        "prospects": 1,
+        "icps": 1,
+        "drafts": 1,
+        "drafts_from_prospect": 0,
+    }
     assert await SocialProfile.find_all().count() == before
     assert await _brands_in("w1") == {None}
     assert await _brands_in("w2") == {None}
@@ -407,3 +412,55 @@ async def test_backfill_is_idempotent_and_leaves_branded_rows_alone(mongo_db):
     branded = await ProspectDoc.get_pymongo_collection().find_one({"domain": "branded.io"})
     assert branded["profile_id"] == other
     assert await SocialProfile.find({"workspace": "w1"}).count() == 2
+
+
+@pytest.mark.asyncio
+async def test_backfill_gives_a_draft_its_prospects_brand_first(mongo_db):
+    now = datetime.now(UTC)
+    oldest = await _brand("w1", "Oldest", now - timedelta(days=10))
+    prospect_brand = await _brand("w1", "Prospect's", now - timedelta(days=1))
+    branded = await ProspectDoc.get_pymongo_collection().insert_one(
+        {"workspace": "w1", "domain": "b.io", "source": "manual", "profile_id": prospect_brand}
+    )
+    bare = await ProspectDoc.get_pymongo_collection().insert_one(
+        {"workspace": "w1", "domain": "n.io", "source": "manual"}
+    )
+    drafts = DraftDoc.get_pymongo_collection()
+    for pid in (branded.inserted_id, bare.inserted_id):
+        await drafts.insert_one(
+            {"workspace": "w1", "prospect_id": str(pid), "channel": "email", "body": "b"}
+        )
+
+    module = _script()
+    dry = await module.backfill(dry_run=True)
+    assert dry["w1"]["counts"]["drafts_from_prospect"] == 1
+    assert await drafts.count_documents({"profile_id": None}) == 2
+
+    await module.backfill(dry_run=False)
+    by_prospect = {d["prospect_id"]: d["profile_id"] async for d in drafts.find({})}
+    assert by_prospect == {str(branded.inserted_id): prospect_brand, str(bare.inserted_id): oldest}
+
+
+@pytest.mark.asyncio
+async def test_backfill_never_takes_a_brand_from_another_workspaces_prospect(mongo_db):
+    brand = await _brand("w1", "Only")
+    pid = (
+        await ProspectDoc.get_pymongo_collection().insert_one(
+            {"workspace": "w1", "domain": "b.io", "source": "manual", "profile_id": brand}
+        )
+    ).inserted_id
+    # A w2 draft pointing at a w1 prospect must NOT take w1's brand.
+    await DraftDoc.get_pymongo_collection().insert_one(
+        {"workspace": "w2", "prospect_id": str(pid), "channel": "email", "body": "b"}
+    )
+    await _script().backfill(dry_run=False)
+    row = await DraftDoc.get_pymongo_collection().find_one({"workspace": "w2"})
+    assert row["profile_id"] not in (None, brand)
+
+
+def test_the_printed_uri_carries_no_credentials():
+    safe = _script()._safe_uri(
+        "mongodb://admin:s3cret@db.example:27017,db2:27017/paw-cloud?authSource=admin"
+    )
+    assert safe == "db.example:27017,db2:27017/paw-cloud"
+    assert "s3cret" not in safe and "admin" not in safe

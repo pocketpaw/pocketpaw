@@ -222,5 +222,12 @@
     "find": "                profile_id=icp.profile_id,  # the hunt's brand\n",
     "replace": "",
     "tests": "tests/cloud/growth/test_outreach_brand.py::test_pulse_add_as_prospects_files_under_the_hunts_brand"
+  },
+  {
+    "label": "backfill: an unbranded draft skips its prospect's brand and takes the workspace's oldest",
+    "file": "scripts/backfill_growth_profile_id.py",
+    "find": "        if brand:\n            out.setdefault(brand, []).append(d[\"_id\"])\n",
+    "replace": "",
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_backfill_gives_a_draft_its_prospects_brand_first"
   }
 ]

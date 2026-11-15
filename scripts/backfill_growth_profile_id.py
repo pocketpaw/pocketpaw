@@ -2,10 +2,12 @@
 
 Prospects, ICPs (hunts) and outreach drafts gained a nullable ``profile_id``
 (a Growth › Social ``SocialProfile`` id). Rows written before that carry none.
-For every workspace holding such rows, this script assigns the workspace's
-OLDEST profile (by ``createdAt``, ties on ``_id``), or creates one named after
-the workspace when it has none (``active`` stays off, so nothing starts
-drafting posts).
+For every workspace holding such rows: an unbranded draft first takes its
+prospect's brand; every row still unbranded then gets the workspace's OLDEST
+profile (by ``createdAt``, ties on ``_id``), or a new one named after the
+workspace when it has none (``active`` stays off, so nothing starts drafting
+posts). The Mongo URI is printed as host and database only, never with
+credentials.
 
 Safe by construction: it only ever matches rows whose ``profile_id`` is null
 or missing, so a branded row is never touched and a re-run changes nothing.
@@ -27,6 +29,7 @@ import asyncio
 import inspect
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 # Matches a missing field as well as an explicit null.
 _UNBRANDED: dict[str, Any] = {"profile_id": None}
@@ -44,6 +47,52 @@ async def _resolve(result: Any) -> Any:
     # The async PyMongo driver returns coroutines; mongomock-motor sometimes
     # returns plain values. Same idiom as growth.service's facet aggregate.
     return await result if inspect.isawaitable(result) else result
+
+
+def _safe_uri(uri: str) -> str:
+    """Host(s) and database name only: no user, password or query string."""
+    parts = urlsplit(uri)
+    hosts = parts.netloc.rsplit("@", 1)[-1]
+    db = parts.path.lstrip("/") or "(default)"
+    return f"{hosts}/{db}"
+
+
+async def _drafts_by_prospect_brand(workspace_id: str) -> dict[str, list[Any]]:
+    """Unbranded drafts whose prospect HAS a brand: ``{brand: [draft _id]}``.
+    Both reads are scoped to the one workspace."""
+    from beanie import PydanticObjectId
+
+    cols = _collections()
+    drafts = (
+        await cols["drafts"]
+        .get_pymongo_collection()
+        .find({"workspace": workspace_id, **_UNBRANDED}, {"prospect_id": 1})
+        .to_list(None)
+    )
+    oids = []
+    for d in drafts:
+        try:
+            oids.append(PydanticObjectId(d.get("prospect_id")))
+        except Exception:  # noqa: BLE001 — a malformed ref falls back to the workspace brand
+            continue
+    brand_of: dict[str, str] = {}
+    if oids:
+        cursor = (
+            cols["prospects"]
+            .get_pymongo_collection()
+            .find(
+                {"workspace": workspace_id, "_id": {"$in": oids}, "profile_id": {"$ne": None}},
+                {"profile_id": 1},
+            )
+        )
+        for row in await cursor.to_list(None):
+            brand_of[str(row["_id"])] = row["profile_id"]
+    out: dict[str, list[Any]] = {}
+    for d in drafts:
+        brand = brand_of.get(str(d.get("prospect_id")))
+        if brand:
+            out.setdefault(brand, []).append(d["_id"])
+    return out
 
 
 async def _oldest_profile_id(workspace_id: str) -> str | None:
@@ -91,6 +140,29 @@ async def backfill(*, dry_run: bool) -> dict[str, Any]:
             name: await _resolve(model.get_pymongo_collection().count_documents(scoped))
             for name, model in cols.items()
         }
+        # Drafts first take their prospect's brand.
+        inherited = await _drafts_by_prospect_brand(workspace_id)
+        counts["drafts_from_prospect"] = sum(len(ids) for ids in inherited.values())
+        if not dry_run:
+            for brand, ids in inherited.items():
+                await _resolve(
+                    cols["drafts"]
+                    .get_pymongo_collection()
+                    .update_many(
+                        {"workspace": workspace_id, "_id": {"$in": ids}, **_UNBRANDED},
+                        {"$set": {"profile_id": brand}},
+                    )
+                )
+        if (
+            not counts["prospects"]
+            and not counts["icps"]
+            and counts["drafts_from_prospect"] == counts["drafts"]
+        ):
+            # Every unbranded row was a draft whose prospect had a brand: no
+            # workspace brand is needed, so none is resolved or created.
+            print(f"workspace={workspace_id} {counts} -> drafts took their prospect's brand")
+            report[workspace_id] = {"profile_id": None, "created": False, "counts": counts}
+            continue
         profile_id = await _oldest_profile_id(workspace_id)
         created = profile_id is None
         name = await _workspace_name(workspace_id) if created else None
@@ -127,7 +199,7 @@ async def main() -> int:
     args = parser.parse_args()
 
     uri = os.environ.get("POCKETPAW_CLOUD_MONGO_URI", "mongodb://localhost:27017/paw-cloud")
-    print(f"Connecting to: {uri}")
+    print(f"Connecting to: {_safe_uri(uri)}")
 
     from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
