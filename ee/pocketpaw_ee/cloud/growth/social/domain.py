@@ -227,6 +227,7 @@ class SocialProfile:
     reply_watch_handles: tuple[str, ...] = ()
     reply_queries: tuple[str, ...] = ()
     reply_cards_per_day: int = REPLY_CARDS_PER_DAY_DEFAULT
+    archived_at: datetime | None = None
 
     def has_description(self) -> bool:
         return any((self.description.get(key) or "").strip() for key in DESCRIPTION_FIELDS)

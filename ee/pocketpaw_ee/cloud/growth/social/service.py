@@ -8,8 +8,13 @@
 # cross-tenant profile and idea ids raise the same NotFound so existence never
 # leaks. A workspace may hold several profiles (one per brand). Every profile
 # route takes an optional ``profile_id``; without one it acts on the most
-# recently updated profile, and ``upsert_profile`` creates the first. Ideas
-# belong to one profile.
+# recently updated unarchived profile, and ``upsert_profile`` creates the first.
+# Ideas belong to one profile. A brand can be renamed (``company_name``) or
+# archived: archiving stamps ``archived_at``, deletes the brand's posts still
+# queued in Postiz and unschedules its scheduled ideas through
+# ``unschedule_idea`` (a repeat retries both; failures are logged and skipped);
+# archived brands leave the list, the default pick
+# and every cron sweep, but a read by id still returns them.
 #
 # A PUT may carry a hand-edited ``analysis``: only the editable fields sent are
 # replaced (``pages_read`` / ``logo_url`` stay server-owned), ``analyzed_at`` is
@@ -167,6 +172,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     PulseSourceModel,
     PulseThemeResponse,
     RefreshPulseRequest,
+    RenameProfileRequest,
     ReplyDraftListResponse,
     ReplyDraftResponse,
     RepoStarsPointResponse,
@@ -309,6 +315,7 @@ def _profile_to_domain(doc: _ProfileDoc) -> SocialProfile:
         reply_watch_handles=tuple(doc.reply_watch_handles or ()),
         reply_queries=tuple(doc.reply_queries or ()),
         reply_cards_per_day=doc.reply_cards_per_day,
+        archived_at=doc.archived_at,
     )
 
 
@@ -342,6 +349,7 @@ def _profile_to_response(p: SocialProfile) -> SocialProfileResponse:
         reply_watch_handles=list(p.reply_watch_handles),
         reply_queries=list(p.reply_queries),
         reply_cards_per_day=p.reply_cards_per_day,
+        archived_at=iso_utc(p.archived_at),
     )
 
 
@@ -419,7 +427,7 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
 async def _profile_doc(workspace_id: str, profile_id: str | None = None) -> _ProfileDoc | None:
     if profile_id is None:
         docs = (
-            await _ProfileDoc.find({"workspace": workspace_id})
+            await _ProfileDoc.find({"workspace": workspace_id, "archived_at": None})
             .sort([("updatedAt", -1), ("_id", -1)])
             .limit(1)
             .to_list()
@@ -441,7 +449,7 @@ async def _require_profile_doc(workspace_id: str, profile_id: str | None = None)
 
 async def list_profiles(ctx: RequestContext) -> SocialProfileListResponse:
     docs = (
-        await _ProfileDoc.find({"workspace": _require_workspace(ctx)})
+        await _ProfileDoc.find({"workspace": _require_workspace(ctx), "archived_at": None})
         .sort([("createdAt", 1), ("_id", 1)])
         .limit(PROFILE_LIST_LIMIT)
         .to_list()
@@ -892,7 +900,7 @@ async def run_daily_drafts(now: datetime | None = None) -> dict[str, int]:
         return counts
     # global-read: the sweep runs for every workspace; each doc carries its own tenant.
     docs = await _ProfileDoc.find(
-        {"active": True, "onboarding_completed_at": {"$ne": None}}
+        {"active": True, "onboarding_completed_at": {"$ne": None}, "archived_at": None}
     ).to_list()
     counts["profiles"] = len(docs)
     for doc in docs:
@@ -960,7 +968,7 @@ async def run_repo_metrics(now: datetime | None = None) -> dict[str, int]:
         return counts
     day = (now - timedelta(days=1)).date().isoformat()
     # global-read: the sweep runs for every workspace; each doc carries its own tenant.
-    docs = await _ProfileDoc.find({"active": True}).to_list()
+    docs = await _ProfileDoc.find({"active": True, "archived_at": None}).to_list()
     pairs: set[tuple[str, str]] = set()
     for doc in docs:
         for repo in doc.github_repos or ():
@@ -1742,6 +1750,7 @@ async def run_reply_drafts(now: datetime | None = None) -> dict[str, int]:
         {
             "active": True,
             "onboarding_completed_at": {"$ne": None},
+            "archived_at": None,
             "$or": [
                 {"reply_watch_handles.0": {"$exists": True}},
                 {"reply_queries.0": {"$exists": True}},
@@ -2274,7 +2283,7 @@ async def refresh_due_pulses(now: datetime | None = None) -> dict[str, int]:
 
     now = now or datetime.now(UTC)
     if social_pulse.resolve_pulse_fn() is None:
-        return {"due": 0, "refreshed": 0, "failed": 0}
+        return {"due": 0, "refreshed": 0, "failed": 0, "skipped": 0}
     # global-read: the sweep runs for every workspace; each doc carries its own tenant.
     docs = await _PulseDoc.find(
         {
@@ -2282,7 +2291,7 @@ async def refresh_due_pulses(now: datetime | None = None) -> dict[str, int]:
             "refreshed_at": {"$lte": now - timedelta(hours=PULSE_STALE_HOURS)},
         }
     ).to_list()
-    refreshed = failed = 0
+    refreshed = failed = skipped = 0
     for doc in docs:
         try:
             if doc.profile.startswith("icp:"):
@@ -2290,14 +2299,23 @@ async def refresh_due_pulses(now: datetime | None = None) -> dict[str, int]:
                 brief = _icp_brief(doc.workspace, icp)
             else:
                 profile = await _require_profile_doc(doc.workspace, doc.profile)
+                if profile.archived_at is not None:
+                    skipped += 1
+                    continue
                 brief = social_pulse.social_brief(_profile_to_domain(profile))
             await _rebuild_pulse(doc, brief, _pulse_sources(None, doc), manual=False)
             refreshed += 1
         except Exception:  # noqa: BLE001
             failed += 1
             logger.warning("pulse sweep: %s failed", doc.profile, exc_info=True)
-    logger.info("pulse sweep: due=%d refreshed=%d failed=%d", len(docs), refreshed, failed)
-    return {"due": len(docs), "refreshed": refreshed, "failed": failed}
+    logger.info(
+        "pulse sweep: due=%d refreshed=%d failed=%d skipped=%d",
+        len(docs),
+        refreshed,
+        failed,
+        skipped,
+    )
+    return {"due": len(docs), "refreshed": refreshed, "failed": failed, "skipped": skipped}
 
 
 async def use_pulse_suggestion(
@@ -2428,6 +2446,91 @@ async def unschedule_idea(ctx: RequestContext, idea_id: str) -> SocialIdeaRespon
     await doc.save()
     # no-event: Growth › Social has no realtime subscriber; /calendar dropped its event.
     return _idea_to_response(_idea_to_domain(doc))
+
+
+async def rename_profile(
+    ctx: RequestContext, profile_id: str | None, body: RenameProfileRequest
+) -> SocialProfileResponse:
+    """Set the brand's display name (``company_name``). 404 when there is no profile."""
+    body = RenameProfileRequest.model_validate(body)
+    doc = await _require_profile_doc(_require_workspace(ctx), profile_id)
+    doc.company_name = body.name
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; the brand switcher re-fetches.
+    return _profile_to_response(_profile_to_domain(doc))
+
+
+# ponytail: a fixed window, since a post may be scheduled any time ahead; widen it
+# (or page by date) if brands schedule further out than a year.
+ARCHIVE_POSTS_LOOKAHEAD = timedelta(days=366)
+
+
+def _err_code(exc: Exception) -> str:
+    return exc.code if isinstance(exc, PostizError) else type(exc).__name__
+
+
+async def _delete_queued_posts(workspace_id: str, profile: str) -> None:
+    """Delete the brand's posts still queued in Postiz (state ``QUEUE``); published,
+    errored and draft posts stay. One delete per Postiz group, since a delete removes
+    the whole group. Every failure is logged by code and skipped."""
+    postiz = resolve_postiz()
+    org = await _postiz_org(workspace_id, profile) if postiz else None
+    if postiz is None or org is None:
+        return
+    now = datetime.now(UTC)
+    try:
+        api_key = decrypt(org.api_key_enc)
+        raw = await postiz.list_posts(
+            api_key,
+            (now - POSTS_LOOKBACK).isoformat(),
+            (now + ARCHIVE_POSTS_LOOKAHEAD).isoformat(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("brand archive: postiz posts not listed (%s)", _err_code(exc))
+        return
+    groups: set[str] = set()
+    for post in raw:
+        post_id, group = str(post.get("id") or ""), str(post.get("group") or "")
+        if not post_id or post.get("deletedAt") or post.get("state") != "QUEUE":
+            continue
+        if group and group in groups:
+            continue
+        try:
+            await postiz.delete_post(api_key, post_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "brand archive: postiz post %s not deleted (%s)", post_id, _err_code(exc)
+            )
+            continue
+        groups.add(group)
+
+
+async def archive_profile(ctx: RequestContext, profile_id: str) -> SocialProfileResponse:
+    """Archive a brand: stamp ``archived_at`` (the first stamp is kept), delete its
+    posts still queued in Postiz, then unschedule every scheduled, unpublished idea of
+    it through ``unschedule_idea``. A repeat re-runs both clean-ups, and one failure
+    never stops the rest. Outreach is untouched."""
+    workspace_id = _require_workspace(ctx)
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    if doc.archived_at is None:
+        doc.archived_at = datetime.now(UTC)
+        await doc.save()
+    await _delete_queued_posts(workspace_id, str(doc.id))
+    scheduled = await _IdeaDoc.find(
+        {
+            "workspace": workspace_id,
+            "profile": str(doc.id),
+            "scheduled_at": {"$ne": None},
+            "published_at": None,
+        }
+    ).to_list()
+    for idea in scheduled:
+        try:
+            await unschedule_idea(ctx, str(idea.id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("brand archive: idea %s not unscheduled (%s)", idea.id, _err_code(exc))
+    # no-event: Growth › Social has no realtime subscriber; the brand switcher re-fetches.
+    return _profile_to_response(_profile_to_domain(doc))
 
 
 # ---------------------------------------------------------------------------

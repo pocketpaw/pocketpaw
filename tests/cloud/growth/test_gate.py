@@ -1013,6 +1013,8 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/profiles"): "growth.write",
             ("GET", "/growth/social/profile"): "growth.read",
             ("PUT", "/growth/social/profile"): "growth.write",
+            ("PATCH", "/growth/social/profile"): "growth.manage",
+            ("POST", "/growth/social/profile/archive"): "growth.manage",
             ("POST", "/growth/social/profile/analyze"): "growth.write",
             ("POST", "/growth/social/profile/complete"): "growth.write",
             ("POST", "/growth/social/ideas/generate"): "growth.write",

@@ -10240,13 +10240,15 @@ The stored preview only ever describes the criteria it ran against:
 The setup wizard, website analysis and post ideas behind `/growth` › Social.
 A workspace can hold several profiles, one per brand it posts for. Every
 `/profile…` and `/ideas` route takes an optional `?profile_id=`; without it
-the route acts on the most recently updated profile, and the first `PUT`
-creates one. Ideas belong to one profile. Nothing is posted yet: scheduling
+the route acts on the most recently updated unarchived profile, and the first
+`PUT` creates one. An archived brand leaves `GET /profiles`, the default pick
+and every cron sweep (daily drafts, reply cards, repo metrics, Pulse), but
+`GET /profile?profile_id=` still returns it, with `archived_at` set. Ideas belong to one profile. Nothing is posted yet: scheduling
 only dates ideas on `/calendar`, and the only thing that reaches an outside
 platform is connecting a social account (see Accounts below). Every route is
 license-gated and workspace-scoped; reads need `growth.read` (MEMBER), the
-account connect and disconnect routes `growth.manage` (ADMIN), every other
-route `growth.write` (MEMBER).
+account connect and disconnect routes and the brand rename and archive routes
+`growth.manage` (ADMIN), every other route `growth.write` (MEMBER).
 
 | Route | What it does |
 |---|---|
@@ -10254,6 +10256,8 @@ route `growth.write` (MEMBER).
 | `POST /api/v1/growth/social/profiles` | Start a new, empty profile for another brand. |
 | `GET /api/v1/growth/social/profile` | One profile (`?profile_id=`). `404 social_profile.not_found` until the first `PUT`. |
 | `PUT /api/v1/growth/social/profile` | Partial upsert of the typed fields and, optionally, a hand-edited `analysis` (below). |
+| `PATCH /api/v1/growth/social/profile` | Rename a brand (`?profile_id=`): `{name}` (trimmed, 1–120 characters) becomes `company_name`. `404` with no profile, `422` on an empty or over-long name. |
+| `POST /api/v1/growth/social/profile/archive` | Archive a brand (`?profile_id=` required): stamps `archived_at` (the first stamp is kept), deletes the brand's posts still queued in Postiz (`state: QUEUE`, publishing up to a year ahead; published, errored and draft posts stay) through `DELETE /public/v1/posts/{id}`, then unschedules every scheduled, unpublished idea of it the way `/ideas/{idea_id}/unschedule` does (date cleared, calendar event deleted, status unchanged). A repeat re-runs both clean-ups; a failure is logged and the rest still run. Outreach drafts are untouched. Returns the profile. |
 | `POST /api/v1/growth/social/profile/analyze` | Read the website and run the analyst, in the request (below). |
 | `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
 | `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
