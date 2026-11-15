@@ -32,7 +32,8 @@
 # (``RenameProfileRequest``) needs a trimmed, non-empty name of at most 120
 # characters, the same cap as ``company_name``. A blueprint draft save replaces
 # only the sections sent and refuses status, version and approval keys; pillar
-# names, channels and goal ids are unique within the draft.
+# names, channels and goal ids are unique within the draft. A setup skip names one
+# of the ``SetupKey`` rows (anything else is a 422).
 
 from __future__ import annotations
 
@@ -79,6 +80,8 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MonthlyRevenue,
     Platform,
     ReplyStatus,
+    SetupKey,
+    SetupState,
     SocialRole,
     TeamSize,
     clean_tag,
@@ -304,6 +307,7 @@ class SocialProfileResponse(BaseModel):
     reply_queries: list[str]
     reply_cards_per_day: int
     archived_at: str | None = None
+    setup_skipped: list[str] = Field(default_factory=list)
 
 
 class RenameProfileRequest(BaseModel):
@@ -1056,3 +1060,21 @@ class BlueprintDiffResponse(BaseModel):
     from_version: int
     to_version: int
     sections: dict[str, BlueprintSectionDiff]
+
+
+class SetupStatusRow(BaseModel):
+    key: SetupKey
+    state: SetupState
+
+
+class SetupStatusResponse(BaseModel):
+    """The brand's "Set up" checklist, rows in ``SETUP_KEYS`` order."""
+
+    rows: list[SetupStatusRow]
+
+
+class SkipSetupRequest(BaseModel):
+    """Skip one checklist row, or un-skip it with ``skipped: false``."""
+
+    key: SetupKey
+    skipped: bool = True

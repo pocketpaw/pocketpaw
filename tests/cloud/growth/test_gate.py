@@ -1061,6 +1061,8 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/blueprint/seed"): "growth.manage",
             ("POST", "/growth/social/blueprint/regenerate"): "growth.manage",
             ("POST", "/growth/social/blueprint/approve"): "growth.manage",
+            ("GET", "/growth/social/setup-status"): "growth.read",
+            ("POST", "/growth/social/setup-status/skip"): "growth.write",
         }
 
         seen: dict[tuple[str, str], str] = {}

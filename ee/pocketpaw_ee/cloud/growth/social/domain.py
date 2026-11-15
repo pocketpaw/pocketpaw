@@ -25,7 +25,7 @@
 # ``ExperimentVariable`` on one ``ExperimentMetric``; ``GeneratedLearning`` is a
 # model-proposed rule before it is checked and stored.
 # ``GrowthBlueprint`` is one version of a profile's Brand Blueprint; its numbers are
-# never model-written.
+# never model-written. ``SETUP_KEYS`` are the "Set up" checklist rows in order.
 
 from __future__ import annotations
 
@@ -63,6 +63,10 @@ Platform = Literal["x", "reddit"]
 IdeaStatus = Literal["new", "approved", "skipped"]
 IdeaSource = Literal["manual", "daily"]
 ReplyStatus = Literal["new", "posted", "skipped"]
+# The "Set up" checklist rows, in display order, and each row's state.
+SetupKey = Literal["scan", "blueprint", "accounts", "repos", "daily_drafts"]
+SETUP_KEYS: tuple[str, ...] = get_args(SetupKey)
+SetupState = Literal["done", "todo", "skipped"]
 ExperimentVariable = Literal["format", "pillar", "hook_type"]
 ExperimentMetric = Literal["clicks_per_1k_views", "engagement_rate", "repo_uniques_week"]
 ExperimentVerdict = Literal["running", "keep_a", "keep_b", "no_difference", "stopped"]
@@ -230,6 +234,7 @@ class SocialProfile:
     reply_queries: tuple[str, ...] = ()
     reply_cards_per_day: int = REPLY_CARDS_PER_DAY_DEFAULT
     archived_at: datetime | None = None
+    setup_skipped: tuple[str, ...] = ()
 
     def has_description(self) -> bool:
         return any((self.description.get(key) or "").strip() for key in DESCRIPTION_FIELDS)

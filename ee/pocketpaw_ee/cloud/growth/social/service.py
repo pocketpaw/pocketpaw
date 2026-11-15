@@ -92,9 +92,16 @@
 # or no URL are sent unchanged. ``record_click`` (the public ``/go/{code}``)
 # checks the code pattern before reading, ``$inc``s the total and the UTC day
 # bucket unless a preview bot asked, and stores nothing about the requester.
+#
+# Setup checklist: ``setup_status`` derives each row (scan = a completed analysis,
+# blueprint = an approved version, accounts = an enabled account in the Accounts
+# list lookup, repos, daily drafts = ``active``); done beats a skip. The accounts
+# read is bounded at 4 s and never fatal. ``skip_setup`` $addToSet / $pull on
+# ``setup_skipped``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -132,6 +139,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     METRIC_AGE_BUCKETS,
     POSTABLE_PLATFORMS,
     REPLY_CARDS_PER_DAY_DEFAULT,
+    SETUP_KEYS,
     SOCIAL_ACCOUNT_PLATFORMS,
     VIDEO_PLATFORMS,
     AnalysisOutcome,
@@ -177,6 +185,9 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     ReplyDraftResponse,
     RepoStarsPointResponse,
     ScheduleIdeasRequest,
+    SetupStatusResponse,
+    SetupStatusRow,
+    SkipSetupRequest,
     SocialAccountListResponse,
     SocialAccountPlatformResponse,
     SocialAccountResponse,
@@ -316,6 +327,7 @@ def _profile_to_domain(doc: _ProfileDoc) -> SocialProfile:
         reply_queries=tuple(doc.reply_queries or ()),
         reply_cards_per_day=doc.reply_cards_per_day,
         archived_at=doc.archived_at,
+        setup_skipped=tuple(doc.setup_skipped or ()),
     )
 
 
@@ -350,6 +362,7 @@ def _profile_to_response(p: SocialProfile) -> SocialProfileResponse:
         reply_queries=list(p.reply_queries),
         reply_cards_per_day=p.reply_cards_per_day,
         archived_at=iso_utc(p.archived_at),
+        setup_skipped=list(p.setup_skipped),
     )
 
 
@@ -3350,6 +3363,66 @@ async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, Po
     }
 
 
+# ---------------------------------------------------------------------------
+# Setup checklist
+# ---------------------------------------------------------------------------
+
+SETUP_ACCOUNTS_TIMEOUT_S = 4.0
+
+
+async def _has_accounts(ctx: RequestContext, profile_id: str) -> bool:
+    """At least one enabled account, read through the Accounts list route's own lookup.
+    Any failure or a read slower than ``SETUP_ACCOUNTS_TIMEOUT_S`` is "not yet": a status
+    row is never fatal."""
+    try:
+        resp = await asyncio.wait_for(list_accounts(ctx, profile_id), SETUP_ACCOUNTS_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "setup status: reading accounts failed for profile=%s (%s)",
+            profile_id,
+            type(exc).__name__,
+        )
+        return False
+    return any(not a.disabled for a in resp.items)
+
+
+async def setup_status(ctx: RequestContext, profile_id: str | None = None) -> SetupStatusResponse:
+    """The brand's "Set up" rows in ``SETUP_KEYS`` order. Done always wins over skipped."""
+    from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
+
+    workspace_id, profile = await require_profile(ctx, profile_id)
+    done = {
+        "scan": profile.analyzed_at is not None,
+        "blueprint": await social_blueprint.approved_for(workspace_id, profile.id) is not None,
+        "accounts": await _has_accounts(ctx, profile.id),
+        "repos": bool(profile.github_repos),
+        "daily_drafts": profile.active,
+    }
+    skipped = set(profile.setup_skipped)
+    return SetupStatusResponse(
+        rows=[
+            SetupStatusRow(
+                key=key, state="done" if done[key] else "skipped" if key in skipped else "todo"
+            )
+            for key in SETUP_KEYS
+        ]
+    )
+
+
+async def skip_setup(
+    ctx: RequestContext, body: SkipSetupRequest, profile_id: str | None = None
+) -> SetupStatusResponse:
+    """Skip (or with ``skipped: false`` un-skip) one checklist row; idempotent."""
+    body = SkipSetupRequest.model_validate(body)
+    workspace_id, profile = await require_profile(ctx, profile_id)
+    op = "$addToSet" if body.skipped else "$pull"
+    await _ProfileDoc.find_one(
+        {"_id": PydanticObjectId(profile.id), "workspace": workspace_id}
+    ).update({op: {"setup_skipped": body.key}})
+    # no-event: Growth › Social has no realtime subscriber; the checklist re-fetches.
+    return await setup_status(ctx, profile.id)
+
+
 __all__ = [
     "close_experiment",
     "create_experiment",
@@ -3402,4 +3475,6 @@ __all__ = [
     "list_ideas",
     "update_idea",
     "upsert_profile",
+    "setup_status",
+    "skip_setup",
 ]
