@@ -30,7 +30,9 @@
 # ``min_posts_per_arm`` 1..50) and only ever closed with a verdict; a learning
 # edit carries text (at most 300 characters) and/or a status. A brand rename
 # (``RenameProfileRequest``) needs a trimmed, non-empty name of at most 120
-# characters, the same cap as ``company_name``.
+# characters, the same cap as ``company_name``. A blueprint draft save replaces
+# only the sections sent and refuses status, version and approval keys; pillar
+# names, channels and goal ids are unique within the draft.
 
 from __future__ import annotations
 
@@ -50,6 +52,9 @@ from pydantic import (
 
 from pocketpaw_ee.cloud.growth.social.domain import (
     DEFAULT_IDEA_COUNT,
+    MAX_BLUEPRINT_GOALS,
+    MAX_BLUEPRINT_ITEMS,
+    MAX_BLUEPRINT_PILLARS,
     MAX_IDEA_COUNT,
     MAX_LEARNING_CHARS,
     MAX_POST_IMAGES,
@@ -61,6 +66,8 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MIN_POSTS_PER_ARM_DEFAULT,
     PLATFORM_FORMATS,
     AnalysisStatus,
+    BlueprintChannelName,
+    BlueprintStatus,
     BusinessModel,
     ExperimentMetric,
     ExperimentVariable,
@@ -83,6 +90,8 @@ MAX_ANALYSIS_ITEMS = 20
 MAX_GITHUB_REPOS = 5
 MAX_WEEKLY_POST_QUOTA = 21
 SCHEDULE_SKEW = timedelta(minutes=1)
+MAX_BLUEPRINT_POSTS_PER_WEEK = 50
+MAX_BLUEPRINT_SENDS_PER_WEEK = 5000
 _GITHUB_REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 _X_HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
@@ -899,3 +908,151 @@ class SocialPostResponse(BaseModel):
 
 class SocialPostListResponse(BaseModel):
     items: list[SocialPostResponse]
+
+
+# --- Brand Blueprint ------------------------------------------------------------------------
+
+_BlueprintText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
+_BlueprintItem = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
+]
+_BlueprintItems = Annotated[list[_BlueprintItem], Field(max_length=MAX_BLUEPRINT_ITEMS)]
+
+
+class BlueprintIdentityModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary: _BlueprintText = ""
+    product: _BlueprintText = ""
+    problem: _BlueprintText = ""
+
+
+class BlueprintAudienceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segments: _BlueprintItems = Field(default_factory=list)
+    icp_sentences: _BlueprintItems = Field(default_factory=list)
+
+
+class BlueprintVoiceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tone: _BlueprintText = ""
+    avoid: _BlueprintItems = Field(default_factory=list)
+
+
+class BlueprintPillarModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    weight: int = Field(default=0, ge=0, le=100)
+    hooks: _BlueprintItems = Field(default_factory=list)
+
+
+class BlueprintChannelModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: BlueprintChannelName
+    posts_per_week: int = Field(default=0, ge=0, le=MAX_BLUEPRINT_POSTS_PER_WEEK)
+    sends_per_week: int = Field(default=0, ge=0, le=MAX_BLUEPRINT_SENDS_PER_WEEK)
+
+
+class BlueprintGoalInput(BaseModel):
+    """An owner-entered goal. ``id`` is minted by the service when omitted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)] | None = None
+    metric: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    target: float = Field(ge=0)
+    channel: BlueprintChannelName | None = None
+
+
+class BlueprintGoalModel(BaseModel):
+    id: str
+    metric: str
+    target: float
+    channel: BlueprintChannelName | None = None
+
+
+class BlueprintRoadmapModel(BaseModel):
+    # ponytail: phases stay untyped dicts until the roadmap slice (GX-6) types them.
+    phases: list[dict] = Field(default_factory=list)
+
+
+_Pillars = Annotated[list[BlueprintPillarModel], Field(max_length=MAX_BLUEPRINT_PILLARS)]
+_Goals = Annotated[list[BlueprintGoalInput], Field(max_length=MAX_BLUEPRINT_GOALS)]
+
+
+def _unique(values: list[str], what: str) -> None:
+    lowered = [v.lower() for v in values]
+    if len(set(lowered)) != len(lowered):
+        raise ValueError(f"{what} must be unique")
+
+
+class SaveBlueprintDraftRequest(BaseModel):
+    """``PUT /blueprint/draft``: each section sent replaces that section of the draft;
+    an omitted section is kept. Status, version, approval and the roadmap are not
+    editable here (extra keys are a 422)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    identity: BlueprintIdentityModel | None = None
+    audience: BlueprintAudienceModel | None = None
+    voice: BlueprintVoiceModel | None = None
+    pillars: _Pillars | None = None
+    channels: list[BlueprintChannelModel] | None = None
+    goals: _Goals | None = None
+
+    @model_validator(mode="after")
+    def _distinct(self) -> SaveBlueprintDraftRequest:
+        if self.pillars is not None:
+            _unique([p.name for p in self.pillars], "pillar names")
+        if self.channels is not None:
+            _unique([c.channel for c in self.channels], "channels")
+        if self.goals is not None:
+            _unique([g.id for g in self.goals if g.id], "goal ids")
+        return self
+
+
+class GrowthBlueprintResponse(BaseModel):
+    id: str
+    workspace_id: str
+    profile_id: str
+    version: int
+    status: BlueprintStatus
+    identity: BlueprintIdentityModel
+    audience: BlueprintAudienceModel
+    voice: BlueprintVoiceModel
+    pillars: list[BlueprintPillarModel]
+    channels: list[BlueprintChannelModel]
+    goals: list[BlueprintGoalModel]
+    roadmap: BlueprintRoadmapModel
+    learning_ids: list[str]
+    created_by: str
+    approved_by: str | None
+    approved_at: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class BlueprintStateResponse(BaseModel):
+    """The profile's approved blueprint and its open draft; either may be null."""
+
+    approved: GrowthBlueprintResponse | None
+    draft: GrowthBlueprintResponse | None
+
+
+class BlueprintSectionDiff(BaseModel):
+    """Keys of one section: field names for identity/audience/voice/roadmap, pillar names,
+    channel names or goal ids for the list sections."""
+
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    changed: list[str] = Field(default_factory=list)
+
+
+class BlueprintDiffResponse(BaseModel):
+    from_version: int
+    to_version: int
+    sections: dict[str, BlueprintSectionDiff]

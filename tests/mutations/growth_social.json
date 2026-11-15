@@ -709,5 +709,68 @@
     "tests": [
       "tests/cloud/growth/social/test_brand_archive.py"
     ]
+  },
+  {
+    "label": "blueprint: approve leaves the previous approved in place",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        {\"workspace\": workspace_id, \"profile_id\": profile.id, \"status\": \"approved\"}\n    ).update({\"$set\": {\"status\": \"superseded\", \"updatedAt\": now}})",
+    "replace": "        {\"workspace\": workspace_id, \"profile_id\": profile.id, \"status\": \"never\"}\n    ).update({\"$set\": {\"status\": \"superseded\", \"updatedAt\": now}})",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate supersedes the approved along with the old draft",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "            \"status\": \"draft\",\n            \"_id\": {\"$ne\": doc.id},",
+    "replace": "            \"_id\": {\"$ne\": doc.id},",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate generates a goal",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    out = _carried(base)\n",
+    "replace": "    out = _carried(base)\n    out[\"goals\"] = [*out[\"goals\"], {\"id\": \"gen\", \"metric\": \"made up\", \"target\": 99}]\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerated text skips the dash and number check",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        return bool(text) and not social_ideas.check_texts([text], source)",
+    "replace": "        return bool(text)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate invents a weight for a newly named pillar",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "weights.get(name.lower(), 0)",
+    "replace": "weights.get(name.lower(), 50)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "tenancy: blueprint reads drop the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "{\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}",
+    "replace": "{\"profile_id\": profile_id, \"status\": status}",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "tenancy: blueprint reads drop the profile filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "{\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}",
+    "replace": "{\"workspace\": workspace_id, \"status\": status}",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
   }
 ]

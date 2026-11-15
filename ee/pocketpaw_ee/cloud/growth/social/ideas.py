@@ -27,6 +27,7 @@
 # (``changes``, rendered by ``changes.changes_text``). ``check_draft`` holds two
 # hard rules in code rather than only in the prompt: no em or en dash anywhere
 # in a draft (hashtags included), and no number that is not in that source text.
+# ``check_texts`` is the same check over any list of texts (the blueprint uses it).
 # ``retry_note`` is the one retry's seam: the reasons the previous drafts were
 # rejected, appended to the prompt so the model fixes exactly that.
 #
@@ -370,6 +371,12 @@ def check_draft(idea: GeneratedIdea, source_text: str) -> list[str]:
     digits are then in the source too.
     """
     parts = [idea.hook, idea.caption, idea.on_screen_text, *idea.script, *idea.hashtags]
+    return check_texts(parts, source_text)
+
+
+def check_texts(parts: list[str], source_text: str) -> list[str]:
+    """``check_draft``'s two hard rules over any texts: no em or en dash, and no number
+    token missing from ``source_text``. Empty when every part is fine."""
     reasons: list[str] = []
     if any(has_dash(part) for part in parts):
         reasons.append("uses an em or en dash")
@@ -611,6 +618,7 @@ __all__ = [
     "agent_generate_ideas",
     "build_ideas_prompt",
     "check_draft",
+    "check_texts",
     "has_dash",
     "parse_ideas_response",
     "resolve_ideas_fn",

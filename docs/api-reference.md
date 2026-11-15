@@ -10247,8 +10247,9 @@ and every cron sweep (daily drafts, reply cards, repo metrics, Pulse), but
 only dates ideas on `/calendar`, and the only thing that reaches an outside
 platform is connecting a social account (see Accounts below). Every route is
 license-gated and workspace-scoped; reads need `growth.read` (MEMBER), the
-account connect and disconnect routes and the brand rename and archive routes
-`growth.manage` (ADMIN), every other route `growth.write` (MEMBER).
+account connect and disconnect routes, the brand rename and archive routes and
+the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
+(MEMBER).
 
 | Route | What it does |
 |---|---|
@@ -10284,6 +10285,12 @@ account connect and disconnect routes and the brand rename and archive routes
 | `GET /api/v1/growth/social/pulse` | The social's latest market Pulse: `{sources, themes: [{title, why, sentiment, phrases, evidence: [{platform, url, title, text, score, source, comments}], suggestions: [{platform, hook, caption, subreddit}]}], refreshed_at}`. Empty before the first refresh. |
 | `POST /api/v1/growth/social/pulse/refresh` | `{sources?: [{platform: reddit\|x, kind: subreddit\|search, value}]}` (max 6; omitted = the last sources, or the agent picks 3 subreddits + 2 X searches from the profile). Reads public posts and top comments through ScrapeCreators (`SCRAPECREATORS_API_KEY`; ~11 requests, subreddit reads cached 1 day), then the ideas agent groups them into themes with why it matters, the audience's phrases and post suggestions. No author names are kept. `503 social.pulse_unavailable` with no provider, `409` before setup or within 10 minutes of the last refresh with the same sources, `502` when nothing usable comes back. |
 | `POST /api/v1/growth/social/pulse/use` | `{theme, suggestion, status: new\|approved}`: file a theme's suggestion as an idea (to Blitz, or approved to Content), its `why` naming the theme. |
+| `GET /api/v1/growth/social/blueprint` | The profile's Brand Blueprint: `{approved, draft}`, either `null` (see Brand Blueprint). |
+| `PUT /api/v1/growth/social/blueprint/draft` | Replace the sections sent on the draft; opens a draft from the approved when there is none. `growth.manage`. |
+| `POST /api/v1/growth/social/blueprint/seed` | Write version 1 as a draft from the profile. A no-op once any version exists. `growth.manage`. |
+| `POST /api/v1/growth/social/blueprint/regenerate` | Rerun the analyst into a new draft version. Never touches the approved. `growth.manage`. |
+| `POST /api/v1/growth/social/blueprint/approve` | The draft becomes the approved; the previous approved is superseded. `growth.manage`. |
+| `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=` (versions): per-section `added`, `removed` and `changed` keys. |
 
 **Response (`SocialProfile`)** — every profile route returns this shape:
 
@@ -10722,6 +10729,66 @@ items dropped, then the first 12 beats and 15 tags kept), `pillar` and
 generator's and cannot be edited. Returns the idea. A malformed id, an
 unknown id and another workspace's id all return
 `404 social_idea.not_found`.
+
+### Brand Blueprint — `/api/v1/growth/social/blueprint`
+
+Each profile has a versioned plan the owner edits as a draft and approves; the
+drafting agents follow the approved one. Every route takes `?profile_id=` like
+its siblings. Reads need `growth.read`; every write needs `growth.manage`
+(ADMIN). At most one version per profile is `approved` and at most one is
+`draft`; older ones are `superseded`.
+
+```json
+{
+  "id": "6712…",
+  "workspace_id": "…",
+  "profile_id": "6702…",
+  "version": 2,
+  "status": "draft",
+  "identity": {"summary": "…", "product": "…", "problem": "…"},
+  "audience": {"segments": ["…"], "icp_sentences": ["…"]},
+  "voice": {"tone": "…", "avoid": ["…"]},
+  "pillars": [{"name": "Speed", "weight": 34, "hooks": ["…"]}],
+  "channels": [{"channel": "x", "posts_per_week": 5, "sends_per_week": 0}],
+  "goals": [{"id": "a1b2…", "metric": "signups", "target": 40, "channel": "x"}],
+  "roadmap": {"phases": []},
+  "learning_ids": [],
+  "created_by": "user id",
+  "approved_by": null,
+  "approved_at": null,
+  "created_at": "2026-11-15T09:00:00Z",
+  "updated_at": "2026-11-15T09:00:00Z"
+}
+```
+
+- `channel` is one of `x`, `reddit`, `email`, `whatsapp`, `linkedin`. A pillar
+  `weight` is 0..100, `posts_per_week` 0..50, `sends_per_week` 0..5000, a goal
+  `target` at least 0. Pillar names, channels and goal ids are unique in a version.
+- `seed` builds version 1 from the profile's analysis (or what the owner typed
+  when there is none): summary, product, problem, audience segments, tone, avoid,
+  the content pillars at equal weights summing to 100 with the hooks dealt across
+  them, the weekly post quota as the `x` channel's `posts_per_week`, and the
+  criteria of the workspace's active ICPs (at most 5) as `icp_sentences`. No goals.
+- `PUT /blueprint/draft` takes any of `identity`, `audience`, `voice`, `pillars`,
+  `channels`, `goals`; each one sent replaces that section. Any other key
+  (`status`, `version`, `roadmap`…) is a 422. A goal without an `id` gets one.
+  `404 social_blueprint.not_found` before the blueprint is seeded.
+- `regenerate` runs the website analyst and writes its text into a NEW draft
+  version built on the current draft (or the approved), superseding the old draft.
+  Numbers are never generated: channels, goals, the roadmap and learning ids are
+  copied over, a pillar keeps its weight by name, and a newly named pillar gets 0.
+  Text with an em or en dash, or a number the owner never typed, is dropped (a
+  field keeps its previous value). `503 social.analyzer_unavailable` with no
+  analyser, `404` before seeding, `422` with neither website nor description,
+  `502 social.blueprint_regenerate_failed` when the run fails.
+- `approve` sets `approved_by` / `approved_at`. `409 social.blueprint_no_draft`
+  when there is no draft.
+- `diff` returns `{from_version, to_version, sections: {identity, audience,
+  voice, pillars, channels, goals, roadmap}}`, each `{added, removed, changed}`.
+  Keys are field names for the object sections (an empty value counts as absent)
+  and pillar names, channel names or goal ids for the lists. An unknown version
+  is `404 social_blueprint_version.not_found`.
+- `roadmap.phases` stays empty for now.
 
 ### Accounts — `/api/v1/growth/social/accounts`
 
