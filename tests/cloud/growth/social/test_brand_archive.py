@@ -7,7 +7,8 @@
 # Covers: rename and its 422s / 404; archive hides the brand from the list and
 # the default pick while a read by id still works; archive unschedules the
 # brand's scheduled ideas through the unschedule path (calendar event gone,
-# status kept) and never calls Postiz; outreach drafts untouched; the daily
+# status kept) and deletes their Postiz posts, carrying on past a failed delete;
+# the client's DELETE route; outreach drafts untouched; the daily
 # drafts, reply cards, repo metrics and Pulse sweeps skip archived brands;
 # tenancy; RBAC (both writes need growth.manage); the mapper round-trip.
 
@@ -18,15 +19,17 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.crypto import encrypt
 from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.ideas import set_production_ideas_fn
-from pocketpaw_ee.cloud.growth.social.postiz import set_production_postiz
+from pocketpaw_ee.cloud.growth.social.postiz import PostizError, set_production_postiz
 from pocketpaw_ee.cloud.growth.social.pulse import set_production_pulse_fn
 from pocketpaw_ee.cloud.growth.social.replies import set_production_reply_draft_fn
 from pocketpaw_ee.cloud.growth.social.repo_metrics import set_production_repo_metrics_fn
@@ -34,6 +37,7 @@ from pocketpaw_ee.cloud.growth.social.router import router as social_router
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.draft import Draft as DraftDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as IdeaDoc
+from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as ProfileDoc
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as PulseDoc
 
@@ -95,21 +99,28 @@ async def w2(mongo_db: Any):
 
 
 class _RecordingPostiz:
-    """Records every Postiz call; archive must make none."""
+    """Records every Postiz call; ``delete_post`` refuses the ids in ``fail``."""
 
     def __init__(self) -> None:
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fail: set[str] = set()
+
+    async def delete_post(self, api_key: str, post_id: str) -> None:
+        self.calls.append(("delete_post", (api_key, post_id)))
+        if post_id in self.fail:
+            raise PostizError("postiz.http_error", "Postiz answered 404: gone")
 
     def __getattr__(self, name: str) -> Any:
         async def _call(*args: Any, **kwargs: Any) -> Any:
-            self.calls.append(name)
+            self.calls.append((name, args))
             return []
 
         return _call
 
 
 @pytest.fixture
-def postiz():
+def postiz(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
     fake = _RecordingPostiz()
     set_production_postiz(fake)  # type: ignore[arg-type]
     try:
@@ -200,14 +211,27 @@ async def test_archive_needs_a_profile_id(w1):
 
 
 @pytest.mark.asyncio
-async def test_archive_unschedules_scheduled_ideas_and_leaves_outreach_alone(w1, postiz):
+async def test_archive_unschedules_and_deletes_posts_and_leaves_outreach_alone(w1, postiz, caplog):
     from pocketpaw_ee.calendar.models import _EventDoc as CalendarEventDoc
 
     pid = await _brand(w1, "Acme")
     other = await _brand(w1, "Other")
+    for profile, key in ((pid, "key-acme"), (other, "key-other")):
+        await PostizOrgDoc(
+            workspace="w1", profile=profile, postiz_org_id=f"org-{key}", api_key_enc=encrypt(key)
+        ).insert()
+    postiz.fail = {"p-fail"}
     ideas = []
-    for profile in (pid, pid, other):
-        doc = IdeaDoc(workspace="w1", profile=profile, format="x_post", hook="h", status="approved")
+    posts = (["p-a", "p-fail", "p-b"], ["p-unscheduled"], ["p-other"])
+    for profile, post_ids in zip((pid, pid, other), posts, strict=True):
+        doc = IdeaDoc(
+            workspace="w1",
+            profile=profile,
+            format="x_post",
+            hook="h",
+            status="approved",
+            post_ids=post_ids,
+        )
         await doc.insert()
         ideas.append(doc)
     scheduled = await w1.post(
@@ -235,9 +259,16 @@ async def test_archive_unschedules_scheduled_ideas_and_leaves_outreach_alone(w1,
     kept = await IdeaDoc.get(ideas[2].id)
     assert kept.scheduled_at is not None and kept.calendar_event_id == other_event_id
     assert await CalendarEventDoc.get(other_event_id) is not None
-    # Outreach drafts are untouched, and nothing reached Postiz.
+    # Only the archived brand's scheduled posts are deleted, with its own key; the
+    # refused delete is logged without the key and the next one still runs.
+    assert postiz.calls == [
+        ("delete_post", ("key-acme", "p-a")),
+        ("delete_post", ("key-acme", "p-fail")),
+        ("delete_post", ("key-acme", "p-b")),
+    ]
+    assert "p-fail" in caplog.text and "key-acme" not in caplog.text
+    # Outreach drafts are untouched.
     assert (await DraftDoc.get(draft.id)).model_dump() == draft_before
-    assert postiz.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -366,3 +397,26 @@ async def test_pulse_sweep_skips_archived_brands(mongo_db, monkeypatch):
     counts = await social_service.refresh_due_pulses(now)
     assert rebuilt == [live]
     assert counts == {"due": 2, "refreshed": 1, "failed": 0}
+
+
+@pytest.mark.asyncio
+async def test_client_delete_post_hits_the_public_posts_route():
+    import httpx
+    from pocketpaw_ee.cloud.growth.social.postiz import PostizClient
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/gone"):
+            return httpx.Response(404, text="no key-9 here")
+        return httpx.Response(200, json={"error": False})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = PostizClient("http://postiz.test/", "s3cret", client=http)
+        await client.delete_post("key-9", "p/1")
+        with pytest.raises(PostizError) as caught:
+            await client.delete_post("key-9", "gone")
+    assert (seen[0].method, seen[0].url.raw_path) == ("DELETE", b"/api/public/v1/posts/p%2F1")
+    assert seen[0].headers["authorization"] == "key-9"
+    assert caught.value.code == "postiz.http_error" and "key-9" not in caught.value.message

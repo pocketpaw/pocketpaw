@@ -10,8 +10,9 @@
 # route takes an optional ``profile_id``; without one it acts on the most
 # recently updated unarchived profile, and ``upsert_profile`` creates the first.
 # Ideas belong to one profile. A brand can be renamed (``company_name``) or
-# archived: archiving stamps ``archived_at`` and unschedules its scheduled ideas
-# through ``unschedule_idea``; archived brands leave the list, the default pick
+# archived: archiving stamps ``archived_at``, unschedules its scheduled ideas
+# through ``unschedule_idea`` and deletes their Postiz posts (a failed delete is
+# logged and skipped); archived brands leave the list, the default pick
 # and every cron sweep, but a read by id still returns them.
 #
 # A PUT may carry a hand-edited ``analysis``: only the editable fields sent are
@@ -2459,8 +2460,9 @@ async def rename_profile(
 
 
 async def archive_profile(ctx: RequestContext, profile_id: str) -> SocialProfileResponse:
-    """Archive a brand: stamp ``archived_at`` (kept on a repeat) and unschedule every
-    scheduled, unpublished idea of it through ``unschedule_idea``. Outreach is untouched."""
+    """Archive a brand: stamp ``archived_at`` (kept on a repeat), unschedule every
+    scheduled, unpublished idea of it through ``unschedule_idea``, then delete those
+    ideas' Postiz posts. One failed delete never stops the rest. Outreach is untouched."""
     workspace_id = _require_workspace(ctx)
     doc = await _require_profile_doc(workspace_id, profile_id)
     if doc.archived_at is None:
@@ -2476,6 +2478,16 @@ async def archive_profile(ctx: RequestContext, profile_id: str) -> SocialProfile
     ).to_list()
     for idea in scheduled:
         await unschedule_idea(ctx, str(idea.id))
+    post_ids = [p for idea in scheduled for p in idea.post_ids or ()]
+    postiz = resolve_postiz() if post_ids else None
+    org = await _postiz_org(workspace_id, str(doc.id)) if postiz else None
+    if postiz is not None and org is not None:
+        for post_id in post_ids:
+            try:
+                await postiz.delete_post(decrypt(org.api_key_enc), post_id)
+            except Exception as exc:  # noqa: BLE001
+                code = exc.code if isinstance(exc, PostizError) else type(exc).__name__
+                logger.warning("brand archive: postiz post %s not deleted (%s)", post_id, code)
     # no-event: Growth › Social has no realtime subscriber; the brand switcher re-fetches.
     return _profile_to_response(_profile_to_domain(doc))
 

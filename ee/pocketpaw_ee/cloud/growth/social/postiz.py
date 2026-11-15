@@ -14,8 +14,10 @@
 # Bot API read through ``set_production_telegram_updates``.
 #
 # Publishing uses the public API too: ``create_posts`` takes a payload the
-# service builds, ``list_posts`` reads a date window, and ``trigger_tool`` runs a
-# provider helper such as Slack's channel list.
+# service builds, ``list_posts`` reads a date window, ``delete_post`` removes a
+# post (Postiz v2.25.0 ``DELETE /public/v1/posts/:id`` deletes the post's whole
+# group, so its sibling posts go with it), and ``trigger_tool`` runs a provider
+# helper such as Slack's channel list.
 
 from __future__ import annotations
 
@@ -206,6 +208,11 @@ class PostizClient:
         if not isinstance(data, list):
             raise PostizError("postiz.bad_response", "Postiz returned an unexpected post result.")
         return [item for item in data if isinstance(item, dict)]
+
+    async def delete_post(self, api_key: str, post_id: str) -> None:
+        await self._request(
+            "DELETE", f"/public/v1/posts/{quote(post_id, safe='')}", api_key=api_key
+        )
 
     async def list_posts(self, api_key: str, start: str, end: str) -> list[dict[str, Any]]:
         query = urlencode({"startDate": start, "endDate": end})
