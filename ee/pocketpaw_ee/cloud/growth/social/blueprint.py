@@ -5,8 +5,8 @@
 # A brand profile's blueprint is a chain of versions. At most one ``approved``
 # and one ``draft`` exist per (workspace, profile_id); every older version is
 # ``superseded``. ``seed`` writes version 1 as a draft from the profile's
-# analysis (falling back to what the owner typed), its weekly post quota and the
-# workspace's active ICPs, and is a no-op once any version exists.
+# analysis (falling back to what the owner typed), its weekly post quota and its
+# ICPs, and is a no-op once any version exists.
 # ``save_draft`` edits the draft, opening one from the approved when there is
 # none. ``regenerate`` runs the social analyst and writes its text into a NEW
 # draft version, superseding the old draft and never touching the approved.
@@ -16,22 +16,25 @@
 # split of 100 computed here, or 0 for a pillar the analyst newly named; channel
 # cadences come from the profile or the owner; goals are owner-entered only, and
 # regenerate copies channels, goals, the roadmap and learning ids unchanged.
-# Regenerated text must pass ``ideas.check_texts`` (no em or en dash, no number
-# the owner did not type): a failing item is dropped, and a failing field keeps
-# its previous value.
+# Seeded and regenerated text must pass ``ideas.check_texts`` (no em or en dash,
+# no number the owner did not type): a failing item is dropped; a failing field
+# seeds empty, or on regenerate keeps its previous value. Seed's ICP sentences are
+# the active ICPs of this brand plus the unbranded ones.
 #
-# Tenancy: every query filters on ``workspace`` and ``profile_id``, and the
-# profile is resolved through ``social.service`` (same NotFound as siblings).
-# The one-draft / one-approved rule is checked by queries, not a unique index,
-# so two simultaneous approves could race; the unique version index stops two
-# writers forking the same version. ``approved_for`` is the read the drafting
-# agents use. Writes carry ``# no-event:`` markers: nothing subscribes yet.
+# Tenancy: every query and write filters on ``workspace`` and ``profile_id``; the
+# profile comes from ``social.service.require_profile`` (same NotFound as
+# siblings). Writes to an existing row are conditional updates on its status: a
+# draft save, an approve, or regenerate superseding its base draft that finds
+# the row no longer a draft is a 409 ``social.blueprint_stale``. Approve marks the
+# draft approved before superseding the rest, so a crash leaves two approved,
+# never zero. The unique version index stops two writers forking a version.
+# ``approved_for`` is the read the drafting agents use. Writes carry
+# ``# no-event:`` markers: nothing subscribes yet.
 
 from __future__ import annotations
 
 import copy
 import logging
-import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +46,7 @@ from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, NotFound,
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.social import analyst as social_analyst
 from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
+from pocketpaw_ee.cloud.growth.social.analyst import as_list, typed_items
 from pocketpaw_ee.cloud.growth.social.domain import (
     BLUEPRINT_SECTIONS,
     MAX_BLUEPRINT_ITEMS,
@@ -205,9 +209,7 @@ def _response(doc: _BlueprintDoc | None) -> GrowthBlueprintResponse | None:
 async def _profile(ctx: RequestContext, profile_id: str | None) -> tuple[str, SocialProfile]:
     from pocketpaw_ee.cloud.growth.social import service as social_service
 
-    workspace_id = social_service._require_workspace(ctx)
-    doc = await social_service._require_profile_doc(workspace_id, profile_id)
-    return workspace_id, social_service._profile_to_domain(doc)
+    return await social_service.require_profile(ctx, profile_id)
 
 
 async def _find(workspace_id: str, profile_id: str, status: str) -> _BlueprintDoc | None:
@@ -251,23 +253,21 @@ async def approved_for(workspace_id: str, profile_id: str) -> GrowthBlueprint | 
 # ---------------------------------------------------------------------------
 
 
-def _squash(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
-
-
 def _items(values: Any, limit: int = MAX_BLUEPRINT_ITEMS, chars: int = _ITEM_CHARS) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values or ():
-        text = _squash(value)[:chars] if isinstance(value, str) else ""
-        if text and text.lower() not in seen:
-            seen.add(text.lower())
-            out.append(text)
-    return out[:limit]
+    return list(as_list(values, limit, chars))
 
 
 def _segments(audience: str) -> list[str]:
-    return _items(re.split(r"[\n;]+", audience or ""))
+    return _items(typed_items(audience))
+
+
+def _passes(text: str, source: str) -> bool:
+    """Non-empty, no em or en dash, and no number the owner did not type."""
+    return bool(text) and not social_ideas.check_texts([text], source)
+
+
+def _checked(values: Any, source: str, limit: int = MAX_BLUEPRINT_ITEMS, chars: int = _ITEM_CHARS):
+    return [v for v in _items(values, limit, chars) if _passes(v, source)]
 
 
 def _pillars(
@@ -294,10 +294,14 @@ def _pillars(
     return pillars
 
 
-async def _icp_sentences(ctx: RequestContext) -> list[str]:
+async def _icp_sentences(ctx: RequestContext, profile_id: str) -> list[str]:
+    """Active ICPs of this brand, then the unbranded ones (``""`` selects profile_id None)."""
     from pocketpaw_ee.cloud.growth import service as growth_service
 
-    icps = await growth_service.list_icps(ctx, status="active")
+    icps = [
+        *await growth_service.list_icps(ctx, profile_id=profile_id, status="active"),
+        *await growth_service.list_icps(ctx, profile_id="", status="active"),
+    ]
     return _items([icp.criteria for icp in icps], MAX_ICP_SENTENCES)
 
 
@@ -308,15 +312,26 @@ def _analysis_or_typed(profile: SocialProfile) -> SocialAnalysis:
 
 
 async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[str, Any]:
+    """Seed text passes the same dash / number check as regenerate; a failing field
+    seeds empty and a failing item is dropped."""
     a = _analysis_or_typed(profile)
+    source = _source_text(profile)
+
+    def text(value: str) -> str:
+        return value if _passes(value, source) else ""
+
     return {
-        "identity": {"summary": a.summary, "product": a.product, "problem": a.problem},
+        "identity": {name: text(getattr(a, name)) for name in ("summary", "product", "problem")},
         "audience": {
-            "segments": _segments(a.audience),
-            "icp_sentences": await _icp_sentences(ctx),
+            "segments": _checked(_segments(a.audience), source),
+            "icp_sentences": await _icp_sentences(ctx, profile.id),
         },
-        "voice": {"tone": a.tone, "avoid": _items(a.avoid)},
-        "pillars": _pillars(list(a.content_pillars), list(a.hooks), None),
+        "voice": {"tone": text(a.tone), "avoid": _checked(a.avoid, source)},
+        "pillars": _pillars(
+            _checked(a.content_pillars, source, MAX_BLUEPRINT_PILLARS, _PILLAR_CHARS),
+            _checked(a.hooks, source),
+            None,
+        ),
         "channels": [
             {"channel": "x", "posts_per_week": profile.weekly_post_quota, "sends_per_week": 0}
         ],
@@ -332,21 +347,18 @@ def _carried(doc: _BlueprintDoc) -> dict[str, Any]:
 
 
 def _source_text(profile: SocialProfile) -> str:
-    """What the owner typed: the only text a regenerated number may come from."""
+    """What the owner typed: the only text a blueprint number may come from."""
     return " ".join([profile.company_name, profile.website or "", *profile.description.values()])
 
 
 def _regenerated(base: _BlueprintDoc, a: SocialAnalysis, source: str) -> dict[str, Any]:
     """``base``'s sections with the analyst's text swapped in where it passes the checks."""
 
-    def ok(text: str) -> bool:
-        return bool(text) and not social_ideas.check_texts([text], source)
-
     def text(new: str, old: Any) -> str:
-        return new if ok(new) else _str(old)
+        return new if _passes(new, source) else _str(old)
 
     def items(values: Any, limit: int = MAX_BLUEPRINT_ITEMS, chars: int = _ITEM_CHARS) -> list:
-        return [v for v in _items(values, limit, chars) if ok(v)]
+        return _checked(values, source, limit, chars)
 
     out = _carried(base)
     identity, audience, voice = base.identity or {}, base.audience or {}, base.voice or {}
@@ -380,6 +392,32 @@ def _regenerated(base: _BlueprintDoc, a: SocialAnalysis, source: str) -> dict[st
 # ---------------------------------------------------------------------------
 
 
+def _stale() -> ConflictError:
+    return ConflictError(
+        "social.blueprint_stale", "This blueprint changed while you were editing. Reload it."
+    )
+
+
+async def _set_if(match: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """One conditional write: ``fields`` lands only if a row still matches ``match``."""
+    result = await _BlueprintDoc.get_pymongo_collection().update_one(
+        match, {"$set": {**fields, "updatedAt": datetime.now(UTC)}}
+    )
+    return result.matched_count == 1
+
+
+async def _supersede_others(workspace_id: str, profile_id: str, status: str, keep: Any) -> None:
+    await _BlueprintDoc.get_pymongo_collection().update_many(
+        {
+            "workspace": workspace_id,
+            "profile_id": profile_id,
+            "status": status,
+            "_id": {"$ne": keep},
+        },
+        {"$set": {"status": "superseded", "updatedAt": datetime.now(UTC)}},
+    )
+
+
 async def _insert(doc: _BlueprintDoc) -> None:
     try:
         await doc.insert()
@@ -410,16 +448,19 @@ async def seed(ctx: RequestContext, profile_id: str | None = None) -> BlueprintS
     return await _state(workspace_id, profile.id)
 
 
-def _apply_draft_edit(doc: _BlueprintDoc, body: SaveBlueprintDraftRequest) -> None:
-    # Full section shapes (nested defaults included), so every stored version diffs alike.
+def _draft_edit(body: SaveBlueprintDraftRequest) -> dict[str, Any]:
+    """The sections sent, in full shape (nested defaults included) so every stored
+    version diffs alike; goals without an id get one."""
     dumped = body.model_dump()
+    out: dict[str, Any] = {}
     for name in body.model_fields_set:
         value = dumped[name]
         if value is None:
             continue
         if name == "goals":
             value = [{**g, "id": g.get("id") or uuid.uuid4().hex[:12]} for g in value]
-        setattr(doc, name, value)
+        out[name] = value
+    return out
 
 
 async def save_draft(
@@ -440,14 +481,20 @@ async def save_draft(
             version=await _next_version(workspace_id, profile.id),
             status="draft",
             created_by=ctx.user_id or "",
-            **_carried(approved),
+            **{**_carried(approved), **_draft_edit(body)},
         )
-        _apply_draft_edit(draft, body)
         await _insert(draft)
     else:
-        _apply_draft_edit(draft, body)
-        draft.updatedAt = datetime.now(UTC)
-        await draft.save()
+        # Conditional on the row still being this profile's draft: an approve or a
+        # regenerate that landed since the read turns this save into a 409.
+        match = {
+            "_id": draft.id,
+            "workspace": workspace_id,
+            "profile_id": profile.id,
+            "status": "draft",
+        }
+        if not await _set_if(match, _draft_edit(body)):
+            raise _stale()
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     return await _state(workspace_id, profile.id)
 
@@ -507,14 +554,18 @@ async def regenerate(ctx: RequestContext, profile_id: str | None = None) -> Blue
         **_regenerated(base, analysis, _source_text(profile)),
     )
     await _insert(doc)
-    await _BlueprintDoc.find(
-        {
+    if base.status == "draft":
+        base_match = {
+            "_id": base.id,
             "workspace": workspace_id,
             "profile_id": profile.id,
             "status": "draft",
-            "_id": {"$ne": doc.id},
         }
-    ).update({"$set": {"status": "superseded", "updatedAt": datetime.now(UTC)}})
+        if not await _set_if(base_match, {"status": "superseded"}):
+            await doc.delete()
+            raise _stale()
+    # A draft opened from the approved meanwhile is superseded too (never the approved).
+    await _supersede_others(workspace_id, profile.id, "draft", doc.id)
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     return await _state(workspace_id, profile.id)
 
@@ -526,15 +577,22 @@ async def approve(ctx: RequestContext, profile_id: str | None = None) -> Bluepri
     draft = await _find(workspace_id, profile.id, "draft")
     if draft is None:
         raise ConflictError("social.blueprint_no_draft", "There is no draft to approve")
-    now = datetime.now(UTC)
-    await _BlueprintDoc.find(
-        {"workspace": workspace_id, "profile_id": profile.id, "status": "approved"}
-    ).update({"$set": {"status": "superseded", "updatedAt": now}})
-    draft.status = "approved"
-    draft.approved_by = ctx.user_id or ""
-    draft.approved_at = now
-    draft.updatedAt = now
-    await draft.save()
+    # Approve first, then supersede the rest: a crash between the two leaves two
+    # approved (the newer wins on the next approve), never zero.
+    match = {
+        "_id": draft.id,
+        "workspace": workspace_id,
+        "profile_id": profile.id,
+        "status": "draft",
+    }
+    fields = {
+        "status": "approved",
+        "approved_by": ctx.user_id or "",
+        "approved_at": datetime.now(UTC),
+    }
+    if not await _set_if(match, fields):
+        raise _stale()
+    await _supersede_others(workspace_id, profile.id, "approved", draft.id)
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     return await _state(workspace_id, profile.id)
 

@@ -44,7 +44,7 @@ _ANALYSIS = {
     "tone": "plain and warm",
     "avoid": ["hype"],
     "content_pillars": ["Speed", "Cash flow", "Stories"],
-    "hooks": ["h1", "h2", "h3", "h4"],
+    "hooks": ["ha", "hb", "hc", "hd"],
 }
 
 
@@ -70,16 +70,15 @@ def _reset_seams():
 
 
 async def _profile(workspace: str = "w1", **extra: Any) -> str:
-    doc = ProfileDoc(
-        workspace=workspace,
-        company_name="Acme",
-        website="https://acme.test",
-        description={"product": "Invoicing for 2 person studios", "audience": "designers"},
-        analysis_status="ready",
-        analysis=dict(_ANALYSIS),
-        weekly_post_quota=7,
-        **extra,
-    )
+    fields: dict[str, Any] = {
+        "company_name": "Acme",
+        "website": "https://acme.test",
+        "description": {"product": "Invoicing for 2 person studios", "audience": "designers"},
+        "analysis_status": "ready",
+        "analysis": dict(_ANALYSIS),
+        "weekly_post_quota": 7,
+    }
+    doc = ProfileDoc(workspace=workspace, **{**fields, **extra})
     await doc.insert()
     return str(doc.id)
 
@@ -113,6 +112,8 @@ async def _statuses(pid: str) -> dict[int, str]:
 async def test_seed_maps_every_section_and_is_idempotent(w1):
     pid = await _profile()
     await IcpDoc(workspace="w1", name="a", criteria="  Studios   with 2 to 10 people ").insert()
+    await IcpDoc(workspace="w1", name="d", criteria="This brand", profile_id=pid).insert()
+    await IcpDoc(workspace="w1", name="e", criteria="Another brand", profile_id="other").insert()
     await IcpDoc(workspace="w1", name="b", criteria="Paused one", status="paused").insert()
     await IcpDoc(workspace="w2", name="c", criteria="Other tenant").insert()
 
@@ -128,13 +129,13 @@ async def test_seed_maps_every_section_and_is_idempotent(w1):
     }
     assert draft["audience"] == {
         "segments": ["freelance designers", "small agencies"],
-        "icp_sentences": ["Studios with 2 to 10 people"],
+        "icp_sentences": ["This brand", "Studios with 2 to 10 people"],
     }
     assert draft["voice"] == {"tone": "plain and warm", "avoid": ["hype"]}
     assert draft["pillars"] == [
-        {"name": "Speed", "weight": 34, "hooks": ["h1", "h4"]},
-        {"name": "Cash flow", "weight": 33, "hooks": ["h2"]},
-        {"name": "Stories", "weight": 33, "hooks": ["h3"]},
+        {"name": "Speed", "weight": 34, "hooks": ["ha", "hd"]},
+        {"name": "Cash flow", "weight": 33, "hooks": ["hb"]},
+        {"name": "Stories", "weight": 33, "hooks": ["hc"]},
     ]
     assert draft["channels"] == [{"channel": "x", "posts_per_week": 7, "sends_per_week": 0}]
     assert draft["goals"] == []
@@ -153,6 +154,27 @@ async def test_seed_without_analysis_falls_back_to_what_the_owner_typed(w1):
     assert draft["identity"]["product"] == "Typed product"
     assert draft["voice"]["tone"] == "dry"
     assert draft["pillars"] == []
+
+
+async def test_seed_drops_text_with_a_dash_or_an_invented_number(w1):
+    analysis = {
+        **_ANALYSIS,
+        "summary": "Acme saves 40 hours a month.",  # 40 is not in what the owner typed
+        "tone": "warm \u2013 never loud",  # en dash
+        "avoid": ["hype", "Top 5 lists"],
+        "content_pillars": ["Speed", "2 person studios", "Ten \u2014 tips"],
+        "hooks": ["Paid in 3 days", "Stop chasing"],
+    }
+    pid = await _profile(analysis=analysis)
+    draft = (await _seed(w1, pid))["draft"]
+    assert draft["identity"]["summary"] == ""
+    assert draft["identity"]["product"] == "Invoicing app"
+    assert draft["voice"] == {"tone": "", "avoid": ["hype"]}
+    # "2" is in the owner's own description, so that pillar stays.
+    assert draft["pillars"] == [
+        {"name": "Speed", "weight": 50, "hooks": ["Stop chasing"]},
+        {"name": "2 person studios", "weight": 50, "hooks": []},
+    ]
 
 
 # --- draft save and approve --------------------------------------------------------------
@@ -212,6 +234,50 @@ async def test_approve_supersedes_the_previous_approved(w1):
 
     resp = await w1.post(f"{BP}/approve", params={"profile_id": pid})
     assert resp.status_code == 409
+
+
+def _race_on_draft_read(monkeypatch, client, pid: str, on_call: int) -> None:
+    """Approve the draft right after the ``on_call``-th draft read: a concurrent approve
+    landing between a request's load and its write."""
+    real = social_blueprint._find
+    calls = {"n": 0}
+
+    async def racing(workspace_id: str, profile_id: str, status: str):
+        doc = await real(workspace_id, profile_id, status)
+        if status == "draft" and doc is not None:
+            calls["n"] += 1
+            if calls["n"] == on_call:
+                monkeypatch.setattr(social_blueprint, "_find", real)
+                await _approve(client, pid)
+        return doc
+
+    monkeypatch.setattr(social_blueprint, "_find", racing)
+
+
+async def test_approve_between_draft_load_and_save_is_409(w1, monkeypatch):
+    pid = await _profile()
+    await _seed(w1, pid)
+    _race_on_draft_read(monkeypatch, w1, pid, on_call=1)
+    resp = await w1.put(
+        f"{BP}/draft", params={"profile_id": pid}, json={"identity": {"summary": "Late"}}
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "social.blueprint_stale"
+    assert await _statuses(pid) == {1: "approved"}
+    approved = await BlueprintDoc.find_one({"workspace": "w1", "profile_id": pid})
+    assert approved.identity["summary"] == _ANALYSIS["summary"]
+
+
+async def test_approve_during_regenerate_is_409_and_writes_nothing(w1, monkeypatch):
+    pid = await _profile()
+    await _seed(w1, pid)
+    set_production_analyze_fn(
+        _FakeAnalyzer(AnalysisOutcome(analysis=SocialAnalysis(summary="New")))
+    )
+    _race_on_draft_read(monkeypatch, w1, pid, on_call=2)  # the re-read after the run
+    resp = await w1.post(f"{BP}/regenerate", params={"profile_id": pid})
+    assert resp.status_code == 409, resp.text
+    assert await _statuses(pid) == {1: "approved"}
 
 
 # --- regenerate --------------------------------------------------------------------------
@@ -307,8 +373,8 @@ async def test_diff_reports_added_removed_and_changed_per_section(w1):
         {
             "identity": {"summary": "Changed", "product": "", "problem": "Chasing late payments"},
             "pillars": [
-                {"name": "Speed", "weight": 50, "hooks": ["h1", "h4"]},
-                {"name": "Cash flow", "weight": 33, "hooks": ["h2"]},
+                {"name": "Speed", "weight": 50, "hooks": ["ha", "hd"]},
+                {"name": "Cash flow", "weight": 33, "hooks": ["hb"]},
                 {"name": "Pricing", "weight": 17},
             ],
             "goals": [{"id": "g1", "metric": "stars", "target": 100}],
@@ -338,6 +404,27 @@ async def test_diff_of_a_partly_sent_section_that_means_the_same_is_empty(w1):
     await _save(w1, pid, {"channels": [{"channel": "x", "posts_per_week": 7}]})
     resp = await w1.get(f"{BP}/diff", params={"profile_id": pid, "from": 1, "to": 2})
     assert resp.json()["sections"]["channels"] == {"added": [], "removed": [], "changed": []}
+
+
+async def test_writes_on_one_profile_never_touch_another(w1):
+    a, b = await _profile(), await _profile()
+    for pid in (a, b):
+        await _seed(w1, pid)
+        await _approve(w1, pid)
+    set_production_analyze_fn(
+        _FakeAnalyzer(AnalysisOutcome(analysis=SocialAnalysis(summary="New")))
+    )
+
+    assert (await w1.post(f"{BP}/regenerate", params={"profile_id": a})).status_code == 200
+    await _approve(w1, a)
+    assert await _statuses(b) == {1: "approved"}
+
+    # B's next version counts B's versions only.
+    assert (await _save(w1, b, {"identity": {"summary": "B"}}))["draft"]["version"] == 2
+
+    assert (await w1.post(f"{BP}/regenerate", params={"profile_id": a})).status_code == 200
+    assert await _statuses(a) == {1: "superseded", 2: "approved", 3: "draft"}
+    assert await _statuses(b) == {1: "approved", 2: "draft"}
 
 
 # --- RBAC and tenancy --------------------------------------------------------------------

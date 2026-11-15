@@ -13,8 +13,8 @@
 # owner typed. The parser never raises; ``agent_analyze`` returns an
 # ``AnalysisOutcome`` with a short human error instead of raising. The
 # description is never logged. ``run_pinned_agent`` and the JSON / text
-# helpers (``json_objects``, ``as_text``, ``as_list``, ``fence``) are shared
-# with ``ideas.py``.
+# helpers (``json_objects``, ``as_text``, ``as_list``, ``fence``, ``squash``,
+# ``typed_items``) are shared with ``ideas.py`` and ``blueprint.py``.
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 logger = logging.getLogger(__name__)
 
 
-def _squash(text: str) -> str:
+def squash(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
@@ -155,13 +155,13 @@ def json_objects(text: str) -> list[dict[str, Any]]:
 
 
 def as_text(value: Any, limit: int = 600) -> str:
-    return _squash(value)[:limit] if isinstance(value, str) else ""
+    return squash(value)[:limit] if isinstance(value, str) else ""
 
 
 def as_list(value: Any, cap: int, limit: int = 200) -> tuple[str, ...]:
     if isinstance(value, str):
         value = [value]
-    if not isinstance(value, list):
+    if not isinstance(value, list | tuple):
         return ()
     out: list[str] = []
     seen: set[str] = set()
@@ -195,7 +195,7 @@ def parse_analysis(text: str) -> SocialAnalysis | None:
     return SocialAnalysis(**fields, pages_read=tuple(pages))
 
 
-def _typed_items(text: str) -> tuple[str, ...]:
+def typed_items(text: str) -> tuple[str, ...]:
     parts = [p.strip(" -•*\t") for p in re.split(r"[\n;]+", text or "")]
     return tuple(p[:200] for p in parts if p)
 
@@ -205,13 +205,13 @@ def apply_typed_fields(analysis: SocialAnalysis, description: dict[str, str]) ->
     owner typed, and always keep the owner's things-to-avoid."""
     updates: dict[str, Any] = {}
     for name in ("product", "audience", "problem", "tone"):
-        typed = _squash(description.get(name) or "")
+        typed = squash(description.get(name) or "")
         if typed and not getattr(analysis, name):
             updates[name] = typed[:600]
-    typed_benefits = _typed_items(description.get("benefits") or "")
+    typed_benefits = typed_items(description.get("benefits") or "")
     if typed_benefits and not analysis.benefits:
         updates["benefits"] = typed_benefits[: _LIST_CAPS["benefits"]]
-    typed_avoid = _typed_items(description.get("avoid") or "")
+    typed_avoid = typed_items(description.get("avoid") or "")
     if typed_avoid:
         merged = list(typed_avoid)
         lowered = {item.lower() for item in merged}
@@ -310,4 +310,6 @@ __all__ = [
     "resolve_analyze_fn",
     "run_pinned_agent",
     "set_production_analyze_fn",
+    "squash",
+    "typed_items",
 ]

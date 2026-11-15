@@ -10768,7 +10768,9 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   when there is none): summary, product, problem, audience segments, tone, avoid,
   the content pillars at equal weights summing to 100 with the hooks dealt across
   them, the weekly post quota as the `x` channel's `posts_per_week`, and the
-  criteria of the workspace's active ICPs (at most 5) as `icp_sentences`. No goals.
+  criteria of the active ICPs for this brand, then the unbranded ones (at most 5),
+  as `icp_sentences`. No goals. Seeded text goes through the same dash and number
+  check as `regenerate`; a failing field seeds empty and a failing item is dropped.
 - `PUT /blueprint/draft` takes any of `identity`, `audience`, `voice`, `pillars`,
   `channels`, `goals`; each one sent replaces that section. Any other key
   (`status`, `version`, `roadmap`…) is a 422. A goal without an `id` gets one.
@@ -10783,6 +10785,9 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   `502 social.blueprint_regenerate_failed` when the run fails.
 - `approve` sets `approved_by` / `approved_at`. `409 social.blueprint_no_draft`
   when there is no draft.
+- Writes to an existing version are conditional: a draft save, an approve, or a
+  regenerate whose draft was approved or replaced since it was read is
+  `409 social.blueprint_stale`. Reload and retry.
 - `diff` returns `{from_version, to_version, sections: {identity, audience,
   voice, pillars, channels, goals, roadmap}}`, each `{added, removed, changed}`.
   Keys are field names for the object sections (an empty value counts as absent)
