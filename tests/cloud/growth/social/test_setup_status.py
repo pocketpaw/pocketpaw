@@ -5,11 +5,13 @@
 #
 # Covers: each row done and todo; skip persists and is idempotent; un-skip; done
 # beats skipped; an unknown key is a 422; the blueprint row reads the approved
-# version only; the accounts row goes through ``list_accounts``; tenancy on
+# version only; the accounts row goes through ``list_accounts``, counts only
+# enabled accounts and reads todo on any error or a slow read; tenancy on
 # workspace and on profile; a member can read and skip; the mapper round trip.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -149,6 +151,39 @@ async def test_accounts_row_reads_todo_when_postiz_fails(w1, monkeypatch):
         raise PostizError("down", "postiz is down")
 
     monkeypatch.setattr(fake, "list_integrations", _boom)
+    assert (await _states(w1, pid))["accounts"] == "todo"
+
+
+async def test_accounts_row_ignores_disabled_accounts(w1):
+    pid = await _profile()
+    fake = await _connect(pid)
+    fake.integrations["key-1"] = [{**_integration("acc-1"), "disabled": True}]
+    assert (await _states(w1, pid))["accounts"] == "todo"
+    fake.integrations["key-1"].append(_integration("acc-2"))
+    assert (await _states(w1, pid))["accounts"] == "done"
+
+
+async def test_accounts_row_reads_todo_on_any_error(w1, monkeypatch):
+    pid = await _profile(active=True)
+    fake = await _connect(pid)
+
+    async def _boom(api_key: str):
+        raise KeyError("secret-key-material")
+
+    monkeypatch.setattr(fake, "list_integrations", _boom)
+    states = await _states(w1, pid)
+    assert (states["accounts"], states["daily_drafts"]) == ("todo", "done")
+
+
+async def test_accounts_row_reads_todo_when_the_lookup_is_slow(w1, monkeypatch):
+    pid = await _profile()
+    await _connect(pid)
+
+    async def _slow(ctx, profile_id=None):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(social_service, "SETUP_ACCOUNTS_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(social_service, "list_accounts", _slow)
     assert (await _states(w1, pid))["accounts"] == "todo"
 
 

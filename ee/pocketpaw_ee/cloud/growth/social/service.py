@@ -94,12 +94,14 @@
 # bucket unless a preview bot asked, and stores nothing about the requester.
 #
 # Setup checklist: ``setup_status`` derives each row (scan = a completed analysis,
-# blueprint = an approved version, accounts = the Accounts list lookup, repos, daily
-# drafts = ``active``); done beats a skip. ``skip_setup`` $addToSet / $pull on
+# blueprint = an approved version, accounts = an enabled account in the Accounts
+# list lookup, repos, daily drafts = ``active``); done beats a skip. The accounts
+# read is bounded at 4 s and never fatal. ``skip_setup`` $addToSet / $pull on
 # ``setup_skipped``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -3365,15 +3367,23 @@ async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, Po
 # Setup checklist
 # ---------------------------------------------------------------------------
 
+SETUP_ACCOUNTS_TIMEOUT_S = 4.0
+
 
 async def _has_accounts(ctx: RequestContext, profile_id: str) -> bool:
-    """At least one connected account, read through the Accounts list route's own lookup.
-    A Postiz failure reads as "not yet" so one flaky upstream can't break the checklist."""
+    """At least one enabled account, read through the Accounts list route's own lookup.
+    Any failure or a read slower than ``SETUP_ACCOUNTS_TIMEOUT_S`` is "not yet": a status
+    row is never fatal."""
     try:
-        return bool((await list_accounts(ctx, profile_id)).items)
-    except CloudError:
-        logger.warning("setup status: reading accounts failed for profile=%s", profile_id)
+        resp = await asyncio.wait_for(list_accounts(ctx, profile_id), SETUP_ACCOUNTS_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "setup status: reading accounts failed for profile=%s (%s)",
+            profile_id,
+            type(exc).__name__,
+        )
         return False
+    return any(not a.disabled for a in resp.items)
 
 
 async def setup_status(ctx: RequestContext, profile_id: str | None = None) -> SetupStatusResponse:

@@ -10742,7 +10742,7 @@ read by id) returns `{rows: [{key, state}]}` with the keys always in this order:
 |---|---|
 | `scan` | a website analysis has completed (`analyzed_at` set; a failed run does not count) |
 | `blueprint` | the brand has an approved Blueprint version (a draft does not count) |
-| `accounts` | the Accounts list (`GET /accounts`) returns at least one connected account; a Postiz failure reads as `todo` |
+| `accounts` | the Accounts list (`GET /accounts`) returns at least one account that is not `disabled`; any failure, or a read slower than 4 s, reads as `todo` |
 | `repos` | `github_repos` is non-empty |
 | `daily_drafts` | `active` is `true` |
 
