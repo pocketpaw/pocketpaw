@@ -21,9 +21,9 @@
 # agent, like the ideas agent). ``check_reply`` holds the hard rules in code: at
 # most MAX_REPLY_CHARS, plus ``ideas.check_draft`` (no em or en dash, no number
 # that is not in the target post or the product's recent changes). With the
-# brand's approved Blueprint (``blueprint``), the company block is its identity,
+# brand's approved Blueprint (``blueprint``), the prompt carries its identity,
 # audience and voice (``analyst.blueprint_lines``, fenced) instead of the profile's
-# analysis.
+# inferred analysis; the owner's typed description stays, as in the ideas prompt.
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from pocketpaw_ee.cloud.growth.social.analyst import (
 )
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text
 from pocketpaw_ee.cloud.growth.social.domain import (
+    DESCRIPTION_FIELDS,
     MAX_REPLY_CHARS,
     GeneratedIdea,
     GeneratedReply,
@@ -219,10 +220,16 @@ def build_replies_prompt(
 ) -> str:
     lines = ["Draft one reply for each post below that you can help with.", "", "<company>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
-    if blueprint is None:
+    typed = profile.description
+    if blueprint is not None:
+        # The owner's own words still win; only the inferred analysis gives way.
+        for key in DESCRIPTION_FIELDS:
+            value = (typed.get(key) or "").strip()
+            if value:
+                lines.append(f"Owner says ({key}): {fence(value)}")
+    else:
         # ponytail: fallback until GX-15 removes the old strategy fields
         analysis = profile.analysis
-        typed = profile.description
         for label, value in (
             ("Product", (analysis.product if analysis else "") or typed.get("product", "")),
             ("Audience", (analysis.audience if analysis else "") or typed.get("audience", "")),

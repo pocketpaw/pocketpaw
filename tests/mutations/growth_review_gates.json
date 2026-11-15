@@ -264,5 +264,12 @@
     "find": "    if request.blueprint:\n",
     "replace": "    if False:\n",
     "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_hunt_research_carries_the_brand_blueprint"
+  },
+  {
+    "label": "blueprint: the MCP draft row drops blueprint_version",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/growth.py",
+    "find": "        \"blueprint_version\": d.blueprint_version,\n",
+    "replace": "",
+    "tests": "tests/cloud/growth/test_mcp_server.py::test_draft_row_carries_blueprint_version"
   }
 ]

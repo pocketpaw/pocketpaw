@@ -784,3 +784,24 @@ class TestIcpRowCarriesTheLastPreview:
         row = growth_mcp._icp_row(self._icp(None))
         assert row["last_preview"] is None
         assert row["last_preview_at"] is None
+
+
+def test_draft_row_carries_blueprint_version():
+    from pocketpaw_ee.cloud.growth.dto import DraftResponse
+
+    d = DraftResponse(
+        id="d1",
+        workspace_id="w1",
+        prospect_id="p1",
+        channel="email",
+        subject="s",
+        body="b",
+        variant="first_touch",
+        status="draft",
+        demo_url=None,
+        blueprint_version=3,
+        created_at=None,
+        updated_at=None,
+    )
+    assert growth_mcp._draft_row(d)["blueprint_version"] == 3
+    assert growth_mcp._draft_row(d, body=False)["blueprint_version"] == 3

@@ -260,6 +260,7 @@ def _draft_row(d: Any, *, body: bool = True) -> dict[str, Any]:
         "variant": d.variant,
         "status": d.status,
         "subject": d.subject,
+        "blueprint_version": d.blueprint_version,
     }
     if body:
         row["body"] = d.body
