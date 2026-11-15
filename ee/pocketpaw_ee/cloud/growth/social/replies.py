@@ -38,11 +38,11 @@ from pocketpaw_ee.cloud.growth.social.analyst import (
     blueprint_lines,
     fence,
     json_objects,
+    owner_lines,
     run_pinned_agent,
 )
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text
 from pocketpaw_ee.cloud.growth.social.domain import (
-    DESCRIPTION_FIELDS,
     MAX_REPLY_CHARS,
     GeneratedIdea,
     GeneratedReply,
@@ -220,16 +220,12 @@ def build_replies_prompt(
 ) -> str:
     lines = ["Draft one reply for each post below that you can help with.", "", "<company>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
-    typed = profile.description
     if blueprint is not None:
         # The owner's own words still win; only the inferred analysis gives way.
-        for key in DESCRIPTION_FIELDS:
-            value = (typed.get(key) or "").strip()
-            if value:
-                lines.append(f"Owner says ({key}): {fence(value)}")
+        lines += owner_lines(profile.description)
     else:
         # ponytail: fallback until GX-15 removes the old strategy fields
-        analysis = profile.analysis
+        analysis, typed = profile.analysis, profile.description
         for label, value in (
             ("Product", (analysis.product if analysis else "") or typed.get("product", "")),
             ("Audience", (analysis.audience if analysis else "") or typed.get("audience", "")),

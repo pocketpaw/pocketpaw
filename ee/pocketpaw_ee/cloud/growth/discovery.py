@@ -281,15 +281,18 @@ async def _research(
 
 async def _blueprint_context(workspace_id: str, profile_id: str | None) -> str:
     """The branded hunt's approved Blueprint as prompt text; "" when unbranded or none."""
-    if not profile_id:
-        return ""
-    # Lazy: analyst imports researcher, which imports this module.
-    from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
-    from pocketpaw_ee.cloud.growth.social.analyst import blueprint_lines
+    from pocketpaw_ee.cloud.growth import service as growth_service
 
-    bp = await social_blueprint.approved_for(workspace_id, profile_id)
+    return _blueprint_text(await growth_service.approved_blueprint(workspace_id, profile_id))
+
+
+def _blueprint_text(bp: Any) -> str:
+    """A hunt's view of a Blueprint (audience, voice, pillars), fenced; "" for None."""
     if bp is None:
         return ""
+    # Lazy: analyst imports researcher, which imports this module.
+    from pocketpaw_ee.cloud.growth.social.analyst import blueprint_lines
+
     return "\n".join(blueprint_lines(bp, ("audience", "voice", "pillars")))
 
 

@@ -819,6 +819,15 @@ async def _gather_changes(repos: list[str], since: datetime) -> list[Change]:
         return []
 
 
+def _x_posts_per_week(weekly_post_quota: int, bp: GrowthBlueprint | None) -> int:
+    """The daily drafts' X budget: the approved Blueprint's x channel (0 when the
+    Blueprint plans no X), else the profile's quota."""
+    if bp is None:
+        # ponytail: fallback until GX-15 removes the old strategy fields
+        return weekly_post_quota
+    return next((c.posts_per_week for c in bp.channels if c.channel == "x"), 0)
+
+
 async def _draft_daily(
     workspace_id: str, profile_id: str, now: datetime
 ) -> tuple[list[_IdeaDoc], int]:
@@ -832,9 +841,15 @@ async def _draft_daily(
     profile_key = str(doc.id)
     # One read per run: the same version drives the quota, the prompt and the stamp.
     bp = await social_blueprint.approved_for(workspace_id, profile_key)
-    left_week = _x_posts_per_week(doc.weekly_post_quota, bp) - await _daily_count(
-        workspace_id, profile_key, now - timedelta(days=7)
-    )
+    budget = _x_posts_per_week(doc.weekly_post_quota, bp)
+    if bp is not None and budget <= 0:
+        logger.info(
+            "daily drafts: profile=%s skipped, approved Blueprint v%d plans no X posts",
+            profile_key,
+            bp.version,
+        )
+        return [], 0
+    left_week = budget - await _daily_count(workspace_id, profile_key, now - timedelta(days=7))
     left_today = DAILY_DRAFTS_PER_DAY - await _daily_count(
         workspace_id, profile_key, _day_start(now)
     )
@@ -3500,12 +3515,3 @@ __all__ = [
     "setup_status",
     "skip_setup",
 ]
-
-
-def _x_posts_per_week(weekly_post_quota: int, bp: GrowthBlueprint | None) -> int:
-    """The daily drafts' X budget: the approved Blueprint's x channel (0 when the
-    Blueprint plans no X), else the profile's quota."""
-    if bp is None:
-        # ponytail: fallback until GX-15 removes the old strategy fields
-        return weekly_post_quota
-    return next((c.posts_per_week for c in bp.channels if c.channel == "x"), 0)

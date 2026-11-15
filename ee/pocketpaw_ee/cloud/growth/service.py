@@ -108,6 +108,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     UpdateProspectRequest,
     _normalise_domain,
 )
+from pocketpaw_ee.cloud.growth.social.domain import GrowthBlueprint
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
 from pocketpaw_ee.cloud.models.icp import Icp as _IcpDoc
 from pocketpaw_ee.cloud.models.message_log import MessageLog as _MessageLogDoc
@@ -1226,6 +1227,16 @@ _ALL_DRAFT_CHANNELS = ("email", "linkedin", "whatsapp")
 _LIVE_DRAFT_STATUSES = ("draft", "proposed", "approved", "sent")
 
 
+async def approved_blueprint(workspace_id: str, profile_id: str | None) -> GrowthBlueprint | None:
+    """The brand's approved Blueprint, or None for an unbranded row. Never another
+    brand's, never a draft. The one brand -> Blueprint read for the writer and hunts."""
+    if not profile_id:
+        return None
+    from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
+
+    return await social_blueprint.approved_for(workspace_id, profile_id)
+
+
 async def _icp_for(workspace_id: str, doc: _ProspectDoc) -> Icp | None:
     """The prospect's ICP as context for an agent run. A deleted or foreign
     ICP is simply no context, never a 404 on the prospect."""
@@ -1483,10 +1494,10 @@ async def draft_prospect(
         raise CloudError(422, "prospect.no_channel", message)
 
     icp = await _icp_for(workspace_id, doc)
-    # The brand these drafts are written under (as ``_insert_draft`` decides it);
-    # its approved Blueprint, read once, is the writer's context and the stamp.
+    # The brand, resolved once: it is stored on each draft row, and its approved
+    # Blueprint (read once) is the writer's context and each draft's stamp.
     brand = body.profile_id or getattr(doc, "profile_id", None)
-    bp = await _approved_blueprint(workspace_id, brand)
+    bp = await approved_blueprint(workspace_id, brand)
     extra: dict[str, Any] = {"blueprint": bp} if bp is not None else {}
     try:
         written = await writer_fn(_to_domain(doc), icp, list(eligible), body.instructions, **extra)
@@ -1529,7 +1540,7 @@ async def draft_prospect(
                     subject=subject,
                     body=text,
                     variant="first_touch",
-                    profile_id=body.profile_id,
+                    profile_id=brand,
                 ),
                 blueprint_version=bp.version if bp is not None else None,
             )
@@ -2844,6 +2855,7 @@ async def record_whatsapp_inbound_reply(number: str, text: str = "") -> int:
 
 
 __all__ = [
+    "approved_blueprint",
     "bulk_ingest",
     "count_whatsapp_attempts_since",
     "create",
@@ -2880,13 +2892,3 @@ __all__ = [
     "update_growth_settings",
     "upsert_by_domain",
 ]
-
-
-async def _approved_blueprint(workspace_id: str, profile_id: str | None) -> Any:
-    """The brand's approved Blueprint (a social ``GrowthBlueprint``), or None for an
-    unbranded row. Never another brand's, never a draft."""
-    if not profile_id:
-        return None
-    from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
-
-    return await social_blueprint.approved_for(workspace_id, profile_id)

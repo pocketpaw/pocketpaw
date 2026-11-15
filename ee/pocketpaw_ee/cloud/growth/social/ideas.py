@@ -56,11 +56,11 @@ from pocketpaw_ee.cloud.growth.social.analyst import (
     blueprint_lines,
     fence,
     json_objects,
+    owner_lines,
     run_pinned_agent,
 )
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text
 from pocketpaw_ee.cloud.growth.social.domain import (
-    DESCRIPTION_FIELDS,
     PLATFORM_FORMATS,
     VIDEO_FORMATS,
     GeneratedIdea,
@@ -177,11 +177,7 @@ def build_ideas_prompt(
             lines.append(f"{label}: {fence(value)}")
     # ponytail: fallback until GX-15 removes the old strategy fields
     analysis = profile.analysis if blueprint is None else None
-    typed = profile.description
-    for key in DESCRIPTION_FIELDS:
-        value = (typed.get(key) or "").strip()
-        if value:
-            lines.append(f"Owner says ({key}): {fence(value)}")
+    lines += owner_lines(profile.description)
     if analysis is not None:
         for label, text in (
             ("Summary", analysis.summary),

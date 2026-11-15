@@ -15,6 +15,7 @@
 # description is never logged. ``run_pinned_agent`` and the JSON / text
 # helpers (``json_objects``, ``as_text``, ``as_list``, ``fence``, ``squash``,
 # ``typed_items``) are shared with ``ideas.py`` and ``blueprint.py``.
+# ``owner_lines`` renders the owner's typed description (ideas and replies);
 # ``blueprint_lines`` renders an approved Brand Blueprint as a fenced data block
 # (every value through ``fence``) for the drafting agents: ideas, replies, the
 # outreach writer and hunt research.
@@ -123,6 +124,15 @@ _LIST_CAPS = {
 
 def fence(text: str) -> str:
     return (text or "").replace("</", "< /")
+
+
+def owner_lines(description: dict[str, str]) -> list[str]:
+    """The owner's typed description, one fenced ``Owner says`` line per filled field."""
+    return [
+        f"Owner says ({key}): {fence(value)}"
+        for key in DESCRIPTION_FIELDS
+        if (value := (description.get(key) or "").strip())
+    ]
 
 
 _BLUEPRINT_PARTS = ("identity", "audience", "voice", "pillars")
@@ -352,6 +362,7 @@ __all__ = [
     "apply_typed_fields",
     "blueprint_lines",
     "build_analyst_prompt",
+    "owner_lines",
     "parse_analysis",
     "resolve_analyze_fn",
     "run_pinned_agent",
