@@ -60,6 +60,13 @@ def _normalise_domain(v: str) -> str:
     return v
 
 
+def _brand_or_none(v: str | None) -> str | None:
+    """A blank brand id means "no brand", stored as None so the unbranded
+    filter and the backfill both find the row."""
+    v = v.strip() if v is not None else None
+    return v or None
+
+
 class CreateProspectRequest(BaseModel):
     """A prospect at capture time. Only ``domain`` is required.
 
@@ -100,6 +107,8 @@ class CreateProspectRequest(BaseModel):
     # the DTO cannot re-check it, because by here an address is just a string.
     icp_id: str | None = None
     source_urls: list[str] = Field(default_factory=list, max_length=20)
+
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
 
     @field_validator("domain")
     @classmethod
@@ -450,6 +459,8 @@ class CreateIcpRequest(BaseModel):
     max_per_run: int = Field(default=DEFAULT_ICP_MAX_PER_RUN, ge=1, le=MAX_ICP_MAX_PER_RUN)
     status: IcpStatus = "active"
 
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
+
     @field_validator("name", "criteria")
     @classmethod
     def _non_blank(cls, v: str) -> str:
@@ -569,6 +580,8 @@ class CreateDraftRequest(BaseModel):
     # The brand. Omitted means the prospect's brand (the usual case).
     profile_id: str | None = Field(default=None, max_length=64)
 
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
+
     @field_validator("body")
     @classmethod
     def _non_blank_body(cls, v: str) -> str:
@@ -648,6 +661,8 @@ class DraftProspectRequest(BaseModel):
     instructions: str = Field(default="", max_length=1000)
     # The brand the drafts are written under. Omitted means the prospect's.
     profile_id: str | None = Field(default=None, max_length=64)
+
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
 
 
 class DraftSkipped(BaseModel):

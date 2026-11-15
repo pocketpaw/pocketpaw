@@ -219,6 +219,30 @@ async def test_another_workspaces_brand_is_refused_on_create(w1):
     assert await ProspectDoc.find({"profile_id": foreign}).count() == 0
 
 
+@pytest.mark.asyncio
+async def test_a_blank_brand_is_stored_as_no_brand(w1):
+    p = (await w1.post(f"{API}/prospects", json=_payload(profile_id=""))).json()
+    icp = (
+        await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": " "})
+    ).json()
+    assert (await ProspectDoc.get(PydanticObjectId(p["id"]))).profile_id is None
+    assert (await IcpDoc.get(PydanticObjectId(icp["id"]))).profile_id is None
+    listed = (await w1.get(f"{API}/prospects", params={"profile_id": ""})).json()["items"]
+    assert [r["id"] for r in listed] == [p["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_brand_filter_never_reads_another_workspace(w1):
+    brand = await _brand("w1", "A")
+    mine = (await w1.post(f"{API}/prospects", json=_payload(profile_id=brand))).json()
+    # A w2 row carrying w1's brand id (it cannot get there via the API).
+    await ProspectDoc.get_pymongo_collection().insert_one(
+        {"workspace": "w2", "domain": "theirs.io", "source": "manual", "profile_id": brand}
+    )
+    listed = (await w1.get(f"{API}/prospects", params={"profile_id": brand})).json()["items"]
+    assert [r["id"] for r in listed] == [mine["id"]]
+
+
 # ---------------------------------------------------------------------------
 # Mapper round-trip: fails if any hop drops the field
 # ---------------------------------------------------------------------------
