@@ -208,5 +208,19 @@
     "find": "    return v or None\n",
     "replace": "    return v\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py::test_a_blank_brand_is_stored_as_no_brand"
+  },
+  {
+    "label": "brand: discovery files prospects without the hunt's brand",
+    "file": "ee/pocketpaw_ee/cloud/growth/discovery.py",
+    "find": "                    profile_id=icp.profile_id,\n",
+    "replace": "",
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_discovery_files_prospects_under_the_hunts_brand"
+  },
+  {
+    "label": "brand: pulse 'Add as prospects' files them without the hunt's brand",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                profile_id=icp.profile_id,  # the hunt's brand\n",
+    "replace": "",
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_pulse_add_as_prospects_files_under_the_hunts_brand"
   }
 ]

@@ -243,6 +243,52 @@ async def test_a_brand_filter_never_reads_another_workspace(w1):
     assert [r["id"] for r in listed] == [mine["id"]]
 
 
+@pytest.mark.asyncio
+async def test_discovery_files_prospects_under_the_hunts_brand(w1):
+    from pocketpaw_ee.cloud.growth.discovery import run_discovery
+
+    from tests.cloud.growth.test_discovery import FakeResearch, _company
+
+    brand = await _brand("w1", "A")
+    icp = (
+        await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": brand})
+    ).json()
+    await run_discovery("w1", icp["id"], FakeResearch(_company("found.io")))
+    row = await ProspectDoc.find_one({"workspace": "w1", "domain": "found.io"})
+    assert row is not None and row.profile_id == brand
+
+
+@pytest.mark.asyncio
+async def test_pulse_add_as_prospects_files_under_the_hunts_brand(w1):
+    from pocketpaw_ee.cloud.growth.social.pulse import (
+        PulseResult,
+        PulseSource,
+        set_production_pulse_fn,
+    )
+
+    from tests.cloud.growth.social.test_hunt_pulse import _theme
+
+    brand = await _brand("w1", "A")
+    icp = (
+        await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": brand})
+    ).json()
+
+    async def build(brief, sources):
+        return PulseResult(
+            sources=(PulseSource("reddit", "subreddit", "agency"),), themes=(_theme(),)
+        )
+
+    set_production_pulse_fn(build)
+    try:
+        url = f"{API}/icps/{icp['id']}/pulse"
+        assert (await w1.post(f"{url}/refresh", json={})).status_code == 200
+        assert (await w1.post(f"{url}/prospects", json={"theme": 0})).status_code == 200
+    finally:
+        set_production_pulse_fn(None)
+    row = await ProspectDoc.find_one({"workspace": "w1", "domain": "acme-agency.com"})
+    assert row is not None and row.profile_id == brand
+
+
 # ---------------------------------------------------------------------------
 # Mapper round-trip: fails if any hop drops the field
 # ---------------------------------------------------------------------------
