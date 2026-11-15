@@ -1,107 +1,47 @@
-# ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service
-# and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse,
-# SocialPostizOrg, SocialPostMetric, RepoMetric, ReplyDraft and SocialLink doc
-# writes (service-is-repo; the import-linter "Growth" contract keeps the routers,
-# DTOs, domain, the agents and the Postiz client off the doc classes).
+# ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service and
+# the SOLE owner of the SocialProfile, SocialIdea, SocialPulse, SocialPostizOrg,
+# SocialPostMetric, RepoMetric, ReplyDraft and SocialLink doc writes
+# (service-is-repo; the import-linter "Growth" contract keeps every other module
+# off the doc classes). Writes carry ``# no-event:``: nothing subscribes; the UI
+# re-fetches.
 #
-# Tenancy: every read filters on ``workspace``; malformed, missing and
-# cross-tenant profile and idea ids raise the same NotFound so existence never
-# leaks. A workspace may hold several profiles (one per brand). Every profile
-# route takes an optional ``profile_id``; without one it acts on the most
-# recently updated unarchived profile, and ``upsert_profile`` creates the first.
-# Ideas belong to one profile. A brand can be renamed (``company_name``) or
-# archived: archiving stamps ``archived_at``, deletes the brand's posts still
-# queued in Postiz and unschedules its scheduled ideas through
-# ``unschedule_idea`` (a repeat retries both; failures are logged and skipped);
-# archived brands leave the list, the default pick
-# and every cron sweep, but a read by id still returns them.
+# Tenancy: every read filters on ``workspace``; malformed, missing and foreign ids
+# raise the same NotFound. A workspace holds one profile per brand; routes take an
+# optional ``profile_id`` and default to the most recently updated unarchived one.
+# Archiving stamps ``archived_at``, deletes the brand's queued Postiz posts and
+# unschedules its ideas; archived brands leave lists and cron sweeps but still
+# read by id. A PUT replaces only the fields sent (analysis edits included; an
+# explicit ``null`` resets a registry field).
 #
-# A PUT may carry a hand-edited ``analysis``: only the editable fields sent are
-# replaced (``pages_read`` / ``logo_url`` stay server-owned), ``analyzed_at`` is
-# untouched, and a ``none`` / ``failed`` status becomes ``ready``. The product
-# registry fields (``active``, ``weekly_post_quota``, ``github_repos``) are set
-# only when sent; an explicit ``null`` resets one to its default.
+# Agents: analysis, ideas, memes and pulse run in-request behind their seams
+# (503 when none is installed; a failed run is a 502, or ``analysis_status=
+# "failed"`` for analysis, written with one atomic ``$set``). Ideas need a
+# completed onboarding. Ideas, the daily X drafts and reply cards read the brand's
+# approved Blueprint once per run (never a draft), hand it to the agent and stamp
+# ``blueprint_version`` on every row made; without one they read the profile.
 #
-# Analysis runs in-request, like ``growth.service.preview_icp``: 503 when no
-# ``AnalyzeFn`` is installed, then 404 (no profile), then 422 (neither website
-# nor description). Any fetch or model failure is saved as
-# ``analysis_status="failed"`` with a short ``analysis_error`` and returned as a
-# 200; a failed run leaves the previous ``analysis`` / ``analyzed_at`` in place.
-# The result is written with one atomic ``$set`` of the analysis fields, so a
-# PUT that lands during the 20–60 s run is not clobbered.
+# Crons (cross-workspace reads, one failing profile never stops a sweep):
+# ``run_daily_drafts`` drafts X posts within the X budget (the Blueprint's x
+# channel, else ``weekly_post_quota``; 0 skips with a log) and two a day, built on
+# the last 24 h of GitHub changes and checked by ``ideas.check_draft`` with one
+# retry; ``run_reply_drafts`` drafts reply cards a person posts by hand from an
+# intent link; ``run_repo_metrics`` stores one RepoMetric per repo and day
+# (reruns refresh in place); ``run_post_metrics`` stores append-only X snapshots
+# through the capped, read-only ``x_api``. Nothing here posts to X on its own.
 #
-# Ideas: generating needs a completed onboarding (409 otherwise, including no
-# profile) and an installed ``IdeasFn`` (503); a failed or empty run is a 502.
-# Recent hooks are passed so the agent does not repeat itself. Writes carry
-# ``# no-event:`` markers: Growth › Social has no realtime subscriber; the
-# dashboard re-fetches.
+# Accounts and posting: each profile has its own Postiz org (created on first
+# connect, never on a read; API key stored encrypted and checked first, since org
+# creation is not idempotent). Telegram connects by code. A post checks its media,
+# idea and every target before Postiz is called, so a bad target never half-sends;
+# only created posts are added to the idea's ``post_ids``. Media lives on the public
+# bucket, content-addressed by workspace and profile. A post's first URL becomes a
+# tracked SocialLink sent as a ``Link:`` thread part; ``record_click`` counts per
+# UTC day unless a preview bot asked, and stores nothing about the requester.
 #
-# Daily X drafts: ``run_daily_drafts`` (the growth worker's 05:30 UTC cron, the
-# one cross-workspace read here) and ``draft_daily`` (the on-demand route) both
-# go through ``_draft_daily``: an active, onboarded profile gets at most its
-# X budget daily drafts per rolling 7 days (the approved Blueprint's x channel
-# ``posts_per_week``, else ``weekly_post_quota``) and two per UTC day,
-# built on the last 24 h of its GitHub changes, for X only. Every draft must
-# pass ``ideas.check_draft`` (one retry carries the reasons); the rest are
-# dropped. Survivors are stored ``new`` with ``source="daily"`` and a
-# ``suggested_at`` slot from ``DAILY_SLOT_HOURS_UTC``. Nothing here posts.
-#
-# Repo metrics: ``run_repo_metrics`` (the 06:30 UTC cron, a cross-workspace read)
-# stores one ``RepoMetric`` per (workspace, repo, yesterday UTC) for every active
-# profile's valid ``github_repos``, reading each repo once per run. A rerun the same
-# day refreshes that day's row in place, never a second row, and keeps traffic
-# an earlier run stored when its own traffic read failed. ``repo_metrics`` reads
-# one workspace's rows back. ``metrics_summary`` (the Today strip) is a pure read of
-# yesterday's X posts with their latest snapshot and clicks, plus 14 days per repo.
-#
-# Accounts: each profile's social accounts live in its own Postiz org, created
-# on the first connect and never on a read. Its API key is stored encrypted, and
-# the key is checked before Postiz is called, because org creation is not
-# idempotent. A disconnect first confirms the id is in that profile's org.
-# Telegram connects by code: ``connect_account`` stores Postiz's state on the
-# org row, and ``check_telegram`` sweeps the bot's pending ``/connect`` messages
-# onto every unexpired row whose code they name (across workspaces, so confirming
-# the batch never drops another tenant's) before finishing the caller's connect.
-# Posting checks the media (public URL, one video or up to four images), the
-# idea and every target (owned by the profile's org, a postable platform, a
-# channel where the platform needs one) before Postiz is asked to publish, so a
-# bad target never leaves a half-sent post. Media rides the first value entry,
-# thread parts follow; a video is dropped for platforms outside VIDEO_PLATFORMS.
-# A post with ``scheduled_at`` goes to Postiz as ``type: "schedule"`` at that
-# UTC time (Postiz's own workflow holds it until then); without one it is
-# ``type: "now"``. Only after Postiz returns created posts are their ids added to
-# the linked idea's ``post_ids`` (workspace-filtered write), so a failed post
-# leaves the idea untouched.
-# Media is stored on the deployment's public bucket (not in Postiz, whose storage
-# is local or R2-only), content-addressed under the workspace and profile. The
-# posts list never creates an org.
-# Post metrics: ``run_post_metrics`` (the 07:00 UTC cron) records each X idea's
-# live post from Postiz, then stores append-only X metric snapshots at 1/3/7/28
-# days through the capped, read-only ``x_api`` reader. Nothing here writes to X.
-# Reply cards: ``run_reply_drafts`` (05:45 UTC cron) and ``draft_replies`` draft X
-# replies via ``replies``; a person posts each by hand from its intent link.
-# Learning loop: one running experiment per profile (409 otherwise; its fields are
-# fixed at create, only a close moves the verdict); daily drafts alternate its arms
-# and are stamped. ``get_review`` is a read-only weekly review. Learnings reach
-# the ideas prompt only once approved (newest 10); nothing tunes itself.
-# Brand Blueprint: ideas, daily drafts and reply cards read the brand's approved
-# Blueprint once per run (``blueprint.approved_for``; a draft never), hand it to
-# the agent and stamp its version on every row made (``blueprint_version``).
-#
-# Tracked links: when a post names an idea and its body holds a URL, the first
-# URL becomes a SocialLink (reused per idea + URL), leaves the body, and goes out
-# as a ``Link: <base>/<code>`` thread part appended after the others (a post that
-# is only the URL keeps the tracked link in its body). Postiz posts parts as
-# replies (X and Slack both have ``comment()`` at v2.25.0). Posts with no idea
-# or no URL are sent unchanged. ``record_click`` (the public ``/go/{code}``)
-# checks the code pattern before reading, ``$inc``s the total and the UTC day
-# bucket unless a preview bot asked, and stores nothing about the requester.
-#
-# Setup checklist: ``setup_status`` derives each row (scan = a completed analysis,
-# blueprint = an approved version, accounts = an enabled account in the Accounts
-# list lookup, repos, daily drafts = ``active``); done beats a skip. The accounts
-# read is bounded at 4 s and never fatal. ``skip_setup`` $addToSet / $pull on
-# ``setup_skipped``.
+# Learning loop: one running experiment per profile; daily drafts alternate its
+# arms and are stamped. Learnings reach the ideas prompt only once approved.
+# ``setup_status`` derives the setup checklist (done beats a skip; the accounts
+# read is bounded at 4 s and never fatal); ``skip_setup`` edits ``setup_skipped``.
 
 from __future__ import annotations
 
