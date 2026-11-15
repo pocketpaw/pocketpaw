@@ -795,8 +795,8 @@
   {
     "label": "blueprint: a stale draft save overwrites the approved",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "        if not await _set_if(match, _draft_edit(body)):\n            raise _stale()",
-    "replace": "        match.pop(\"status\")\n        if not await _set_if(match, _draft_edit(body)):\n            raise _stale()",
+    "find": "        if not await _set_if(match, edit):\n            raise _stale()",
+    "replace": "        match.pop(\"status\")\n        if not await _set_if(match, edit):\n            raise _stale()",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -997,6 +997,87 @@
     "replace": "\"; \".join(p.hooks)",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "plan: overlapping phases pick the last listed, not the earliest start",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/plan.py",
+    "find": "    return min(covering, key=lambda p: p.start, default=None)\n",
+    "replace": "    return covering[-1] if covering else None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "plan: a scheduled idea past the day's cadence is dropped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/plan.py",
+    "find": "                for x in placed\n",
+    "replace": "                for x in placed[: _share(weekly.get(channel, 0), i)]\n",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "plan: the draft blueprint shapes the plan instead of the approved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    doc = await _find(workspace_id, profile_id, \"approved\")\n    return _to_domain(doc) if doc is not None else None\n",
+    "replace": "    doc = await _find(workspace_id, profile_id, \"draft\")\n    return _to_domain(doc) if doc is not None else None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "tenancy: the plan's idea read drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"workspace\": workspace_id,\n            \"profile\": profile_id,\n            \"scheduled_at\": {\"$gte\": start, \"$lt\": end},\n",
+    "replace": "            \"profile\": profile_id,\n            \"scheduled_at\": {\"$gte\": start, \"$lt\": end},\n",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "tenancy: the plan's waiting-idea read drops its profile filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                \"workspace\": workspace_id,\n                \"profile\": profile_id,\n                \"status\": \"approved\",\n                \"platform\":",
+    "replace": "                \"workspace\": workspace_id,\n                \"status\": \"approved\",\n                \"platform\":",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "plan: waiting ideas fill empty slots outside the current week",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/plan.py",
+    "find": "    fill_from = today if monday <= today <= days[-1] else None\n",
+    "replace": "    fill_from = today\n",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "plan: waiting ideas fill empty slots on past days of the week",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/plan.py",
+    "find": "if fill_from is not None and day >= fill_from else []",
+    "replace": "if fill_from is not None else []",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "plan: the waiting-idea read ignores the slot's channel",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                \"platform\": {\"$in\": [\"x\", \"\"]} if channel == \"x\" else channel,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "plan: a phase cadence wipes the channels it does not name",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/plan.py",
+    "find": "        weekly.update({c.channel: c.posts_per_week for c in phase.cadence})\n",
+    "replace": "        weekly = {c.channel: c.posts_per_week for c in phase.cadence}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_roadmap_plan.py"
     ]
   }
 ]

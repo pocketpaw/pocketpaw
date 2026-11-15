@@ -10299,6 +10299,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=` (versions): per-section `added`, `removed` and `changed` keys. |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
 | `POST /api/v1/growth/social/setup-status/skip` | `{key, skipped?}`: skip one checklist row, or un-skip it with `skipped: false`. Idempotent; an unknown key is a 422. Returns the checklist. |
+| `GET /api/v1/growth/social/plan` | `?week=YYYY-Www`: the week's post slots per day, computed from the approved blueprint and the ideas (see Weekly Plan). |
 
 **Response (`SocialProfile`)** — every profile route returns this shape:
 
@@ -10780,7 +10781,13 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   "pillars": [{"name": "Speed", "weight": 34, "hooks": ["…"]}],
   "channels": [{"channel": "x", "posts_per_week": 5, "sends_per_week": 0}],
   "goals": [{"id": "a1b2…", "metric": "signups", "target": 40, "channel": "x"}],
-  "roadmap": {"phases": []},
+  "roadmap": {"phases": [{
+    "id": "c3d4…", "name": "This week", "start": "2026-11-15", "end": "2026-11-21",
+    "cadence": [{"channel": "x", "posts_per_week": 5}],
+    "goal_ids": ["a1b2…"],
+    "milestones": [{"id": "e5f6…", "title": "Launch post", "date": "2026-11-18",
+                    "status": "planned", "link": null}]
+  }]},
   "learning_ids": [],
   "created_by": "user id",
   "approved_by": null,
@@ -10793,21 +10800,32 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
 - `channel` is one of `x`, `reddit`, `email`, `whatsapp`, `linkedin`. A pillar
   `weight` is 0..100, `posts_per_week` 0..50, `sends_per_week` 0..5000, a goal
   `target` at least 0. Pillar names, channels and goal ids are unique in a version.
+- A roadmap phase runs `start` to `end` (inclusive days, `start` <= `end`); each
+  milestone `date` falls inside its phase, `status` is `planned`, `doing` or
+  `done`, and `link` is an http(s) URL or null. A phase `cadence` names each
+  channel once at `posts_per_week` 0..21. Phase and milestone ids are unique; one
+  sent without an id gets one; milestone ids are unique across the whole roadmap.
+  At most 20 phases and 20 milestones per phase.
+  A phase's `goal_ids` must name goals of the same draft: a save that leaves one
+  dangling (a new phase, or a removed goal) is `422 social.blueprint_unknown_goal`.
 - `seed` builds version 1 from the profile's analysis (or what the owner typed
   when there is none): summary, product, problem, audience segments, tone, avoid,
   the content pillars at equal weights summing to 100 with the hooks dealt across
   them, the weekly post quota as the `x` channel's `posts_per_week`, and the
   criteria of the active ICPs for this brand, then the unbranded ones (at most 5),
-  as `icp_sentences`. No goals. Seeded text goes through the same dash and number
+  as `icp_sentences`. No goals. A first roadmap: "This week" (today to +6 days)
+  and "Next 4 weeks" (+7 to +34), each with every channel's `posts_per_week` as
+  its cadence (capped at 21) and no milestones. Seeded text goes through the same dash and number
   check as `regenerate`; a failing field seeds empty and a failing item is dropped.
 - `PUT /blueprint/draft` takes any of `identity`, `audience`, `voice`, `pillars`,
-  `channels`, `goals`; each one sent replaces that section. Any other key
-  (`status`, `version`, `roadmap`…) is a 422. A goal without an `id` gets one.
+  `channels`, `goals`, `roadmap`; each one sent replaces that section. Any other
+  key (`status`, `version`, `approved_by`…) is a 422. A goal without an `id` gets one.
   `404 social_blueprint.not_found` before the blueprint is seeded.
 - `regenerate` runs the website analyst and writes its text into a NEW draft
   version built on the current draft (or the approved), superseding the old draft.
   Numbers are never generated: channels, goals, the roadmap and learning ids are
-  copied over, a pillar keeps its weight by name, and a newly named pillar gets 0.
+  copied over (when the base roadmap is empty, the first roadmap is seeded as in
+  `seed`), a pillar keeps its weight by name, and a newly named pillar gets 0.
   Text with an em or en dash, or a number the owner never typed, is dropped (a
   field keeps its previous value). `503 social.analyzer_unavailable` with no
   analyser, `404` before seeding, `422` with neither website nor description,
@@ -10820,9 +10838,40 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
 - `diff` returns `{from_version, to_version, sections: {identity, audience,
   voice, pillars, channels, goals, roadmap}}`, each `{added, removed, changed}`.
   Keys are field names for the object sections (an empty value counts as absent)
-  and pillar names, channel names or goal ids for the lists. An unknown version
-  is `404 social_blueprint_version.not_found`.
-- `roadmap.phases` stays empty for now.
+  and pillar names, channel names, goal ids or roadmap phase ids for the lists.
+  An unknown version is `404 social_blueprint_version.not_found`.
+
+### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`
+
+Computed on read (nothing stored) from the profile's APPROVED blueprint, never the
+draft. `growth.read`, `?profile_id=` like its siblings. A week that is not an ISO
+week (`2026-W46`) is a 422.
+
+```json
+{"week": "2026-W46", "days": [
+  {"date": "2026-11-09", "slots": [
+    {"channel": "x", "idea_id": "6721…", "scheduled_at": "2026-11-09T09:00:00+00:00"},
+    {"channel": "x", "idea_id": "6722…", "scheduled_at": null},
+    {"channel": "reddit", "idea_id": null, "scheduled_at": null}
+  ]}
+]}
+```
+
+- A day's slots per channel start from the blueprint channel's `posts_per_week`;
+  the roadmap phase covering that day (earliest start wins when phases overlap, a
+  tie goes to the first listed) overrides only the channels its cadence names, so
+  a phase with an empty cadence keeps every default. With no approved blueprint
+  there are none. Only `x`, `reddit` and `linkedin`
+  get slots; email and WhatsApp sends stay in the blueprint.
+- A weekly count n is spread by weekday (Monday first): `n // 7` a day, plus one
+  on the first `n % 7` days, so 3 a week is Monday, Tuesday, Wednesday.
+- An idea scheduled that week (unless `skipped`) sits on its UTC date (with
+  `scheduled_at`); one past the day's count is still listed as an extra slot, so a
+  scheduled idea never moves or disappears when the cadence changes. Only in the
+  current week (UTC) do the empty slots on today and later, day by day, take
+  approved ideas for that channel with no date and no post yet, oldest first
+  (`scheduled_at` null). Past days, and past or future weeks, show the scheduled
+  ideas and empty slots only.
 
 **Agents follow the approved Blueprint.** The ideas agent (generate and the
 daily X drafts), the reply drafter, the outreach writer and hunt research read

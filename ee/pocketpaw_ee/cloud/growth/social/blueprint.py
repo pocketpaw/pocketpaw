@@ -16,6 +16,14 @@
 # split of 100 computed here, or 0 for a pillar the analyst newly named; channel
 # cadences come from the profile or the owner; goals are owner-entered only, and
 # regenerate copies channels, goals, the roadmap and learning ids unchanged.
+# The roadmap is an owner edit too, with one exception: when ``seed`` writes, or
+# ``regenerate`` builds on a base whose roadmap is empty, a first roadmap is
+# seeded: "This week" (today .. +6 days) and "Next 4 weeks" (+7 .. +34), each
+# with every channel's ``posts_per_week`` as its cadence (capped at the cadence
+# max of 21) and no milestones. Roadmap dates are stored as ISO strings (BSON has
+# no date type); a stored phase that no longer parses is dropped on read. A draft
+# save that changes goals or the roadmap is a 422 when a phase names a goal id
+# the resulting draft does not have.
 # Seeded and regenerated text must pass ``ideas.check_texts`` (no em or en dash,
 # no number the owner did not type): a failing item is dropped; a failing field
 # seeds empty, or on regenerate keeps its previous value. Seed's ICP sentences are
@@ -37,7 +45,7 @@ from __future__ import annotations
 import copy
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from pymongo.errors import DuplicateKeyError
@@ -59,12 +67,17 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     BlueprintGoal,
     BlueprintIdentity,
     BlueprintPillar,
+    BlueprintRoadmap,
     BlueprintVoice,
     GrowthBlueprint,
+    RoadmapCadence,
+    RoadmapMilestone,
+    RoadmapPhase,
     SocialAnalysis,
     SocialProfile,
 )
 from pocketpaw_ee.cloud.growth.social.dto import (
+    MAX_WEEKLY_POST_QUOTA,
     BlueprintAudienceModel,
     BlueprintChannelModel,
     BlueprintDiffResponse,
@@ -76,6 +89,9 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     BlueprintStateResponse,
     BlueprintVoiceModel,
     GrowthBlueprintResponse,
+    RoadmapCadenceModel,
+    RoadmapMilestoneModel,
+    RoadmapPhaseModel,
     SaveBlueprintDraftRequest,
 )
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as _BlueprintDoc
@@ -105,6 +121,41 @@ def _int(value: Any) -> int:
 
 def _dicts(value: Any) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def _phase(p: dict) -> RoadmapPhase | None:
+    """A stored phase, or None when its dates no longer parse."""
+    try:
+        return RoadmapPhase(
+            id=_str(p.get("id")),
+            name=_str(p.get("name")),
+            start=date.fromisoformat(p["start"]),
+            end=date.fromisoformat(p["end"]),
+            cadence=tuple(
+                RoadmapCadence(
+                    channel=_str(c.get("channel")), posts_per_week=_int(c.get("posts_per_week"))
+                )
+                for c in _dicts(p.get("cadence"))
+            ),
+            goal_ids=_strs(p.get("goal_ids")),
+            milestones=tuple(
+                RoadmapMilestone(
+                    id=_str(m.get("id")),
+                    title=_str(m.get("title")),
+                    date=date.fromisoformat(m["date"]),
+                    status=_str(m.get("status")) or "planned",
+                    link=_str(m.get("link")) or None,
+                )
+                for m in _dicts(p.get("milestones"))
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _roadmap(value: Any) -> BlueprintRoadmap:
+    phases = (_phase(p) for p in _dicts((value or {}).get("phases")))
+    return BlueprintRoadmap(phases=tuple(p for p in phases if p is not None))
 
 
 def _to_domain(doc: _BlueprintDoc) -> GrowthBlueprint:
@@ -150,7 +201,7 @@ def _to_domain(doc: _BlueprintDoc) -> GrowthBlueprint:
             )
             for g in _dicts(doc.goals)
         ),
-        roadmap={"phases": _dicts((doc.roadmap or {}).get("phases"))},
+        roadmap=_roadmap(doc.roadmap),
         learning_ids=tuple(doc.learning_ids or ()),
         created_by=doc.created_by,
         approved_by=doc.approved_by,
@@ -188,7 +239,28 @@ def _to_response(bp: GrowthBlueprint) -> GrowthBlueprintResponse:
             BlueprintGoalModel(id=g.id, metric=g.metric, target=g.target, channel=g.channel)
             for g in bp.goals
         ],
-        roadmap=BlueprintRoadmapModel(phases=list(bp.roadmap.get("phases") or [])),
+        roadmap=BlueprintRoadmapModel(
+            phases=[
+                RoadmapPhaseModel(
+                    id=p.id,
+                    name=p.name,
+                    start=p.start,
+                    end=p.end,
+                    cadence=[
+                        RoadmapCadenceModel(channel=c.channel, posts_per_week=c.posts_per_week)
+                        for c in p.cadence
+                    ],
+                    goal_ids=list(p.goal_ids),
+                    milestones=[
+                        RoadmapMilestoneModel(
+                            id=m.id, title=m.title, date=m.date, status=m.status, link=m.link
+                        )
+                        for m in p.milestones
+                    ],
+                )
+                for p in bp.roadmap.phases
+            ]
+        ),
         learning_ids=list(bp.learning_ids),
         created_by=bp.created_by,
         approved_by=bp.approved_by,
@@ -319,6 +391,48 @@ def _analysis_or_typed(profile: SocialProfile) -> SocialAnalysis:
     )
 
 
+def _today() -> date:
+    """Today in UTC; the seam tests freeze."""
+    return datetime.now(UTC).date()
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def _first_roadmap(channels: list[dict]) -> dict[str, Any]:
+    """Two phases from today, each with the channels' own weekly post counts."""
+    today = _today()
+    cadence = [
+        {
+            "channel": _str(c.get("channel")),
+            # ponytail: a channel allows 50 posts a week, a cadence 21; cap rather than refuse.
+            "posts_per_week": min(_int(c.get("posts_per_week")), MAX_WEEKLY_POST_QUOTA),
+        }
+        for c in _dicts(channels)
+    ]
+    return {
+        "phases": [
+            {
+                "id": _new_id(),
+                "name": name,
+                "start": (today + timedelta(days=first)).isoformat(),
+                "end": (today + timedelta(days=last)).isoformat(),
+                "cadence": copy.deepcopy(cadence),
+                "goal_ids": [],
+                "milestones": [],
+            }
+            for name, first, last in (("This week", 0, 6), ("Next 4 weeks", 7, 34))
+        ]
+    }
+
+
+def _with_first_roadmap(sections: dict[str, Any]) -> dict[str, Any]:
+    if not _dicts((sections.get("roadmap") or {}).get("phases")):
+        sections["roadmap"] = _first_roadmap(sections.get("channels") or [])
+    return sections
+
+
 async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[str, Any]:
     """Seed text passes the same dash / number check as regenerate; a failing field
     seeds empty and a failing item is dropped."""
@@ -328,7 +442,7 @@ async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[st
     def text(value: str) -> str:
         return value if _passes(value, source) else ""
 
-    return {
+    sections = {
         "identity": {name: text(getattr(a, name)) for name in ("summary", "product", "problem")},
         "audience": {
             "segments": _checked(_segments(a.audience), source),
@@ -346,6 +460,7 @@ async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[st
         "goals": [],
         "roadmap": {"phases": []},
     }
+    return _with_first_roadmap(sections)
 
 
 def _carried(doc: _BlueprintDoc) -> dict[str, Any]:
@@ -392,7 +507,7 @@ def _regenerated(base: _BlueprintDoc, a: SocialAnalysis, source: str) -> dict[st
             for p in pillars:
                 p["hooks"] = old_hooks.get(p["name"].lower(), [])
         out["pillars"] = pillars
-    return out
+    return _with_first_roadmap(out)
 
 
 # ---------------------------------------------------------------------------
@@ -458,17 +573,41 @@ async def seed(ctx: RequestContext, profile_id: str | None = None) -> BlueprintS
 
 def _draft_edit(body: SaveBlueprintDraftRequest) -> dict[str, Any]:
     """The sections sent, in full shape (nested defaults included) so every stored
-    version diffs alike; goals without an id get one."""
-    dumped = body.model_dump()
+    version diffs alike; goals, phases and milestones without an id get one. JSON
+    mode, so roadmap dates land as ISO strings."""
+    dumped = body.model_dump(mode="json")
     out: dict[str, Any] = {}
     for name in body.model_fields_set:
         value = dumped[name]
         if value is None:
             continue
         if name == "goals":
-            value = [{**g, "id": g.get("id") or uuid.uuid4().hex[:12]} for g in value]
+            value = [{**g, "id": g.get("id") or _new_id()} for g in value]
+        if name == "roadmap":
+            for phase in value["phases"]:
+                phase["id"] = phase["id"] or _new_id()
+                for m in phase["milestones"]:
+                    m["id"] = m["id"] or _new_id()
         out[name] = value
     return out
+
+
+def _check_goal_refs(base: _BlueprintDoc, edit: dict[str, Any]) -> None:
+    """When goals or the roadmap change, every phase ``goal_ids`` entry must name a
+    goal of the resulting draft."""
+    if "goals" not in edit and "roadmap" not in edit:
+        return
+    goals = {_str(g.get("id")) for g in _dicts(edit.get("goals", base.goals))}
+    roadmap = edit.get("roadmap", base.roadmap) or {}
+    unknown = sorted(
+        {g for p in _dicts(roadmap.get("phases")) for g in _strs(p.get("goal_ids"))} - goals
+    )
+    if unknown:
+        raise ValidationError(
+            "social.blueprint_unknown_goal",
+            "A roadmap phase names a goal this blueprint does not have",
+            {"goal_ids": unknown},
+        )
 
 
 async def save_draft(
@@ -478,18 +617,20 @@ async def save_draft(
     there is none. 404 before the blueprint is seeded."""
     body = SaveBlueprintDraftRequest.model_validate(body)
     workspace_id, profile = await _profile(ctx, profile_id)
+    edit = _draft_edit(body)
     draft = await _find(workspace_id, profile.id, "draft")
+    approved = None if draft is not None else await _find(workspace_id, profile.id, "approved")
+    if draft is None and approved is None:
+        raise NotFound("social_blueprint")
+    _check_goal_refs(draft or approved, edit)
     if draft is None:
-        approved = await _find(workspace_id, profile.id, "approved")
-        if approved is None:
-            raise NotFound("social_blueprint")
         draft = _BlueprintDoc(
             workspace=workspace_id,
             profile_id=profile.id,
             version=await _next_version(workspace_id, profile.id),
             status="draft",
             created_by=ctx.user_id or "",
-            **{**_carried(approved), **_draft_edit(body)},
+            **{**_carried(approved), **edit},
         )
         await _insert(draft)
     else:
@@ -501,7 +642,7 @@ async def save_draft(
             "profile_id": profile.id,
             "status": "draft",
         }
-        if not await _set_if(match, _draft_edit(body)):
+        if not await _set_if(match, edit):
             raise _stale()
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     return await _state(workspace_id, profile.id)
@@ -619,6 +760,8 @@ def _keyed(section: str, value: Any) -> dict[str, Any]:
         return {_str(c.get("channel")): c for c in _dicts(value)}
     if section == "goals":
         return {_str(g.get("id")): g for g in _dicts(value)}
+    if section == "roadmap":
+        return {_str(p.get("id")): p for p in _dicts((value or {}).get("phases"))}
     raw = value if isinstance(value, dict) else {}
     return {k: v for k, v in raw.items() if v not in ("", None, [], {})}
 

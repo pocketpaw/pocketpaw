@@ -32,13 +32,17 @@
 # (``RenameProfileRequest``) needs a trimmed, non-empty name of at most 120
 # characters, the same cap as ``company_name``. A blueprint draft save replaces
 # only the sections sent and refuses status, version and approval keys; pillar
-# names, channels and goal ids are unique within the draft. A setup skip names one
-# of the ``SetupKey`` rows (anything else is a 422).
+# names, channels and goal ids are unique within the draft. A roadmap phase runs
+# ``start`` <= ``end`` (inclusive days), its milestones fall inside it, its cadence
+# names each channel once at 0..21 posts a week, and a milestone link is http(s).
+# Phase and milestone ids are unique across the roadmap (the service mints a
+# missing one). The weekly Plan (``WeekPlanResponse``) is a read only. A setup
+# skip names one of the ``SetupKey`` rows (anything else is a 422).
 
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -58,12 +62,14 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MAX_BLUEPRINT_PILLARS,
     MAX_IDEA_COUNT,
     MAX_LEARNING_CHARS,
+    MAX_PHASE_MILESTONES,
     MAX_POST_IMAGES,
     MAX_REPLY_CARDS_PER_DAY,
     MAX_REPLY_CHARS,
     MAX_REPLY_QUERIES,
     MAX_REPLY_QUERY_CHARS,
     MAX_REPLY_WATCH_HANDLES,
+    MAX_ROADMAP_PHASES,
     MIN_POSTS_PER_ARM_DEFAULT,
     PLATFORM_FORMATS,
     AnalysisStatus,
@@ -77,6 +83,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaSource,
     IdeaStatus,
     LearningStatus,
+    MilestoneStatus,
     MonthlyRevenue,
     Platform,
     ReplyStatus,
@@ -981,9 +988,74 @@ class BlueprintGoalModel(BaseModel):
     channel: BlueprintChannelName | None = None
 
 
+_RoadmapId = Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)]
+
+
+class RoadmapCadenceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: BlueprintChannelName
+    posts_per_week: int = Field(default=0, ge=0, le=MAX_WEEKLY_POST_QUOTA)
+
+
+class RoadmapMilestoneModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: _RoadmapId = ""
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    date: date
+    status: MilestoneStatus = "planned"
+    link: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None = None
+
+    @field_validator("link")
+    @classmethod
+    def _http_link(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        parts = urlsplit(v)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("link must be an http(s) URL")
+        return v
+
+
+class RoadmapPhaseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: _RoadmapId = ""
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    start: date
+    end: date
+    cadence: list[RoadmapCadenceModel] = Field(default_factory=list)
+    goal_ids: Annotated[list[_RoadmapId], Field(max_length=MAX_BLUEPRINT_GOALS)] = Field(
+        default_factory=list
+    )
+    milestones: Annotated[list[RoadmapMilestoneModel], Field(max_length=MAX_PHASE_MILESTONES)] = (
+        Field(default_factory=list)
+    )
+
+    @model_validator(mode="after")
+    def _dated(self) -> RoadmapPhaseModel:
+        if self.start > self.end:
+            raise ValueError("a phase must start on or before its end")
+        for m in self.milestones:
+            if not self.start <= m.date <= self.end:
+                raise ValueError(f"milestone {m.title!r} falls outside its phase")
+        _unique([c.channel for c in self.cadence], "cadence channels")
+        return self
+
+
 class BlueprintRoadmapModel(BaseModel):
-    # ponytail: phases stay untyped dicts until the roadmap slice (GX-6) types them.
-    phases: list[dict] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    phases: Annotated[list[RoadmapPhaseModel], Field(max_length=MAX_ROADMAP_PHASES)] = Field(
+        default_factory=list
+    )
+
+    @model_validator(mode="after")
+    def _distinct(self) -> BlueprintRoadmapModel:
+        _unique([p.id for p in self.phases if p.id], "phase ids")
+        _unique([m.id for p in self.phases for m in p.milestones if m.id], "milestone ids")
+        return self
 
 
 _Pillars = Annotated[list[BlueprintPillarModel], Field(max_length=MAX_BLUEPRINT_PILLARS)]
@@ -998,8 +1070,8 @@ def _unique(values: list[str], what: str) -> None:
 
 class SaveBlueprintDraftRequest(BaseModel):
     """``PUT /blueprint/draft``: each section sent replaces that section of the draft;
-    an omitted section is kept. Status, version, approval and the roadmap are not
-    editable here (extra keys are a 422)."""
+    an omitted section is kept. Status, version and approval are not editable here
+    (extra keys are a 422)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1009,6 +1081,7 @@ class SaveBlueprintDraftRequest(BaseModel):
     pillars: _Pillars | None = None
     channels: list[BlueprintChannelModel] | None = None
     goals: _Goals | None = None
+    roadmap: BlueprintRoadmapModel | None = None
 
     @model_validator(mode="after")
     def _distinct(self) -> SaveBlueprintDraftRequest:
@@ -1050,8 +1123,8 @@ class BlueprintStateResponse(BaseModel):
 
 
 class BlueprintSectionDiff(BaseModel):
-    """Keys of one section: field names for identity/audience/voice/roadmap, pillar names,
-    channel names or goal ids for the list sections."""
+    """Keys of one section: field names for identity/audience/voice, pillar names,
+    channel names, goal ids or roadmap phase ids for the list sections."""
 
     added: list[str] = Field(default_factory=list)
     removed: list[str] = Field(default_factory=list)
@@ -1080,3 +1153,25 @@ class SkipSetupRequest(BaseModel):
 
     key: SetupKey
     skipped: bool = True
+
+
+# --- Weekly Plan ----------------------------------------------------------------------------
+
+
+class PlanSlotModel(BaseModel):
+    """One post slot: empty (``idea_id`` null), filled by a scheduled idea
+    (``scheduled_at`` set) or by an approved idea waiting for a date."""
+
+    channel: str
+    idea_id: str | None = None
+    scheduled_at: str | None = None
+
+
+class PlanDayModel(BaseModel):
+    date: str
+    slots: list[PlanSlotModel]
+
+
+class WeekPlanResponse(BaseModel):
+    week: str
+    days: list[PlanDayModel]

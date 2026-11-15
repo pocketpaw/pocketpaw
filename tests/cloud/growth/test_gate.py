@@ -1063,6 +1063,7 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/blueprint/approve"): "growth.manage",
             ("GET", "/growth/social/setup-status"): "growth.read",
             ("POST", "/growth/social/setup-status/skip"): "growth.write",
+            ("GET", "/growth/social/plan"): "growth.read",
         }
 
         seen: dict[tuple[str, str], str] = {}
