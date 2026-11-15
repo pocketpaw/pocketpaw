@@ -8,6 +8,8 @@
 # repos feed them. ``active`` defaults off so no profile starts drafting unasked.
 # ``reply_watch_handles`` / ``reply_queries`` / ``reply_cards_per_day`` feed the
 # reply-cards sweep: whose X posts and which searches to draft replies for.
+# ``archived_at`` set means the brand is archived: it leaves the profile list,
+# the default-profile pick and every cron sweep, but a read by id still works.
 #
 # ``description`` and ``analysis`` are plain dicts, shaped and validated by
 # ``growth.social.dto`` on the way in and out. Only ``ee.cloud.growth.social.
@@ -47,6 +49,7 @@ class SocialProfile(TimestampedDocument):
     reply_watch_handles: list[str] = Field(default_factory=list)
     reply_queries: list[str] = Field(default_factory=list)
     reply_cards_per_day: int = 15
+    archived_at: datetime | None = None
 
     class Settings:
         name = "growth_social_brands"

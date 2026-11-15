@@ -83,8 +83,8 @@
   {
     "label": "tenancy: the latest-profile read drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "            await _ProfileDoc.find({\"workspace\": workspace_id})",
-    "replace": "            await _ProfileDoc.find({})",
+    "find": "            await _ProfileDoc.find({\"workspace\": workspace_id, \"archived_at\": None})",
+    "replace": "            await _ProfileDoc.find({\"archived_at\": None})",
     "tests": [
       "tests/cloud/growth/social/test_router.py"
     ]
@@ -245,8 +245,8 @@
   {
     "label": "daily drafts: the sweep drafts for inactive products",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "        {\"active\": True, \"onboarding_completed_at\": {\"$ne\": None}}",
-    "replace": "        {\"onboarding_completed_at\": {\"$ne\": None}}",
+    "find": "        {\"active\": True, \"onboarding_completed_at\": {\"$ne\": None}, \"archived_at\": None}",
+    "replace": "        {\"onboarding_completed_at\": {\"$ne\": None}, \"archived_at\": None}",
     "tests": [
       "tests/cloud/growth/social/test_daily_drafts.py"
     ]
@@ -389,8 +389,8 @@
   {
     "label": "repo metrics: the sweep reads inactive profiles too",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "await _ProfileDoc.find({\"active\": True}).to_list()",
-    "replace": "await _ProfileDoc.find({}).to_list()",
+    "find": "await _ProfileDoc.find({\"active\": True, \"archived_at\": None}).to_list()",
+    "replace": "await _ProfileDoc.find({\"archived_at\": None}).to_list()",
     "tests": [
       "tests/cloud/growth/social/test_repo_metrics.py"
     ]
@@ -582,6 +582,78 @@
     "replace": "    published = {\"$gte\": yesterday_start, \"$lte\": today_start}",
     "tests": [
       "tests/cloud/growth/social/test_metrics_summary.py"
+    ]
+  },
+  {
+    "label": "brand archive: the profile list shows archived brands",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        await _ProfileDoc.find({\"workspace\": _require_workspace(ctx), \"archived_at\": None})",
+    "replace": "        await _ProfileDoc.find({\"workspace\": _require_workspace(ctx)})",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: the default profile pick can land on an archived brand",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            await _ProfileDoc.find({\"workspace\": workspace_id, \"archived_at\": None})",
+    "replace": "            await _ProfileDoc.find({\"workspace\": workspace_id})",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: archiving leaves the brand's scheduled ideas scheduled",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    for idea in scheduled:\n        await unschedule_idea(ctx, str(idea.id))\n",
+    "replace": "    for idea in scheduled:\n        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: the daily drafts sweep drafts for archived brands",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        {\"active\": True, \"onboarding_completed_at\": {\"$ne\": None}, \"archived_at\": None}",
+    "replace": "        {\"active\": True, \"onboarding_completed_at\": {\"$ne\": None}}",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: the reply cards sweep drafts for archived brands",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"onboarding_completed_at\": {\"$ne\": None},\n            \"archived_at\": None,\n            \"$or\": [",
+    "replace": "            \"onboarding_completed_at\": {\"$ne\": None},\n            \"$or\": [",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: the repo metrics sweep reads archived brands' repos",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    docs = await _ProfileDoc.find({\"active\": True, \"archived_at\": None}).to_list()",
+    "replace": "    docs = await _ProfileDoc.find({\"active\": True}).to_list()",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: the Pulse sweep refreshes archived brands",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                if profile.archived_at is not None:\n",
+    "replace": "                if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: archived_at is dropped by the domain mapper",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        archived_at=doc.archived_at,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
     ]
   }
 ]

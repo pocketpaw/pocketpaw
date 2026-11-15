@@ -5,7 +5,9 @@
 # RBAC guard (pinned by the guard-coverage test in tests/cloud/growth/
 # test_gate.py): GETs ``growth.read``, workspace-internal writes
 # ``growth.write``, and connecting or disconnecting a social account, uploading
-# media or posting (which reach an outside platform) ``growth.manage``.
+# media or posting (which reach an outside platform) ``growth.manage``, as do
+# renaming (``PATCH /profile``) and archiving (``POST /profile/archive``, which
+# needs an explicit ``profile_id``) a brand.
 # ``POST /ideas/daily`` runs the daily X drafting for one product on demand
 # (the same code the growth worker's morning cron runs); it only drafts.
 # ``/replies`` lists reply cards, ``PATCH /replies/{id}`` edits one or records what
@@ -52,6 +54,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     MemeFormatListResponse,
     MetricsSummaryResponse,
     RefreshPulseRequest,
+    RenameProfileRequest,
     ReplyDraftListResponse,
     ReplyDraftResponse,
     ScheduleIdeasRequest,
@@ -133,6 +136,34 @@ async def upsert_profile(
     """Partial upsert of the typed fields: omitted fields are left alone, an
     explicit ``null`` clears, ``description`` merges key by key."""
     return await social_service.upsert_profile(ctx, body, profile_id)
+
+
+@router.patch(
+    "/profile",
+    response_model=SocialProfileResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def rename_profile(
+    body: RenameProfileRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialProfileResponse:
+    """Rename a brand. 404 with no profile, 422 on an empty or over-long name."""
+    return await social_service.rename_profile(ctx, profile_id, body)
+
+
+@router.post(
+    "/profile/archive",
+    response_model=SocialProfileResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def archive_profile(
+    profile_id: str = Query(description="The brand to archive; required"),
+    ctx: RequestContext = Depends(request_context),
+) -> SocialProfileResponse:
+    """Archive a brand: it leaves the profile list and the cron sweeps, and its
+    scheduled ideas are unscheduled. Outreach drafts are untouched."""
+    return await social_service.archive_profile(ctx, profile_id)
 
 
 @router.post(

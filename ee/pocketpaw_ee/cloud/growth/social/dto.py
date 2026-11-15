@@ -28,7 +28,9 @@
 # ``SCHEDULE_SKEW`` in the past. Learning loop: an experiment is created whole
 # (extra keys refused, two distinct arms, format arms limited to X formats,
 # ``min_posts_per_arm`` 1..50) and only ever closed with a verdict; a learning
-# edit carries text (at most 300 characters) and/or a status.
+# edit carries text (at most 300 characters) and/or a status. A brand rename
+# (``RenameProfileRequest``) needs a trimmed, non-empty name of at most 120
+# characters, the same cap as ``company_name``.
 
 from __future__ import annotations
 
@@ -292,6 +294,13 @@ class SocialProfileResponse(BaseModel):
     reply_watch_handles: list[str]
     reply_queries: list[str]
     reply_cards_per_day: int
+    archived_at: str | None = None
+
+
+class RenameProfileRequest(BaseModel):
+    """Rename a brand: ``name`` becomes the profile's ``company_name``."""
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 
 
 class GenerateIdeasRequest(BaseModel):
