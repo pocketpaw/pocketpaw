@@ -159,9 +159,10 @@ async def test_sweep_refreshes_used_pulses_and_marks_new_evidence(w1):
         "due": 0,
         "refreshed": 0,
         "failed": 0,
+        "skipped": 0,
     }
     result = await social_service.refresh_due_pulses(datetime.now(UTC) + timedelta(days=1))
-    assert result == {"due": 1, "refreshed": 1, "failed": 0}
+    assert result == {"due": 1, "refreshed": 1, "failed": 0, "skipped": 0}
     ev = (await w1.get(f"{BASE}/icps/{icp['id']}/pulse")).json()["themes"][0]["evidence"][0]
     assert ev["url"].endswith("/2") and ev["new"] is True
 

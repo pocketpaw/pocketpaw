@@ -161,8 +161,10 @@ async def archive_profile(
     profile_id: str = Query(description="The brand to archive; required"),
     ctx: RequestContext = Depends(request_context),
 ) -> SocialProfileResponse:
-    """Archive a brand: it leaves the profile list and the cron sweeps, and its
-    scheduled ideas are unscheduled. Outreach drafts are untouched."""
+    """Archive a brand: it leaves the profile list, the default pick and the cron
+    sweeps; its posts still queued in Postiz are deleted and its scheduled ideas
+    unscheduled. A repeat keeps the first ``archived_at`` and retries the clean-up.
+    Outreach drafts are untouched."""
     return await social_service.archive_profile(ctx, profile_id)
 
 

@@ -605,8 +605,8 @@
   {
     "label": "brand archive: archiving leaves the brand's scheduled ideas scheduled",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    for idea in scheduled:\n        await unschedule_idea(ctx, str(idea.id))\n",
-    "replace": "    for idea in scheduled:\n        pass\n",
+    "find": "            await unschedule_idea(ctx, str(idea.id))\n        except",
+    "replace": "            pass\n        except",
     "tests": [
       "tests/cloud/growth/social/test_brand_archive.py"
     ]
@@ -657,28 +657,55 @@
     ]
   },
   {
-    "label": "brand archive: archiving leaves the brand's Postiz posts queued",
-    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "                await postiz.delete_post(decrypt(org.api_key_enc), post_id)\n",
-    "replace": "                pass\n",
-    "tests": [
-      "tests/cloud/growth/social/test_brand_archive.py"
-    ]
-  },
-  {
-    "label": "brand archive: one failed Postiz delete stops the rest",
-    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "                logger.warning(\"brand archive: postiz post %s not deleted (%s)\", post_id, code)\n",
-    "replace": "                raise\n",
-    "tests": [
-      "tests/cloud/growth/social/test_brand_archive.py"
-    ]
-  },
-  {
     "label": "postiz: delete_post sends the wrong verb",
     "file": "ee/pocketpaw_ee/cloud/growth/social/postiz.py",
     "find": "            \"DELETE\", f\"/public/v1/posts/{quote(post_id, safe='')}\", api_key=api_key",
     "replace": "            \"GET\", f\"/public/v1/posts/{quote(post_id, safe='')}\", api_key=api_key",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: archiving leaves the brand's queued Postiz posts",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            await postiz.delete_post(api_key, post_id)\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: archiving deletes published and errored Postiz posts too",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if not post_id or post.get(\"deletedAt\") or post.get(\"state\") != \"QUEUE\":",
+    "replace": "        if not post_id or post.get(\"deletedAt\"):",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: one failed Postiz delete stops the archive",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                \"brand archive: postiz post %s not deleted (%s)\", post_id, _err_code(exc)\n            )\n            continue\n",
+    "replace": "                \"brand archive: postiz post %s not deleted (%s)\", post_id, _err_code(exc)\n            )\n            raise\n",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: a repeat archive skips the Postiz clean-up",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        await doc.save()\n    await _delete_queued_posts(workspace_id, str(doc.id))\n",
+    "replace": "        await doc.save()\n        await _delete_queued_posts(workspace_id, str(doc.id))\n",
+    "tests": [
+      "tests/cloud/growth/social/test_brand_archive.py"
+    ]
+  },
+  {
+    "label": "brand archive: one failed unschedule stops the rest",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            logger.warning(\"brand archive: idea %s not unscheduled (%s)\", idea.id, _err_code(exc))\n",
+    "replace": "            raise\n",
     "tests": [
       "tests/cloud/growth/social/test_brand_archive.py"
     ]

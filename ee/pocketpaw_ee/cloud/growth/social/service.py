@@ -10,9 +10,10 @@
 # route takes an optional ``profile_id``; without one it acts on the most
 # recently updated unarchived profile, and ``upsert_profile`` creates the first.
 # Ideas belong to one profile. A brand can be renamed (``company_name``) or
-# archived: archiving stamps ``archived_at``, unschedules its scheduled ideas
-# through ``unschedule_idea`` and deletes their Postiz posts (a failed delete is
-# logged and skipped); archived brands leave the list, the default pick
+# archived: archiving stamps ``archived_at``, deletes the brand's posts still
+# queued in Postiz and unschedules its scheduled ideas through
+# ``unschedule_idea`` (a repeat retries both; failures are logged and skipped);
+# archived brands leave the list, the default pick
 # and every cron sweep, but a read by id still returns them.
 #
 # A PUT may carry a hand-edited ``analysis``: only the editable fields sent are
@@ -2282,7 +2283,7 @@ async def refresh_due_pulses(now: datetime | None = None) -> dict[str, int]:
 
     now = now or datetime.now(UTC)
     if social_pulse.resolve_pulse_fn() is None:
-        return {"due": 0, "refreshed": 0, "failed": 0}
+        return {"due": 0, "refreshed": 0, "failed": 0, "skipped": 0}
     # global-read: the sweep runs for every workspace; each doc carries its own tenant.
     docs = await _PulseDoc.find(
         {
@@ -2314,7 +2315,7 @@ async def refresh_due_pulses(now: datetime | None = None) -> dict[str, int]:
         failed,
         skipped,
     )
-    return {"due": len(docs), "refreshed": refreshed, "failed": failed}
+    return {"due": len(docs), "refreshed": refreshed, "failed": failed, "skipped": skipped}
 
 
 async def use_pulse_suggestion(
@@ -2459,15 +2460,62 @@ async def rename_profile(
     return _profile_to_response(_profile_to_domain(doc))
 
 
+# ponytail: a fixed window, since a post may be scheduled any time ahead; widen it
+# (or page by date) if brands schedule further out than a year.
+ARCHIVE_POSTS_LOOKAHEAD = timedelta(days=366)
+
+
+def _err_code(exc: Exception) -> str:
+    return exc.code if isinstance(exc, PostizError) else type(exc).__name__
+
+
+async def _delete_queued_posts(workspace_id: str, profile: str) -> None:
+    """Delete the brand's posts still queued in Postiz (state ``QUEUE``); published,
+    errored and draft posts stay. One delete per Postiz group, since a delete removes
+    the whole group. Every failure is logged by code and skipped."""
+    postiz = resolve_postiz()
+    org = await _postiz_org(workspace_id, profile) if postiz else None
+    if postiz is None or org is None:
+        return
+    now = datetime.now(UTC)
+    try:
+        api_key = decrypt(org.api_key_enc)
+        raw = await postiz.list_posts(
+            api_key,
+            (now - POSTS_LOOKBACK).isoformat(),
+            (now + ARCHIVE_POSTS_LOOKAHEAD).isoformat(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("brand archive: postiz posts not listed (%s)", _err_code(exc))
+        return
+    groups: set[str] = set()
+    for post in raw:
+        post_id, group = str(post.get("id") or ""), str(post.get("group") or "")
+        if not post_id or post.get("deletedAt") or post.get("state") != "QUEUE":
+            continue
+        if group and group in groups:
+            continue
+        try:
+            await postiz.delete_post(api_key, post_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "brand archive: postiz post %s not deleted (%s)", post_id, _err_code(exc)
+            )
+            continue
+        groups.add(group)
+
+
 async def archive_profile(ctx: RequestContext, profile_id: str) -> SocialProfileResponse:
-    """Archive a brand: stamp ``archived_at`` (kept on a repeat), unschedule every
-    scheduled, unpublished idea of it through ``unschedule_idea``, then delete those
-    ideas' Postiz posts. One failed delete never stops the rest. Outreach is untouched."""
+    """Archive a brand: stamp ``archived_at`` (the first stamp is kept), delete its
+    posts still queued in Postiz, then unschedule every scheduled, unpublished idea of
+    it through ``unschedule_idea``. A repeat re-runs both clean-ups, and one failure
+    never stops the rest. Outreach is untouched."""
     workspace_id = _require_workspace(ctx)
     doc = await _require_profile_doc(workspace_id, profile_id)
     if doc.archived_at is None:
         doc.archived_at = datetime.now(UTC)
         await doc.save()
+    await _delete_queued_posts(workspace_id, str(doc.id))
     scheduled = await _IdeaDoc.find(
         {
             "workspace": workspace_id,
@@ -2477,17 +2525,10 @@ async def archive_profile(ctx: RequestContext, profile_id: str) -> SocialProfile
         }
     ).to_list()
     for idea in scheduled:
-        await unschedule_idea(ctx, str(idea.id))
-    post_ids = [p for idea in scheduled for p in idea.post_ids or ()]
-    postiz = resolve_postiz() if post_ids else None
-    org = await _postiz_org(workspace_id, str(doc.id)) if postiz else None
-    if postiz is not None and org is not None:
-        for post_id in post_ids:
-            try:
-                await postiz.delete_post(decrypt(org.api_key_enc), post_id)
-            except Exception as exc:  # noqa: BLE001
-                code = exc.code if isinstance(exc, PostizError) else type(exc).__name__
-                logger.warning("brand archive: postiz post %s not deleted (%s)", post_id, code)
+        try:
+            await unschedule_idea(ctx, str(idea.id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("brand archive: idea %s not unscheduled (%s)", idea.id, _err_code(exc))
     # no-event: Growth › Social has no realtime subscriber; the brand switcher re-fetches.
     return _profile_to_response(_profile_to_domain(doc))
 
