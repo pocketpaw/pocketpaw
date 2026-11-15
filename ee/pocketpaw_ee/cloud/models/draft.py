@@ -5,7 +5,9 @@
 # lifecycle (draft→proposed→approved→sent, sent→replied, non-terminal→rejected)
 # is enforced in ``ee.cloud.growth.service`` — the only module allowed to
 # import this doc class (import-linter "Growth" contract). Instinct-gated
-# proposals and dispatch build on this record.
+# proposals and dispatch build on this record. ``blueprint_version`` is the
+# approved Brand Blueprint version the writer followed (None for hand-typed and
+# templated follow-up drafts, and when the brand had none).
 
 from __future__ import annotations
 
@@ -29,6 +31,8 @@ class Draft(TimestampedDocument):
     variant: str = "first_touch"  # first_touch | follow_up
     status: str = "draft"  # draft | proposed | approved | sent | replied | rejected
     demo_url: str | None = None
+    # The approved Blueprint version the agent followed; None when none was used.
+    blueprint_version: int | None = None
 
     class Settings:
         name = "growth_drafts"

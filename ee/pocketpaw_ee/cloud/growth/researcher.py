@@ -36,6 +36,9 @@
 # single-company instruction — the extra ``profile`` object, ``linkedin_url`` —
 # travels in the per-run message instead.
 #
+# A branded hunt's request carries the brand's approved Blueprint, already fenced
+# by ``discovery`` (``ResearchRequest.blueprint``); the prompt appends it as context.
+#
 # WebSearch and WebFetch need no wiring — the Claude SDK backend already grants
 # both (``src/pocketpaw/agents/claude_sdk.py``). This is a persona and a policy,
 # not plumbing.
@@ -198,6 +201,9 @@ def build_research_prompt(request: ResearchRequest) -> str:
     if request.exclusions.strip():
         lines.append("")
         lines.append(f"Skip: {request.exclusions.strip()}")
+    if request.blueprint:
+        lines.append(request.blueprint)
+        lines.append("Use it as context for which companies fit this brand.")
     lines.append("")
     lines.append("Return the JSON object described in your instructions and nothing else.")
     return "\n".join(lines)

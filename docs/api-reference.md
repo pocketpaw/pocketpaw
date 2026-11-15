@@ -9564,6 +9564,10 @@ the writer. They cannot override its rule against inventing facts.
 
 The writer has no tools. It works only from what is on the prospect: the
 research profile (or `research_brief`), name, company and the hunt's criteria.
+When the draft's brand (the request's `profile_id`, else the prospect's) has an
+approved Brand Blueprint, the writer also follows that Blueprint's identity,
+audience and voice, and every draft it makes carries the version in
+`blueprint_version`; otherwise `blueprint_version` is `null`.
 It is seeded into each workspace at boot and lazily on first use, with
 `tools: []`, `tool_mode: exclusive`, trust level 1, temperature 0.6 and soul
 off.
@@ -9656,7 +9660,9 @@ otherwise). A prospect still in `new` / `qualified` flips to `drafted` on
 its first draft; later prospect statuses are never regressed.
 
 Returns the draft envelope: the fields above plus `id`, `workspace_id`,
-`prospect_id`, `status`, and ISO `created_at` / `updated_at`.
+`prospect_id`, `status`, `profile_id`, `blueprint_version` (the approved Brand
+Blueprint version the writer followed; always `null` here and on follow-ups,
+and the server ignores it on the request), and ISO `created_at` / `updated_at`.
 
 ### `GET /api/v1/growth/drafts`
 
@@ -10465,6 +10471,7 @@ stored with `status: "new"` and returned as `{items}`:
       "pillar": "build in public",
       "hook_type": "question",
       "experiment_id": "",
+      "blueprint_version": 3,
       "created_at": "2026-10-06T10:05:00+00:00",
       "updated_at": "2026-10-06T10:05:00+00:00"
     }
@@ -10620,6 +10627,7 @@ client or an HTTP write appears there.
   "intent_url": "https://x.com/intent/tweet?in_reply_to=1850000000000000000&text=Most%20tools...",
   "why": "Answers the question directly.",
   "status": "new",
+  "blueprint_version": 3,
   "created_at": "2026-11-14T05:45:10+00:00",
   "updated_at": "2026-11-14T05:45:10+00:00"
 }
@@ -10815,6 +10823,17 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   and pillar names, channel names or goal ids for the lists. An unknown version
   is `404 social_blueprint_version.not_found`.
 - `roadmap.phases` stays empty for now.
+
+**Agents follow the approved Blueprint.** The ideas agent (generate and the
+daily X drafts), the reply drafter, the outreach writer and hunt research read
+the brand's approved Blueprint, never a draft, and take it as fenced data in
+their prompt. While one is approved it replaces the profile's `analysis`
+(summary, pillars, tone, things to avoid) for strategy; without one they read
+the profile as before. The daily X drafts' weekly budget is the Blueprint's `x`
+channel `posts_per_week` (0 when it plans no X), else `weekly_post_quota`. A
+hunt for a branded ICP gets its brand's audience, voice and pillars as context;
+an unbranded ICP gets none. Every idea, reply card and outreach draft made with
+an approved Blueprint carries its `blueprint_version`; `null` otherwise.
 
 ### Accounts — `/api/v1/growth/social/accounts`
 

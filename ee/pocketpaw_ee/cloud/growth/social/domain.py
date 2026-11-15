@@ -276,6 +276,7 @@ class SocialIdea:
     pillar: str = ""
     hook_type: str = ""
     experiment_id: str = ""
+    blueprint_version: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -375,6 +376,7 @@ class ReplyCard:
     intent_url: str = ""
     why: str = ""
     status: str = "new"
+    blueprint_version: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

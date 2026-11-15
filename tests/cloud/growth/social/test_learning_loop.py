@@ -90,12 +90,15 @@ async def test_tags_round_trip_through_both_mappers(mongo_db):
         pillar="speed",
         hook_type="question",
         experiment_id="e1",
+        blueprint_version=2,
     )
     await doc.insert()
     domain = social_service._idea_to_domain(await IdeaDoc.get(doc.id))
     assert (domain.pillar, domain.hook_type, domain.experiment_id) == ("speed", "question", "e1")
+    assert domain.blueprint_version == 2
     out = social_service._idea_to_response(domain)
     assert (out.pillar, out.hook_type, out.experiment_id) == ("speed", "question", "e1")
+    assert out.blueprint_version == 2
 
 
 async def test_generated_tags_are_stored_and_editable_through_the_idea_patch(w1):

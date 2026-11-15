@@ -228,8 +228,8 @@
   {
     "label": "daily drafts: the weekly quota is ignored",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    left_week = doc.weekly_post_quota - await _daily_count(",
-    "replace": "    left_week = 99 - await _daily_count(",
+    "find": "    budget = _x_posts_per_week(doc.weekly_post_quota, bp)\n",
+    "replace": "    budget = 99\n",
     "tests": [
       "tests/cloud/growth/social/test_daily_drafts.py"
     ]
@@ -853,6 +853,150 @@
     "replace": "\"blueprint\": await social_blueprint._find(workspace_id, profile.id, \"draft\") is not None,",
     "tests": [
       "tests/cloud/growth/social/test_setup_status.py"
+    ]
+  },
+  {
+    "label": "blueprint: the ideas prompt drops the approved Blueprint",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "        lines += blueprint_lines(blueprint)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: the ideas prompt still reads the analysis when a Blueprint is approved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "    analysis = profile.analysis if blueprint is None else None\n",
+    "replace": "    analysis = profile.analysis\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: the Blueprint tone reaches the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "            lines.append(f\"Tone: {fence(bp.voice.tone)}\")\n",
+    "replace": "            lines.append(f\"Tone: {bp.voice.tone}\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: a Blueprint pillar name reaches the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "f\"- {fence(p.name)} ({p.weight})\"",
+    "replace": "f\"- {p.name} ({p.weight})\"",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: the drafting agents follow the draft instead of the approved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    doc = await _find(workspace_id, profile_id, \"approved\")\n",
+    "replace": "    doc = await _find(workspace_id, profile_id, \"draft\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: the daily X budget ignores the Blueprint's x channel",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    budget = _x_posts_per_week(doc.weekly_post_quota, bp)\n",
+    "replace": "    budget = doc.weekly_post_quota\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: the reply prompt drops the approved Blueprint",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "        lines += blueprint_lines(blueprint, (\"identity\", \"audience\", \"voice\"))\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: a generated idea is not stamped with the Blueprint version",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            status=\"new\",\n            blueprint_version=bp.version if bp is not None else None,\n        )\n        await idea.insert()",
+    "replace": "            status=\"new\",\n        )\n        await idea.insert()",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: a daily draft is not stamped with the Blueprint version",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            suggested_at=slot,\n            blueprint_version=bp.version if bp is not None else None,\n",
+    "replace": "            suggested_at=slot,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: a reply card is not stamped with the Blueprint version",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            source_text=source,\n            blueprint_version=bp.version if bp is not None else None,\n",
+    "replace": "            source_text=source,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: the reply prompt drops the owner's typed lines when a Blueprint is approved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "        lines += owner_lines(profile.description)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: a Blueprint summary reaches the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "                lines.append(f\"{label}: {fence(text)}\")\n",
+    "replace": "                lines.append(f\"{label}: {text}\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: Blueprint audience segments reach the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "\"; \".join(fence(s) for s in bp.audience.segments)",
+    "replace": "\"; \".join(bp.audience.segments)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: Blueprint ICP sentences reach the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "\"; \".join(fence(s) for s in bp.audience.icp_sentences)",
+    "replace": "\"; \".join(bp.audience.icp_sentences)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: Blueprint things to avoid reach the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "\"; \".join(fence(a) for a in bp.voice.avoid)",
+    "replace": "\"; \".join(bp.voice.avoid)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
+    ]
+  },
+  {
+    "label": "blueprint: Blueprint hooks reach the prompt unfenced",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "\"; \".join(fence(h) for h in p.hooks)",
+    "replace": "\"; \".join(p.hooks)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_agents.py"
     ]
   }
 ]
