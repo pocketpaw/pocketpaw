@@ -826,5 +826,14 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
+  },
+  {
+    "label": "blueprint: two approved after a crash read in insertion order",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "            {\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}\n        )\n        .sort([(\"version\", -1)])",
+    "replace": "            {\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}\n        )\n        .sort([(\"_id\", 1)])",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
   }
 ]

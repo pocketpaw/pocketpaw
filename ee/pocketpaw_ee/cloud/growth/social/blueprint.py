@@ -27,7 +27,8 @@
 # draft save, an approve, or regenerate superseding its base draft that finds
 # the row no longer a draft is a 409 ``social.blueprint_stale``. Approve marks the
 # draft approved before superseding the rest, so a crash leaves two approved,
-# never zero. The unique version index stops two writers forking a version.
+# never zero; reads then take the highest version. The unique version index
+# stops two writers forking a version.
 # ``approved_for`` is the read the drafting agents use. Writes carry
 # ``# no-event:`` markers: nothing subscribes yet.
 
@@ -213,9 +214,16 @@ async def _profile(ctx: RequestContext, profile_id: str | None) -> tuple[str, So
 
 
 async def _find(workspace_id: str, profile_id: str, status: str) -> _BlueprintDoc | None:
-    return await _BlueprintDoc.find_one(
-        {"workspace": workspace_id, "profile_id": profile_id, "status": status}
+    """The newest version in ``status``; deterministic even if a crash left two."""
+    docs = (
+        await _BlueprintDoc.find(
+            {"workspace": workspace_id, "profile_id": profile_id, "status": status}
+        )
+        .sort([("version", -1)])
+        .limit(1)
+        .to_list()
     )
+    return docs[0] if docs else None
 
 
 async def _next_version(workspace_id: str, profile_id: str) -> int:

@@ -280,6 +280,20 @@ async def test_approve_during_regenerate_is_409_and_writes_nothing(w1, monkeypat
     assert await _statuses(pid) == {1: "approved"}
 
 
+async def test_two_approved_after_a_crash_reads_the_highest_version(w1):
+    pid = await _profile()
+    await _seed(w1, pid)
+    await _approve(w1, pid)
+    # A crash between approving v2 and superseding v1 leaves both approved.
+    await BlueprintDoc(workspace="w1", profile_id=pid, version=2, status="approved").insert()
+    v1 = await BlueprintDoc.find_one({"workspace": "w1", "profile_id": pid, "version": 1})
+    await BlueprintDoc(workspace="w1", profile_id=pid, version=3, status="superseded").insert()
+    await v1.delete()
+    await v1.insert()  # re-inserted last, so natural order would return it first
+    assert (await social_blueprint.approved_for("w1", pid)).version == 2
+    assert (await w1.get(BP, params={"profile_id": pid})).json()["approved"]["version"] == 2
+
+
 # --- regenerate --------------------------------------------------------------------------
 
 
