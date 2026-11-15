@@ -25,13 +25,16 @@
 # ``ExperimentVariable`` on one ``ExperimentMetric``; ``GeneratedLearning`` is a
 # model-proposed rule before it is checked and stored.
 # ``GrowthBlueprint`` is one version of a profile's Brand Blueprint; its numbers are
-# never model-written. ``SETUP_KEYS`` are the "Set up" checklist rows in order.
+# never model-written. Its ``roadmap`` is dated phases, each with a weekly cadence
+# per channel and milestones; ``POST_CHANNELS`` are the channels the weekly Plan
+# gives slots to (email / whatsapp sends stay in the Blueprint). ``SETUP_KEYS``
+# are the "Set up" checklist rows in order.
 
 from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, get_args
 from urllib.parse import urlsplit
 
@@ -402,6 +405,10 @@ MAX_BLUEPRINT_PILLARS = 8
 MAX_BLUEPRINT_ITEMS = 20
 MAX_BLUEPRINT_GOALS = 20
 MAX_ICP_SENTENCES = 5
+MAX_ROADMAP_PHASES = 20
+MAX_PHASE_MILESTONES = 20
+MilestoneStatus = Literal["planned", "doing", "done"]
+POST_CHANNELS: tuple[str, ...] = ("x", "reddit", "linkedin")
 
 
 @dataclass(frozen=True)
@@ -446,8 +453,41 @@ class BlueprintGoal:
 
 
 @dataclass(frozen=True)
+class RoadmapCadence:
+    channel: str
+    posts_per_week: int = 0
+
+
+@dataclass(frozen=True)
+class RoadmapMilestone:
+    id: str
+    title: str
+    date: date
+    status: str = "planned"
+    link: str | None = None
+
+
+@dataclass(frozen=True)
+class RoadmapPhase:
+    """``start`` and ``end`` are inclusive days."""
+
+    id: str
+    name: str
+    start: date
+    end: date
+    cadence: tuple[RoadmapCadence, ...] = ()
+    goal_ids: tuple[str, ...] = ()
+    milestones: tuple[RoadmapMilestone, ...] = ()
+
+
+@dataclass(frozen=True)
+class BlueprintRoadmap:
+    phases: tuple[RoadmapPhase, ...] = ()
+
+
+@dataclass(frozen=True)
 class GrowthBlueprint:
-    """One version of a profile's blueprint. ``roadmap`` is ``{"phases": [...]}``."""
+    """One version of a profile's blueprint."""
 
     id: str
     workspace_id: str
@@ -460,8 +500,7 @@ class GrowthBlueprint:
     pillars: tuple[BlueprintPillar, ...] = ()
     channels: tuple[BlueprintChannel, ...] = ()
     goals: tuple[BlueprintGoal, ...] = ()
-    # ponytail: untyped phases until the roadmap slice (GX-6) defines them.
-    roadmap: dict = field(default_factory=lambda: {"phases": []})
+    roadmap: BlueprintRoadmap = field(default_factory=BlueprintRoadmap)
     learning_ids: tuple[str, ...] = ()
     created_by: str = ""
     approved_by: str | None = None

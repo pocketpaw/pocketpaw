@@ -42,6 +42,7 @@
 # arms and are stamped. Learnings reach the ideas prompt only once approved.
 # ``setup_status`` derives the setup checklist (done beats a skip; the accounts
 # read is bounded at 4 s and never fatal); ``skip_setup`` edits ``setup_skipped``.
+# ``scheduled_ideas`` / ``waiting_ideas`` are the weekly Plan's idea reads.
 
 from __future__ import annotations
 
@@ -704,6 +705,46 @@ async def list_ideas(
         .to_list()
     )
     return SocialIdeaListResponse(items=[_idea_to_response(_idea_to_domain(d)) for d in docs])
+
+
+async def scheduled_ideas(
+    workspace_id: str, profile_id: str, start: datetime, end: datetime
+) -> list[SocialIdea]:
+    """The weekly Plan's placed ideas: every unskipped one scheduled in [start, end)."""
+    docs = await _IdeaDoc.find(
+        {
+            "workspace": workspace_id,
+            "profile": profile_id,
+            "scheduled_at": {"$gte": start, "$lt": end},
+            "status": {"$ne": "skipped"},
+        }
+    ).to_list()
+    return [_idea_to_domain(d) for d in docs]
+
+
+async def waiting_ideas(
+    workspace_id: str, profile_id: str, channel: str, limit: int
+) -> list[SocialIdea]:
+    """Up to ``limit`` approved ideas for ``channel`` with no date and no post yet,
+    oldest first. An idea with no platform counts as ``x``."""
+    if limit <= 0:
+        return []
+    docs = (
+        await _IdeaDoc.find(
+            {
+                "workspace": workspace_id,
+                "profile": profile_id,
+                "status": "approved",
+                "platform": {"$in": ["x", ""]} if channel == "x" else channel,
+                "scheduled_at": None,
+                "post_ids.0": {"$exists": False},
+            }
+        )
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(limit)
+        .to_list()
+    )
+    return [_idea_to_domain(d) for d in docs]
 
 
 # ---------------------------------------------------------------------------

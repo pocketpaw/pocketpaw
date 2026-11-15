@@ -1198,6 +1198,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.replies",
     "pocketpaw_ee.cloud.growth.social.review",
     "pocketpaw_ee.cloud.growth.social.learnings",
+    "pocketpaw_ee.cloud.growth.social.plan",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",

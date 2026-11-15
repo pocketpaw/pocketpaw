@@ -10,8 +10,8 @@
 # racing for the same next version fail instead of forking history.
 #
 # The sections are plain dicts / lists of dicts, shaped and validated by
-# ``growth.social.dto`` on the way in and out. ``roadmap`` holds
-# ``{"phases": []}`` until the roadmap slice types it. Numbers in a blueprint
+# ``growth.social.dto`` on the way in and out. ``roadmap`` is
+# ``{"phases": [...]}`` with ISO-string dates (BSON has no date type). Numbers in a blueprint
 # (pillar weights, channel cadences, goal targets) are owner-entered or copied
 # from the profile; a model never writes one.
 #

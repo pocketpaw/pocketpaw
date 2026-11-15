@@ -16,7 +16,8 @@
 # ``/experiments`` (create, list, close; no update route), ``/review`` (read-only)
 # and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
 # growth.read, writes growth.write. ``/blueprint`` (read, diff; draft save, seed,
-# regenerate, approve) is the profile's versioned plan; its writes are growth.manage. The
+# regenerate, approve) is the profile's versioned plan; its writes are growth.manage.
+# ``GET /plan?week=YYYY-Www`` is the computed weekly post slots (growth.read). The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body. ``GET /setup-status`` (growth.read)
@@ -33,6 +34,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
+from pocketpaw_ee.cloud.growth.social import plan as social_plan
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaSource,
@@ -86,6 +88,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     UpdateReplyRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
+    WeekPlanResponse,
 )
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.sites.public_assets import MAX_ASSET_BYTES
@@ -779,3 +782,17 @@ async def skip_setup(
 ) -> SetupStatusResponse:
     """Skip one checklist row (``skipped: false`` un-skips it); an unknown key is a 422."""
     return await social_service.skip_setup(ctx, body, profile_id)
+
+
+@router.get(
+    "/plan",
+    response_model=WeekPlanResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_plan(
+    week: str = Query(pattern=r"^\d{4}-W\d{2}$", description="ISO week, e.g. 2026-W46"),
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> WeekPlanResponse:
+    """The week's post slots per day, from the approved blueprint and the ideas."""
+    return await social_plan.get_week(ctx, week, profile_id)

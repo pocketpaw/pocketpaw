@@ -139,7 +139,8 @@ async def test_seed_maps_every_section_and_is_idempotent(w1):
     ]
     assert draft["channels"] == [{"channel": "x", "posts_per_week": 7, "sends_per_week": 0}]
     assert draft["goals"] == []
-    assert draft["roadmap"] == {"phases": []}
+    this_week, next_four = draft["roadmap"]["phases"]
+    assert this_week["name"] == "This week" and next_four["name"] == "Next 4 weeks"
     assert draft["learning_ids"] == [] and draft["approved_by"] is None
 
     again = await _seed(w1, pid)
@@ -197,7 +198,6 @@ async def test_draft_save_replaces_only_sent_sections_and_mints_goal_ids(w1):
         {"status": "approved"},
         {"version": 9},
         {"approved_by": "u2"},
-        {"roadmap": {"phases": []}},
         {"pillars": [{"name": "A", "weight": 101}]},
         {"pillars": [{"name": "A"}, {"name": "a"}]},
         {"channels": [{"channel": "tiktok"}]},
@@ -509,7 +509,27 @@ async def test_every_doc_field_survives_domain_and_response(mongo_db):
         pillars=[{"name": "n", "weight": 40, "hooks": ["h"]}],
         channels=[{"channel": "email", "posts_per_week": 1, "sends_per_week": 9}],
         goals=[{"id": "g", "metric": "m", "target": 3.5, "channel": "x"}],
-        roadmap={"phases": [{"name": "later"}]},
+        roadmap={
+            "phases": [
+                {
+                    "id": "ph1",
+                    "name": "later",
+                    "start": "2030-01-01",
+                    "end": "2030-01-31",
+                    "cadence": [{"channel": "reddit", "posts_per_week": 2}],
+                    "goal_ids": ["g"],
+                    "milestones": [
+                        {
+                            "id": "m1",
+                            "title": "launch",
+                            "date": "2030-01-15",
+                            "status": "doing",
+                            "link": "https://acme.test/launch",
+                        }
+                    ],
+                }
+            ]
+        },
         learning_ids=["l1"],
         created_by="u1",
         approved_by="u2",
@@ -524,7 +544,7 @@ async def test_every_doc_field_survives_domain_and_response(mongo_db):
     assert set(GrowthBlueprintResponse.model_fields) == domain_fields
 
     domain = social_blueprint._to_domain(doc)
-    out = social_blueprint._to_response(domain).model_dump()
+    out = social_blueprint._to_response(domain).model_dump(mode="json")
     raw = doc.model_dump()
     for name in BlueprintDoc.model_fields:
         if name in _NOT_MAPPED:
