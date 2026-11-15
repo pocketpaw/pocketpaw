@@ -441,6 +441,12 @@ async def test_writes_on_one_profile_never_touch_another(w1):
     assert await _statuses(b) == {1: "approved", 2: "draft"}
 
 
+async def test_an_archived_brand_is_still_read_by_id(w1):
+    pid = await _profile(archived_at=datetime(2030, 1, 1, tzinfo=UTC))
+    assert (await _seed(w1, pid))["draft"]["profile_id"] == pid
+    assert (await w1.get(BP, params={"profile_id": pid})).json()["draft"]["version"] == 1
+
+
 # --- RBAC and tenancy --------------------------------------------------------------------
 
 
