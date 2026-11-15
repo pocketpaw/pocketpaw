@@ -447,6 +447,15 @@ async def _require_profile_doc(workspace_id: str, profile_id: str | None = None)
     return doc
 
 
+async def require_profile(
+    ctx: RequestContext, profile_id: str | None = None
+) -> tuple[str, SocialProfile]:
+    """The caller's workspace id and one of its profiles (the most recently updated when
+    ``profile_id`` is omitted). Same NotFound as every profile route."""
+    workspace_id = _require_workspace(ctx)
+    return workspace_id, _profile_to_domain(await _require_profile_doc(workspace_id, profile_id))
+
+
 async def list_profiles(ctx: RequestContext) -> SocialProfileListResponse:
     docs = (
         await _ProfileDoc.find({"workspace": _require_workspace(ctx), "archived_at": None})

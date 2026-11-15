@@ -1055,6 +1055,12 @@ class TestGrowthRouteRbac:
             ("GET", "/growth/social/replies"): "growth.read",
             ("POST", "/growth/social/replies/draft"): "growth.write",
             ("PATCH", "/growth/social/replies/{reply_id}"): "growth.write",
+            ("GET", "/growth/social/blueprint"): "growth.read",
+            ("GET", "/growth/social/blueprint/diff"): "growth.read",
+            ("PUT", "/growth/social/blueprint/draft"): "growth.manage",
+            ("POST", "/growth/social/blueprint/seed"): "growth.manage",
+            ("POST", "/growth/social/blueprint/regenerate"): "growth.manage",
+            ("POST", "/growth/social/blueprint/approve"): "growth.manage",
         }
 
         seen: dict[tuple[str, str], str] = {}

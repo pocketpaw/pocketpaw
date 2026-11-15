@@ -1214,6 +1214,20 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.reply_draft",
     "pocketpaw_ee.cloud.models.social_experiment",
     "pocketpaw_ee.cloud.models.social_learning",
+    "pocketpaw_ee.cloud.models.growth_blueprint",
+]
+
+[[tool.importlinter.contracts]]
+name = "Growth blueprint — profiles and ICPs only through their services"
+# ``growth.social.blueprint`` owns the GrowthBlueprint doc, so it cannot sit in
+# the Growth contract's source list. It reaches profiles through
+# ``growth.social.service`` and ICPs through ``growth.service``, never their docs.
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["pocketpaw_ee.cloud.growth.social.blueprint"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.social_profile",
+    "pocketpaw_ee.cloud.models.icp",
 ]
 
 [[tool.importlinter.contracts]]

@@ -709,5 +709,131 @@
     "tests": [
       "tests/cloud/growth/social/test_brand_archive.py"
     ]
+  },
+  {
+    "label": "blueprint: approve leaves the previous approved in place",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    await _supersede_others(workspace_id, profile.id, \"approved\", draft.id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate supersedes the approved along with the old draft",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    await _supersede_others(workspace_id, profile.id, \"draft\", doc.id)\n",
+    "replace": "    await _supersede_others(workspace_id, profile.id, \"approved\", doc.id)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate generates a goal",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    out = _carried(base)\n",
+    "replace": "    out = _carried(base)\n    out[\"goals\"] = [*out[\"goals\"], {\"id\": \"gen\", \"metric\": \"made up\", \"target\": 99}]\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerated text skips the dash and number check",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    def text(new: str, old: Any) -> str:\n        return new if _passes(new, source) else _str(old)",
+    "replace": "    def text(new: str, old: Any) -> str:\n        return new or _str(old)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate invents a weight for a newly named pillar",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "weights.get(name.lower(), 0)",
+    "replace": "weights.get(name.lower(), 50)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "tenancy: blueprint reads drop the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "{\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}",
+    "replace": "{\"profile_id\": profile_id, \"status\": status}",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "tenancy: blueprint reads drop the profile filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "{\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}",
+    "replace": "{\"workspace\": workspace_id, \"status\": status}",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "tenancy: blueprint supersede writes drop the profile filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "            \"workspace\": workspace_id,\n            \"profile_id\": profile_id,\n            \"status\": status,\n            \"_id\": {\"$ne\": keep},",
+    "replace": "            \"workspace\": workspace_id,\n            \"status\": status,\n            \"_id\": {\"$ne\": keep},",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "tenancy: blueprint next version counts every profile's versions",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        await _BlueprintDoc.find({\"workspace\": workspace_id, \"profile_id\": profile_id})\n        .sort([(\"version\", -1)])",
+    "replace": "        await _BlueprintDoc.find({\"workspace\": workspace_id})\n        .sort([(\"version\", -1)])",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: a stale draft save overwrites the approved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if not await _set_if(match, _draft_edit(body)):\n            raise _stale()",
+    "replace": "        match.pop(\"status\")\n        if not await _set_if(match, _draft_edit(body)):\n            raise _stale()",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: regenerate ignores a base that was approved during the run",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if not await _set_if(base_match, {\"status\": \"superseded\"}):",
+    "replace": "        if not await _set_if({\"_id\": base.id}, {\"status\": base.status}):",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: seed skips the dash and number check",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    def text(value: str) -> str:\n        return value if _passes(value, source) else \"\"",
+    "replace": "    def text(value: str) -> str:\n        return value",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: seed takes another brand's ICPs",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        *await growth_service.list_icps(ctx, profile_id=\"\", status=\"active\"),",
+    "replace": "        *await growth_service.list_icps(ctx, status=\"active\"),",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "blueprint: two approved after a crash read in insertion order",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "            {\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}\n        )\n        .sort([(\"version\", -1)])",
+    "replace": "            {\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}\n        )\n        .sort([(\"_id\", 1)])",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
   }
 ]

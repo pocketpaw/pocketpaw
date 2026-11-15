@@ -15,7 +15,8 @@
 # ``GET /metrics/summary`` is the Today strip's pure read of stored metrics.
 # ``/experiments`` (create, list, close; no update route), ``/review`` (read-only)
 # and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
-# growth.read, writes growth.write. The
+# growth.read, writes growth.write. ``/blueprint`` (read, diff; draft save, seed,
+# regenerate, approve) is the profile's versioned plan; its writes are growth.manage. The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
 # allowlist; it is never taken from the request body.
@@ -29,6 +30,7 @@ from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFi
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
+from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaSource,
@@ -38,6 +40,8 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     ReplyStatus,
 )
 from pocketpaw_ee.cloud.growth.social.dto import (
+    BlueprintDiffResponse,
+    BlueprintStateResponse,
     CheckTelegramRequest,
     CheckTelegramResponse,
     CloseExperimentRequest,
@@ -57,6 +61,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     RenameProfileRequest,
     ReplyDraftListResponse,
     ReplyDraftResponse,
+    SaveBlueprintDraftRequest,
     ScheduleIdeasRequest,
     SocialAccountListResponse,
     SocialChannelListResponse,
@@ -322,6 +327,74 @@ async def update_learning(
 ) -> SocialLearningResponse:
     """Edit the text, approve, reject (retire a proposed one) or retire an approved one."""
     return await social_service.update_learning(ctx, learning_id, body)
+
+
+# --- Brand Blueprint: one versioned plan per profile ------------------------------------
+# Reads are growth.read; every write is growth.manage (the owner approves the plan
+# the drafting agents follow).
+
+_MANAGE = [Depends(require_action_any_workspace("growth.manage"))]
+
+
+@router.get(
+    "/blueprint",
+    response_model=BlueprintStateResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_blueprint(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintStateResponse:
+    """The approved blueprint and the open draft; either may be null."""
+    return await social_blueprint.get(ctx, profile_id)
+
+
+@router.put("/blueprint/draft", response_model=BlueprintStateResponse, dependencies=_MANAGE)
+async def save_blueprint_draft(
+    body: SaveBlueprintDraftRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> BlueprintStateResponse:
+    """Replace the sections sent on the draft (opened from the approved when none)."""
+    return await social_blueprint.save_draft(ctx, body, profile_id)
+
+
+@router.post("/blueprint/seed", response_model=BlueprintStateResponse, dependencies=_MANAGE)
+async def seed_blueprint(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintStateResponse:
+    """Write the first draft from the profile; a no-op once any version exists."""
+    return await social_blueprint.seed(ctx, profile_id)
+
+
+@router.post("/blueprint/regenerate", response_model=BlueprintStateResponse, dependencies=_MANAGE)
+async def regenerate_blueprint(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintStateResponse:
+    """Rerun the analyst into a new draft; the approved version is left alone."""
+    return await social_blueprint.regenerate(ctx, profile_id)
+
+
+@router.post("/blueprint/approve", response_model=BlueprintStateResponse, dependencies=_MANAGE)
+async def approve_blueprint(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintStateResponse:
+    """The draft becomes the approved blueprint; 409 when there is no draft."""
+    return await social_blueprint.approve(ctx, profile_id)
+
+
+@router.get(
+    "/blueprint/diff",
+    response_model=BlueprintDiffResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def diff_blueprint(
+    from_version: int = Query(alias="from", ge=1),
+    to_version: int = Query(alias="to", ge=1),
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> BlueprintDiffResponse:
+    """Per-section added / removed / changed keys between two versions."""
+    return await social_blueprint.diff(ctx, from_version, to_version, profile_id)
 
 
 @router.get(
