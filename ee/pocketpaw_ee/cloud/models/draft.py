@@ -1,12 +1,11 @@
 # ee/pocketpaw_ee/cloud/models/draft.py — per-channel outreach draft for the
-# /growth surface (G-3, feat/growth-g3). Workspace-scoped, attached to a
-# ``growth_prospects`` row by ``prospect_id``. Status lifecycle
-# (draft→proposed→approved→sent, sent→replied, non-terminal→rejected) is
-# enforced in ``ee.cloud.growth.service`` — the only module allowed to import
-# this doc class (import-linter "Growth" contract).
-#
-# Created 2026-07-27 (feat/growth-g3): third slice of /growth — drafts. G-4
-# wires Instinct-gated proposals and dispatch on top of this record.
+# /growth surface. Workspace-scoped, attached to a ``growth_prospects`` row by
+# ``prospect_id``, and to a brand (Growth › Social ``SocialProfile``) by the
+# nullable ``profile_id`` (inherited from the prospect when not given). Status
+# lifecycle (draft→proposed→approved→sent, sent→replied, non-terminal→rejected)
+# is enforced in ``ee.cloud.growth.service`` — the only module allowed to
+# import this doc class (import-linter "Growth" contract). Instinct-gated
+# proposals and dispatch build on this record.
 
 from __future__ import annotations
 
@@ -22,6 +21,8 @@ class Draft(TimestampedDocument):
     workspace: Indexed(str)  # type: ignore[valid-type]
     # The growth_prospects row this copy targets (stringified ObjectId).
     prospect_id: str
+    # The brand this copy is written under, or None on a pre-brand row.
+    profile_id: str | None = None
     channel: str  # email | linkedin | whatsapp (validated at the DTO boundary)
     subject: str | None = None  # email only
     body: str
@@ -36,4 +37,6 @@ class Draft(TimestampedDocument):
             [("workspace", 1), ("prospect_id", 1)],
             # The send-gate queue view (G-4): drafts by status per channel.
             [("workspace", 1), ("status", 1), ("channel", 1)],
+            # Brand-scoped list and queues.
+            [("workspace", 1), ("profile_id", 1)],
         ]

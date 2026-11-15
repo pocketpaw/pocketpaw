@@ -16,6 +16,10 @@
 # machine. ``transition`` is the public enforcer and refuses the gate-owned
 # targets; ``gate_transition`` is the only way onto ``approved`` / ``sent``,
 # used by the executor, the delivery paths and LinkedIn mark-sent.
+# Brands: prospects, ICPs and drafts carry an optional ``profile_id`` (a
+# Growth › Social profile). Creates validate it against the workspace; a draft
+# without one inherits its prospect's. Every list / queue read takes an
+# optional ``profile_id`` filter (``_with_profile``); absent means every row.
 # ``propose_send`` / ``propose_send_batch`` file one gated Instinct proposal
 # per draft. Queues: the LinkedIn manual queue + markdown export, and
 # ``delivery_queue`` (per channel, latest MessageLog row attached).
@@ -124,6 +128,7 @@ def _to_domain(doc: _ProspectDoc) -> Prospect:
         domain=doc.domain,
         source=doc.source,
         project_id=getattr(doc, "project_id", None),
+        profile_id=getattr(doc, "profile_id", None),
         tier=doc.tier,
         research_brief=doc.research_brief,
         emails=tuple(doc.emails),
@@ -151,6 +156,7 @@ def _draft_to_domain(doc: _DraftDoc) -> Draft:
         variant=doc.variant,
         status=doc.status,
         demo_url=doc.demo_url,
+        profile_id=getattr(doc, "profile_id", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -167,6 +173,7 @@ def _draft_to_response(d: Draft) -> DraftResponse:
         variant=d.variant,
         status=d.status,
         demo_url=d.demo_url,
+        profile_id=d.profile_id,
         created_at=iso_utc(d.created_at),
         updated_at=iso_utc(d.updated_at),
     )
@@ -181,6 +188,7 @@ def _to_response(p: Prospect) -> ProspectResponse:
         domain=p.domain,
         source=p.source,
         project_id=p.project_id,
+        profile_id=p.profile_id,
         tier=p.tier,
         research_brief=p.research_brief,
         emails=list(p.emails),
@@ -235,6 +243,40 @@ async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> No
         raise NotFound("project", project_id)
 
 
+async def _ensure_profile_in_workspace(workspace_id: str, profile_id: str | None) -> None:
+    """404 unless ``profile_id`` (when given) names a brand in this workspace.
+
+    Goes through the PUBLIC ``growth.social.service.get_profile`` seam (lazy
+    import, like the projects check) rather than the SocialProfile doc, which
+    only the social service may import. That seam takes a RequestContext, so a
+    workspace-only one is minted here: the check is tenancy, not RBAC, and the
+    system seams (``upsert_by_domain``) have no caller to borrow one from. Never
+    called with ``None``: ``get_profile(ctx, None)`` means "the latest
+    profile", not "no brand"."""
+    if not profile_id:
+        return
+    from pocketpaw_ee.cloud._core.context import ScopeKind
+    from pocketpaw_ee.cloud.growth.social import service as social_service
+
+    ctx = RequestContext(
+        user_id="",
+        workspace_id=workspace_id,
+        request_id="growth-brand-check",
+        scope=ScopeKind.WORKSPACE,
+        started_at=datetime.now(UTC),
+    )
+    await social_service.get_profile(ctx, profile_id)
+
+
+def _with_profile(filters: dict[str, Any], profile_id: str | None) -> dict[str, Any]:
+    """Scope a list / queue filter to one brand. ``None`` leaves it alone (the
+    pre-brand view of every row); an id filters to that brand; ``""`` selects
+    the rows with no brand yet, the same three values ``project_id`` takes."""
+    if profile_id is not None:
+        filters["profile_id"] = profile_id or None
+    return filters
+
+
 async def _fetch_in_workspace(workspace_id: str, prospect_id: str) -> _ProspectDoc:
     """Fetch a prospect scoped to the caller's workspace. Raises NotFound for
     a malformed id, a missing row, or a row in another workspace — identical
@@ -279,6 +321,7 @@ async def create(ctx: RequestContext, body: CreateProspectRequest) -> ProspectRe
     workspace_id = _require_workspace(ctx)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
+    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
 
     existing = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if existing is not None:
@@ -327,6 +370,7 @@ def _prospect_filters(
     status: str | None = None,
     source: str | None = None,
     project_id: str | None = None,
+    profile_id: str | None = None,
     q: str | None = None,
 ) -> dict[str, Any]:
     """Build the tenant-scoped Mongo filter shared by list / facets / count.
@@ -357,6 +401,7 @@ def _prospect_filters(
         filters["source"] = source
     if project_id is not None:
         filters["project_id"] = project_id or None
+    _with_profile(filters, profile_id)
     if q is not None and q.strip():
         pattern = _escape_regex(q)
         filters["$or"] = [
@@ -509,6 +554,7 @@ async def list_prospects(
     status: str | None = None,
     source: str | None = None,
     project_id: str | None = None,
+    profile_id: str | None = None,
     q: str | None = None,
     sort: str = "newest",
     cursor: str | None = None,
@@ -530,7 +576,13 @@ async def list_prospects(
     if sort != "tier" and sort not in _PROSPECT_SORT_SPECS:
         raise ValidationError("prospect.bad_sort", f"Unknown sort mode '{sort}'")
     filters = _prospect_filters(
-        workspace_id, tier=tier, status=status, source=source, project_id=project_id, q=q
+        workspace_id,
+        tier=tier,
+        status=status,
+        source=source,
+        project_id=project_id,
+        profile_id=profile_id,
+        q=q,
     )
 
     # Over-fetch by one: the extra row is the "is there a next page" probe and
@@ -588,6 +640,7 @@ async def prospect_facets(
     status: str | None = None,
     source: str | None = None,
     project_id: str | None = None,
+    profile_id: str | None = None,
     q: str | None = None,
 ) -> ProspectFacetsResponse:
     """Counts per tier / status / source for the filter chips.
@@ -611,7 +664,7 @@ async def prospect_facets(
     # own: it is not a chip the user toggles inside the list, it is which
     # client's list they are looking at. Counts for the other three must be
     # scoped to that client or the chips describe a pipeline nobody is viewing.
-    outer = _prospect_filters(workspace_id, project_id=project_id, q=q)
+    outer = _prospect_filters(workspace_id, project_id=project_id, profile_id=profile_id, q=q)
 
     branches: dict[str, list[dict[str, Any]]] = {}
     for block, (field, _order) in _PROSPECT_FACETS.items():
@@ -754,6 +807,7 @@ async def upsert_by_domain(
     body = CreateProspectRequest.model_validate(prospect_data)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
+    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
 
     doc = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if doc is None:
@@ -813,6 +867,10 @@ async def upsert_by_domain(
     # client's prospect. Un-assigning is an explicit act: PATCH with ``""``.
     if body.project_id:
         doc.project_id = body.project_id
+    # The brand is set-only for the same reason: a re-import that names no
+    # brand must not un-brand a row.
+    if body.profile_id:
+        doc.profile_id = body.profile_id
     # Discovery provenance follows the same set-only rule, for the same reason
     # doubled: an enrichment call that carries no ICP and no source URLs must
     # not ERASE the record of where a discovered row came from. Provenance that
@@ -894,6 +952,7 @@ def _icp_to_domain(doc: _IcpDoc) -> Icp:
         name=doc.name,
         criteria=doc.criteria,
         project_id=doc.project_id,
+        profile_id=getattr(doc, "profile_id", None),
         geography=doc.geography,
         exclusions=doc.exclusions,
         cadence=doc.cadence,
@@ -914,6 +973,7 @@ def _icp_to_response(icp: Icp) -> IcpResponse:
         name=icp.name,
         criteria=icp.criteria,
         project_id=icp.project_id,
+        profile_id=icp.profile_id,
         geography=icp.geography,
         exclusions=icp.exclusions,
         cadence=icp.cadence,
@@ -962,6 +1022,7 @@ async def create_icp(ctx: RequestContext, body: CreateIcpRequest) -> IcpResponse
     workspace_id = _require_workspace(ctx)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
+    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
 
     doc = _IcpDoc(workspace=workspace_id, **body.model_dump())
     await doc.insert()
@@ -979,6 +1040,7 @@ async def list_icps(
     ctx: RequestContext,
     *,
     project_id: str | None = None,
+    profile_id: str | None = None,
     status: str | None = None,
     limit: int = 100,
 ) -> list[IcpResponse]:
@@ -996,6 +1058,7 @@ async def list_icps(
     filters: dict[str, Any] = {"workspace": workspace_id}
     if project_id is not None:
         filters["project_id"] = project_id or None
+    _with_profile(filters, profile_id)
     if status is not None:
         filters["status"] = status
     docs = await _IcpDoc.find(filters).sort([("createdAt", -1), ("_id", -1)]).limit(limit).to_list()
@@ -1380,6 +1443,7 @@ async def draft_prospect(
 
     body = DraftProspectRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
+    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
     writer_fn = growth_writer.resolve_writer_fn()
     if writer_fn is None:
         raise CloudError(
@@ -1452,7 +1516,11 @@ async def draft_prospect(
                 workspace_id,
                 str(doc.id),
                 CreateDraftRequest(
-                    channel=channel, subject=subject, body=text, variant="first_touch"
+                    channel=channel,
+                    subject=subject,
+                    body=text,
+                    variant="first_touch",
+                    profile_id=body.profile_id,
                 ),
             )
         )
@@ -1493,6 +1561,8 @@ async def create_draft(
     ``replied``, ``dead``) are never regressed.
     """
     workspace_id = _require_workspace(ctx)
+    body = CreateDraftRequest.model_validate(body)
+    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
     return await _insert_draft(workspace_id, prospect_id, body)
 
 
@@ -1509,11 +1579,10 @@ async def _insert_draft(
     body = CreateDraftRequest.model_validate(body)
     prospect = await _fetch_in_workspace(workspace_id, prospect_id)
 
-    doc = _DraftDoc(
-        workspace=workspace_id,
-        prospect_id=str(prospect.id),
-        **body.model_dump(),
-    )
+    fields = body.model_dump()
+    # A draft is written under its prospect's brand unless the caller named one.
+    fields["profile_id"] = body.profile_id or getattr(prospect, "profile_id", None)
+    doc = _DraftDoc(workspace=workspace_id, prospect_id=str(prospect.id), **fields)
     await doc.insert()
     # no-event: growth has no realtime subscriber in v1; the drafts view polls.
 
@@ -1531,11 +1600,12 @@ async def list_drafts(
     prospect_id: str | None = None,
     channel: str | None = None,
     status: str | None = None,
+    profile_id: str | None = None,
     limit: int = 100,
 ) -> list[DraftResponse]:
     """List the workspace's drafts, newest first, optionally filtered."""
     workspace_id = _require_workspace(ctx)
-    filters: dict[str, Any] = {"workspace": workspace_id}
+    filters: dict[str, Any] = _with_profile({"workspace": workspace_id}, profile_id)
     if prospect_id is not None:
         filters["prospect_id"] = prospect_id
     if channel is not None:
@@ -1772,7 +1842,7 @@ async def _prospects_for_drafts(workspace_id: str, drafts: list[Draft]) -> dict[
 
 
 async def linkedin_queue(
-    ctx: RequestContext, *, limit: int = 100
+    ctx: RequestContext, *, profile_id: str | None = None, limit: int = 100
 ) -> list[LinkedInQueueItemResponse]:
     """The manual LinkedIn send queue: the workspace's linkedin-channel drafts
     in ``proposed`` / ``approved``, newest first, each joined with its
@@ -1786,11 +1856,14 @@ async def linkedin_queue(
     workspace_id = _require_workspace(ctx)
     cursor = (
         _DraftDoc.find(
-            {
-                "workspace": workspace_id,
-                "channel": "linkedin",
-                "status": {"$in": ["proposed", "approved"]},
-            }
+            _with_profile(
+                {
+                    "workspace": workspace_id,
+                    "channel": "linkedin",
+                    "status": {"$in": ["proposed", "approved"]},
+                },
+                profile_id,
+            )
         )
         .sort(-_DraftDoc.createdAt)  # type: ignore[operator]
         .limit(limit)
@@ -1881,9 +1954,11 @@ def _render_queue_markdown(items: list[LinkedInQueueItemResponse]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-async def linkedin_queue_markdown(ctx: RequestContext, *, limit: int = 100) -> str:
+async def linkedin_queue_markdown(
+    ctx: RequestContext, *, profile_id: str | None = None, limit: int = 100
+) -> str:
     """The queue as copy-paste markdown (``?format=md`` on the queue route)."""
-    return _render_queue_markdown(await linkedin_queue(ctx, limit=limit))
+    return _render_queue_markdown(await linkedin_queue(ctx, profile_id=profile_id, limit=limit))
 
 
 async def mark_linkedin_sent(ctx: RequestContext, draft_id: str) -> DraftResponse:
@@ -1953,7 +2028,7 @@ def _delivery_state(row: Any) -> DeliveryStateResponse:
 
 
 async def delivery_queue(
-    ctx: RequestContext, channel: str, *, limit: int = 100
+    ctx: RequestContext, channel: str, *, profile_id: str | None = None, limit: int = 100
 ) -> list[DeliveryQueueItemResponse]:
     """One channel's outbound queue: its ``proposed`` / ``approved`` / ``sent``
     drafts, newest first, each with its prospect, the resolved recipient and
@@ -1962,11 +2037,14 @@ async def delivery_queue(
     workspace_id = _require_workspace(ctx)
     cursor = (
         _DraftDoc.find(
-            {
-                "workspace": workspace_id,
-                "channel": channel,
-                "status": {"$in": list(_QUEUE_STATUSES)},
-            }
+            _with_profile(
+                {
+                    "workspace": workspace_id,
+                    "channel": channel,
+                    "status": {"$in": list(_QUEUE_STATUSES)},
+                },
+                profile_id,
+            )
         )
         .sort(-_DraftDoc.createdAt)  # type: ignore[operator]
         .limit(limit)

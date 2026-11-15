@@ -9195,6 +9195,32 @@ role at dispatch time, so a member-filed proposal would always fail closed at
 approve. A caller below the required tier gets
 `403 workspace.insufficient_role`.
 
+**Brands (`profile_id`).** Prospects, ICPs (hunts) and outreach drafts can
+belong to a brand: a Growth › Social profile, the same id the Social routes
+take. Every row carries a nullable `profile_id` in its response
+(`ProspectResponse`, `IcpResponse`, `DraftResponse`, and the `draft` inside
+the queue rows); rows made before brands carry `null`.
+
+- *Writes.* `POST /growth/prospects`, each row of `POST /growth/prospects/bulk`,
+  `POST /growth/icps`, `POST /growth/prospects/{id}/drafts` and
+  `POST /growth/prospects/{id}/draft` accept an optional `profile_id` (max 64
+  chars) and store it. It must name a brand in the caller's workspace: a
+  foreign or unknown id is `404 social_profile.not_found` (in bulk, an indexed
+  error entry for that row). A draft created without one takes its prospect's
+  brand, so writer drafts and follow-ups land under the prospect's brand. A
+  bulk re-import that names no brand leaves the stored brand alone.
+- *Reads.* `GET /growth/prospects`, `GET /growth/prospects/facets`,
+  `GET /growth/icps`, `GET /growth/drafts`, `GET /growth/linkedin/queue` (JSON
+  and `?format=md`) and `GET /growth/queue/{channel}` accept an optional
+  `profile_id` query param. With an id, only that brand's rows are returned
+  (facet counts included). With `profile_id=` (empty), only rows with no
+  brand. Without the param, every row is returned, the same as before brands.
+- *Backfill.* `scripts/backfill_growth_profile_id.py` gives unbranded rows
+  their workspace's oldest Social profile, or creates one named after the
+  workspace when it has none. `--dry-run` prints per-workspace counts and the
+  brand each would get, and writes nothing. Re-runs are no-ops, and rows that
+  already have a brand are never touched.
+
 ### `POST /api/v1/growth/prospects`
 
 Create a prospect. Body:

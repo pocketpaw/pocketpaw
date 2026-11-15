@@ -461,6 +461,8 @@ async def run_discovery(
                     domain=preview.domain,
                     source="discovery",
                     project_id=icp.project_id,
+                    # A hunt belongs to a brand, so what it finds does too.
+                    profile_id=icp.profile_id,
                     research_brief=preview.research_brief,
                     # ALREADY filtered to observed-on-a-page addresses. This is
                     # the only place a discovered prospect's emails are set,

@@ -10,6 +10,9 @@
 # ``subject`` is email-only; ``UpdateDraftRequest`` has no ``status`` — the
 # lifecycle moves only through the status route and the Instinct gate.
 # ``project_id`` is three-valued on updates (None leave, id set, "" clear).
+# ``profile_id`` (the brand) is optional on prospect, ICP and draft creates
+# and echoed on their responses; the service checks it names a brand in the
+# caller's workspace.
 # ``ProspectResearch`` coerces loose agent output rather than rejecting it.
 # What the DTO cannot check (an observed vs guessed email, a project in the
 # caller's workspace) is enforced one layer up.
@@ -57,6 +60,13 @@ def _normalise_domain(v: str) -> str:
     return v
 
 
+def _brand_or_none(v: str | None) -> str | None:
+    """A blank brand id means "no brand", stored as None so the unbranded
+    filter and the backfill both find the row."""
+    v = v.strip() if v is not None else None
+    return v or None
+
+
 class CreateProspectRequest(BaseModel):
     """A prospect at capture time. Only ``domain`` is required.
 
@@ -81,6 +91,9 @@ class CreateProspectRequest(BaseModel):
     # the caller's workspace (a project from another tenant is a 404) — the
     # DTO can only check the shape, since it has no tenancy context.
     project_id: str | None = None
+    # The brand this prospect is worked under (a Growth › Social profile id).
+    # Shape only here; the service validates it against the workspace.
+    profile_id: str | None = Field(default=None, max_length=64)
     tier: ProspectTier = "unqualified"
     research_brief: str = ""
     emails: list[str] = Field(default_factory=list)
@@ -94,6 +107,8 @@ class CreateProspectRequest(BaseModel):
     # the DTO cannot re-check it, because by here an address is just a string.
     icp_id: str | None = None
     source_urls: list[str] = Field(default_factory=list, max_length=20)
+
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
 
     @field_validator("domain")
     @classmethod
@@ -369,6 +384,7 @@ class ProspectResponse(BaseModel):
     domain: str
     source: str
     project_id: str | None = None
+    profile_id: str | None = None
     tier: str
     research_brief: str
     emails: list[str]
@@ -435,11 +451,15 @@ class CreateIcpRequest(BaseModel):
     # caller's workspace (a project from another tenant is a 404) — the DTO has
     # no tenancy context, exactly like ``CreateProspectRequest``.
     project_id: str | None = None
+    # The brand this hunt runs for; validated by the service like project_id.
+    profile_id: str | None = Field(default=None, max_length=64)
     geography: str = Field(default="", max_length=500)
     exclusions: str = Field(default="", max_length=2000)
     cadence: IcpCadence = "off"
     max_per_run: int = Field(default=DEFAULT_ICP_MAX_PER_RUN, ge=1, le=MAX_ICP_MAX_PER_RUN)
     status: IcpStatus = "active"
+
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
 
     @field_validator("name", "criteria")
     @classmethod
@@ -532,6 +552,7 @@ class IcpResponse(BaseModel):
     name: str
     criteria: str
     project_id: str | None
+    profile_id: str | None = None
     geography: str
     exclusions: str
     cadence: str
@@ -556,6 +577,10 @@ class CreateDraftRequest(BaseModel):
     body: str = Field(min_length=1, max_length=10_000)
     variant: DraftVariant = "first_touch"
     demo_url: str | None = Field(default=None, max_length=2048)
+    # The brand. Omitted means the prospect's brand (the usual case).
+    profile_id: str | None = Field(default=None, max_length=64)
+
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
 
     @field_validator("body")
     @classmethod
@@ -622,6 +647,7 @@ class DraftResponse(BaseModel):
     variant: str
     status: str
     demo_url: str | None
+    profile_id: str | None = None
     created_at: str | None
     updated_at: str | None
 
@@ -633,6 +659,10 @@ class DraftProspectRequest(BaseModel):
 
     channels: list[DraftChannel] | None = None
     instructions: str = Field(default="", max_length=1000)
+    # The brand the drafts are written under. Omitted means the prospect's.
+    profile_id: str | None = Field(default=None, max_length=64)
+
+    _clean_profile_id = field_validator("profile_id")(_brand_or_none)
 
 
 class DraftSkipped(BaseModel):

@@ -1,31 +1,20 @@
 # ee/pocketpaw_ee/cloud/models/prospect.py — outbound-engine prospect record
-# for the /growth surface (G-1, feat/growth-g1). Workspace-scoped; the company
-# website ``domain`` is the dedupe key, enforced by a UNIQUE
-# (workspace, domain) index so one tenant can never hold two rows for the same
-# company while two tenants can each hold their own. Only
-# ``ee.cloud.growth.service`` may import this doc class (import-linter
-# "Growth" contract).
+# for the /growth surface. Workspace-scoped; the company website ``domain`` is
+# the dedupe key, enforced by a UNIQUE (workspace, domain) index so one tenant
+# can never hold two rows for the same company while two tenants can each hold
+# their own. Only ``ee.cloud.growth.service`` may import this doc class
+# (import-linter "Growth" contract).
 #
-# Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
-# store. Later slices (ingestion, drafts, gated sends) build on this doc.
-# Updated 2026-07-28 (feat/growth-projects): ``name`` and ``company`` default to
-# ``""`` — a prospect may be JUST A DOMAIN until research fills the rest in, so
-# the stored fields have to be able to say "not yet known". Existing rows all
-# carry values, so this is a widening with no migration. Also ``project_id`` —
-# the client container (``cloud/projects``) a prospect belongs to — plus a
-# (workspace, project_id, createdAt) index, because an agency's default view is
-# one client's pipeline rather than the whole workspace's.
-# Updated 2026-07-29 (feat/growth-discovery): provenance for a row nobody typed
-# — ``icp_id`` (the standing profile that found it) and ``source_urls`` (the
-# pages the research actually read). Both empty on a manually created or
-# imported prospect. Plus a (workspace, source, createdAt) index: the monthly
-# discovery ceiling counts this workspace's discovered rows in the current
-# period, and that count runs on every discovery run.
-# ``research`` holds the structured profile from the last single-prospect
-# research run (a plain dict, validated by ``growth.dto.ProspectResearch`` on
-# the way in and out) and ``researched_at`` when it ran; both None until then.
-# ``whatsapp_opt_out_at`` is set when the prospect replies STOP on WhatsApp and
-# cleared by START; while it is set, no other reply turns ``opted_in`` back on.
+# ``name`` and ``company`` default to ``""`` (NOT YET KNOWN: a prospect may be
+# just a domain until research fills the rest in). ``project_id`` is the client
+# container (``cloud/projects``) and ``profile_id`` the brand (a Growth › Social
+# ``SocialProfile``) the row belongs to; both nullable, both indexed with the
+# workspace in front. Provenance for a row nobody typed: ``icp_id`` (the
+# standing profile that found it) and ``source_urls`` (the pages the research
+# read). ``research`` holds the structured profile from the last research run
+# (validated by ``growth.dto.ProspectResearch``) and ``researched_at`` when it
+# ran. ``whatsapp_opt_out_at`` is set on a WhatsApp STOP and cleared by START;
+# while it is set, no other reply turns ``opted_in`` back on.
 
 from __future__ import annotations
 
@@ -55,6 +44,10 @@ class Prospect(TimestampedDocument):
     # workspace that doesn't use projects. Validated against the workspace by
     # the service before it is written.
     project_id: str | None = None
+    # The brand (Growth › Social ``SocialProfile`` id) this prospect is worked
+    # under, or None on a row from before brands. Validated against the
+    # workspace by the service before it is written.
+    profile_id: str | None = None
     tier: str = "unqualified"  # a | b | c | unqualified
     research_brief: str = ""
     emails: list[str] = Field(default_factory=list)
@@ -94,4 +87,6 @@ class Prospect(TimestampedDocument):
             # ``source="discovery"`` created since the period start. Runs on
             # every discovery run, before anything is filed.
             [("workspace", 1), ("source", 1), ("createdAt", -1)],
+            # Brand-scoped list: the outreach views filter to one brand.
+            [("workspace", 1), ("profile_id", 1)],
         ]

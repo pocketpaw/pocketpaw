@@ -2244,6 +2244,7 @@ async def add_pulse_companies(
                 domain=company["domain"],
                 source="discovery",
                 project_id=icp.project_id,
+                profile_id=icp.profile_id,  # the hunt's brand
                 icp_id=icp.id,
                 research_brief=(
                     f"From the {icp.name} market pulse, {theme.get('title', '')}: "
