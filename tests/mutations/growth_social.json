@@ -835,5 +835,32 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
+  },
+  {
+    "label": "setup status: a skip beats a done row",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "key=key, state=\"done\" if done[key] else \"skipped\" if key in skipped else \"todo\"",
+    "replace": "key=key, state=\"skipped\" if key in skipped else \"done\" if done[key] else \"todo\"",
+    "tests": [
+      "tests/cloud/growth/social/test_setup_status.py"
+    ]
+  },
+  {
+    "label": "setup status: a draft blueprint counts as done",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "\"blueprint\": await social_blueprint.approved_for(workspace_id, profile.id) is not None,",
+    "replace": "\"blueprint\": await social_blueprint._find(workspace_id, profile.id, \"draft\") is not None,",
+    "tests": [
+      "tests/cloud/growth/social/test_setup_status.py"
+    ]
+  },
+  {
+    "label": "tenancy: setup status reads a profile by id across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    return await _ProfileDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    return await _ProfileDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/cloud/growth/social/test_setup_status.py"
+    ]
   }
 ]

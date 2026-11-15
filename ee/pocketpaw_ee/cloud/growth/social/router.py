@@ -19,7 +19,9 @@
 # regenerate, approve) is the profile's versioned plan; its writes are growth.manage. The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
-# allowlist; it is never taken from the request body.
+# allowlist; it is never taken from the request body. ``GET /setup-status`` (growth.read)
+# is the brand's "Set up" checklist; ``POST /setup-status/skip`` (growth.write) skips
+# or un-skips one row.
 
 from __future__ import annotations
 
@@ -63,6 +65,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     ReplyDraftResponse,
     SaveBlueprintDraftRequest,
     ScheduleIdeasRequest,
+    SetupStatusResponse,
+    SkipSetupRequest,
     SocialAccountListResponse,
     SocialChannelListResponse,
     SocialExperimentListResponse,
@@ -749,3 +753,29 @@ async def update_reply(
     """Edit a card's text (422 when it breaks the drafting rules) and/or mark it posted
     or skipped. A malformed or foreign id is a 404."""
     return await social_service.update_reply(ctx, reply_id, body)
+
+
+@router.get(
+    "/setup-status",
+    response_model=SetupStatusResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def setup_status(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SetupStatusResponse:
+    """The brand's "Set up" checklist: scan, blueprint, accounts, repos, daily drafts."""
+    return await social_service.setup_status(ctx, profile_id)
+
+
+@router.post(
+    "/setup-status/skip",
+    response_model=SetupStatusResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def skip_setup(
+    body: SkipSetupRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> SetupStatusResponse:
+    """Skip one checklist row (``skipped: false`` un-skips it); an unknown key is a 422."""
+    return await social_service.skip_setup(ctx, body, profile_id)

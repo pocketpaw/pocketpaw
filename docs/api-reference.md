@@ -10291,6 +10291,8 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `POST /api/v1/growth/social/blueprint/regenerate` | Rerun the analyst into a new draft version. Never touches the approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/approve` | The draft becomes the approved; the previous approved is superseded. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=` (versions): per-section `added`, `removed` and `changed` keys. |
+| `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
+| `POST /api/v1/growth/social/setup-status/skip` | `{key, skipped?}`: skip one checklist row, or un-skip it with `skipped: false`. Idempotent; an unknown key is a 422. Returns the checklist. |
 
 **Response (`SocialProfile`)** — every profile route returns this shape:
 
@@ -10341,7 +10343,8 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
   "github_repos": ["acme/web"],
   "reply_watch_handles": ["somefounder"],
   "reply_queries": ["csv export"],
-  "reply_cards_per_day": 15
+  "reply_cards_per_day": 15,
+  "setup_skipped": []
 }
 ```
 
@@ -10729,6 +10732,24 @@ items dropped, then the first 12 beats and 15 tags kept), `pillar` and
 generator's and cannot be edited. Returns the idea. A malformed id, an
 unknown id and another workspace's id all return
 `404 social_idea.not_found`.
+
+### Setup checklist — `/api/v1/growth/social/setup-status`
+
+`GET` (`growth.read`, `?profile_id=` like its siblings, an archived brand still
+read by id) returns `{rows: [{key, state}]}` with the keys always in this order:
+
+| key | `done` when |
+|---|---|
+| `scan` | a website analysis has completed (`analyzed_at` set; a failed run does not count) |
+| `blueprint` | the brand has an approved Blueprint version (a draft does not count) |
+| `accounts` | the Accounts list (`GET /accounts`) returns at least one connected account; a Postiz failure reads as `todo` |
+| `repos` | `github_repos` is non-empty |
+| `daily_drafts` | `active` is `true` |
+
+`state` is `done`, `skipped` (the owner skipped it and it is not done) or
+`todo`. Done always wins over skipped. `POST /setup-status/skip`
+(`growth.write`) with `{key}` adds the key to the profile's `setup_skipped`;
+`{key, skipped: false}` removes it. Both return the checklist.
 
 ### Brand Blueprint — `/api/v1/growth/social/blueprint`
 
