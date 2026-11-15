@@ -20,7 +20,10 @@
 # Drafts come from the ``ReplyDraftFn`` seam (production: a pinned, tool-less
 # agent, like the ideas agent). ``check_reply`` holds the hard rules in code: at
 # most MAX_REPLY_CHARS, plus ``ideas.check_draft`` (no em or en dash, no number
-# that is not in the target post or the product's recent changes).
+# that is not in the target post or the product's recent changes). With the
+# brand's approved Blueprint (``blueprint``), the company block is its identity,
+# audience and voice (``analyst.blueprint_lines``, fenced) instead of the profile's
+# analysis.
 
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from urllib.parse import quote
 
 from pocketpaw_ee.cloud.growth.social.analyst import (
     as_text,
+    blueprint_lines,
     fence,
     json_objects,
     run_pinned_agent,
@@ -41,6 +45,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MAX_REPLY_CHARS,
     GeneratedIdea,
     GeneratedReply,
+    GrowthBlueprint,
     ReplyCandidate,
     SocialProfile,
 )
@@ -207,21 +212,28 @@ GROWTH_SOCIAL_REPLIES_AGENT: dict[str, Any] = {
 
 
 def build_replies_prompt(
-    profile: SocialProfile, candidates: list[ReplyCandidate], changes: list[Change]
+    profile: SocialProfile,
+    candidates: list[ReplyCandidate],
+    changes: list[Change],
+    blueprint: GrowthBlueprint | None = None,
 ) -> str:
-    analysis = profile.analysis
-    typed = profile.description
     lines = ["Draft one reply for each post below that you can help with.", "", "<company>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
-    for label, value in (
-        ("Product", (analysis.product if analysis else "") or typed.get("product", "")),
-        ("Audience", (analysis.audience if analysis else "") or typed.get("audience", "")),
-        ("Tone", (analysis.tone if analysis else "") or typed.get("tone", "")),
-        ("Avoid", "; ".join(analysis.avoid) if analysis else typed.get("avoid", "")),
-    ):
-        if (value or "").strip():
-            lines.append(f"{label}: {fence(value.strip())}")
+    if blueprint is None:
+        # ponytail: fallback until GX-15 removes the old strategy fields
+        analysis = profile.analysis
+        typed = profile.description
+        for label, value in (
+            ("Product", (analysis.product if analysis else "") or typed.get("product", "")),
+            ("Audience", (analysis.audience if analysis else "") or typed.get("audience", "")),
+            ("Tone", (analysis.tone if analysis else "") or typed.get("tone", "")),
+            ("Avoid", "; ".join(analysis.avoid) if analysis else typed.get("avoid", "")),
+        ):
+            if (value or "").strip():
+                lines.append(f"{label}: {fence(value.strip())}")
     lines.append("</company>")
+    if blueprint is not None:
+        lines += blueprint_lines(blueprint, ("identity", "audience", "voice"))
     if changes:
         lines += [
             "",
@@ -262,14 +274,19 @@ class ReplyDraftFn(Protocol):
         candidates: list[ReplyCandidate],
         *,
         changes: list[Change],
+        blueprint: GrowthBlueprint | None = None,
     ) -> tuple[GeneratedReply, ...]: ...
 
 
 async def agent_draft_replies(
-    profile: SocialProfile, candidates: list[ReplyCandidate], *, changes: list[Change]
+    profile: SocialProfile,
+    candidates: list[ReplyCandidate],
+    *,
+    changes: list[Change],
+    blueprint: GrowthBlueprint | None = None,
 ) -> tuple[GeneratedReply, ...]:
     """The production ``ReplyDraftFn``: one agent run drafts the whole batch."""
-    prompt = build_replies_prompt(profile, candidates, changes)
+    prompt = build_replies_prompt(profile, candidates, changes, blueprint)
     text = await run_pinned_agent(
         profile.workspace_id, GROWTH_SOCIAL_REPLIES_AGENT, prompt, GROWTH_SOCIAL_REPLIES_SLUG
     )

@@ -12,6 +12,10 @@
 # growth service decides which drafts are stored (eligible channels only) and a
 # human still approves every send.
 #
+# With the brand's approved Blueprint (``blueprint``), the prompt carries its
+# identity, audience and voice as a fenced data block (``analyst.blueprint_lines``);
+# without one it is the prospect and ICP alone.
+#
 # The parser never raises: an unreadable answer is zero drafts, which the
 # service turns into a 502.
 
@@ -30,6 +34,8 @@ from pocketpaw_ee.cloud.growth.researcher import (
     run_agent_text,
     workspace_owner_id,
 )
+from pocketpaw_ee.cloud.growth.social.analyst import blueprint_lines
+from pocketpaw_ee.cloud.growth.social.domain import GrowthBlueprint
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +141,7 @@ def build_writer_prompt(
     icp: Icp | None,
     channels: list[str],
     instructions: str = "",
+    blueprint: GrowthBlueprint | None = None,
 ) -> str:
     lines = ["Write first-touch outreach for this company.", ""]
     lines.append(f"Domain: {prospect.domain}")
@@ -147,6 +154,8 @@ def build_writer_prompt(
     lines += research or ["Nothing beyond the name and domain. Keep the copy general and honest."]
     if icp is not None and icp.criteria.strip():
         lines += ["", "Why they are on our list (who we are looking for):", icp.criteria.strip()]
+    if blueprint is not None:
+        lines += blueprint_lines(blueprint, ("identity", "audience", "voice"))
     lines += ["", "Write for these channels only: " + ", ".join(channels)]
     if instructions.strip():
         lines += [
@@ -213,6 +222,8 @@ class WriterFn(Protocol):
         icp: Icp | None,
         channels: list[str],
         instructions: str,
+        *,
+        blueprint: GrowthBlueprint | None = None,
     ) -> tuple[WrittenDraft, ...]: ...
 
 
@@ -233,6 +244,8 @@ async def agent_write_drafts(
     icp: Icp | None,
     channels: list[str],
     instructions: str = "",
+    *,
+    blueprint: GrowthBlueprint | None = None,
 ) -> tuple[WrittenDraft, ...]:
     """The production ``WriterFn``. Raises ``ResearchUnavailable`` when the
     agent cannot be set up or the run errors."""
@@ -247,7 +260,7 @@ async def agent_write_drafts(
         raise ResearchUnavailable("the writer agent could not be set up in this workspace")
 
     session_key = f"growth-writer:{prospect.workspace_id}:{prospect.id}:{_run_stamp()}"
-    prompt = build_writer_prompt(prospect, icp, channels, instructions)
+    prompt = build_writer_prompt(prospect, icp, channels, instructions, blueprint)
     try:
         text = await run_agent_text(agent_id, prompt, session_key)
     except Exception:

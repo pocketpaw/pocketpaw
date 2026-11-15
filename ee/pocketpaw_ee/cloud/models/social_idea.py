@@ -13,7 +13,8 @@
 # Postiz; empty until then (and on older rows). ``pillar`` / ``hook_type`` are
 # short free-text tags (at most 40 characters) the review averages over;
 # ``experiment_id`` names the experiment whose arm this daily draft was written
-# for. All three read as "" on older rows.
+# for. All three read as "" on older rows. ``blueprint_version`` is the approved
+# Brand Blueprint version the ideas agent followed (None when it had none).
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).
@@ -57,6 +58,8 @@ class SocialIdea(TimestampedDocument):
     pillar: str = ""
     hook_type: str = ""
     experiment_id: str = ""
+    # The approved Blueprint version the agent followed; None when none was used.
+    blueprint_version: int | None = None
 
     class Settings:
         name = "growth_social_ideas"

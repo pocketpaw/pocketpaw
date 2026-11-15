@@ -44,6 +44,10 @@
 #     ``service.prospect_exists_by_domain``): a daily cron that re-upserts a
 #     live prospect would reset its ``status`` and lose the follow-up thread.
 #     Discovery only ever inserts.
+#
+# A hunt for a branded ICP (``profile_id``) hands the research its brand's
+# approved Blueprint (audience, voice, pillars) as fenced context; an unbranded
+# ICP gets none.
 
 """ICP discovery for the /growth outbound engine."""
 
@@ -134,6 +138,9 @@ class ResearchRequest:
     exclusions: str = ""
     max_results: int = 10
     project_id: str | None = None
+    # The hunt's brand Blueprint (audience, voice, pillars), already rendered as a
+    # fenced data block; empty for an unbranded ICP or a brand with none approved.
+    blueprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -255,6 +262,7 @@ async def _research(
         exclusions=str(getattr(icp, "exclusions", "")),
         max_results=int(getattr(icp, "max_per_run", 10)),
         project_id=getattr(icp, "project_id", None),
+        blueprint=await _blueprint_context(workspace_id, getattr(icp, "profile_id", None)),
     )
     try:
         result = await research_fn(request)
@@ -269,6 +277,20 @@ async def _research(
     if result is None:
         return ResearchResult(), ""
     return result, ""
+
+
+async def _blueprint_context(workspace_id: str, profile_id: str | None) -> str:
+    """The branded hunt's approved Blueprint as prompt text; "" when unbranded or none."""
+    if not profile_id:
+        return ""
+    # Lazy: analyst imports researcher, which imports this module.
+    from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
+    from pocketpaw_ee.cloud.growth.social.analyst import blueprint_lines
+
+    bp = await social_blueprint.approved_for(workspace_id, profile_id)
+    if bp is None:
+        return ""
+    return "\n".join(blueprint_lines(bp, ("audience", "voice", "pillars")))
 
 
 def _clean_urls(urls: tuple[str, ...]) -> list[str]:

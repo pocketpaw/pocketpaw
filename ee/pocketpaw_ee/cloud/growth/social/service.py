@@ -39,7 +39,8 @@
 # Daily X drafts: ``run_daily_drafts`` (the growth worker's 05:30 UTC cron, the
 # one cross-workspace read here) and ``draft_daily`` (the on-demand route) both
 # go through ``_draft_daily``: an active, onboarded profile gets at most its
-# ``weekly_post_quota`` daily drafts per rolling 7 days and two per UTC day,
+# X budget daily drafts per rolling 7 days (the approved Blueprint's x channel
+# ``posts_per_week``, else ``weekly_post_quota``) and two per UTC day,
 # built on the last 24 h of its GitHub changes, for X only. Every draft must
 # pass ``ideas.check_draft`` (one retry carries the reasons); the rest are
 # dropped. Survivors are stored ``new`` with ``source="daily"`` and a
@@ -83,6 +84,9 @@
 # fixed at create, only a close moves the verdict); daily drafts alternate its arms
 # and are stamped. ``get_review`` is a read-only weekly review. Learnings reach
 # the ideas prompt only once approved (newest 10); nothing tunes itself.
+# Brand Blueprint: ideas, daily drafts and reply cards read the brand's approved
+# Blueprint once per run (``blueprint.approved_for``; a draft never), hand it to
+# the agent and stamp its version on every row made (``blueprint_version``).
 #
 # Tracked links: when a post names an idea and its body holds a URL, the first
 # URL becomes a SocialLink (reused per idea + URL), leaves the body, and goes out
@@ -123,6 +127,7 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud._core.public_url import public_base_url
 from pocketpaw_ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social import review
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text, resolve_changes_fn
 from pocketpaw_ee.cloud.growth.social.domain import (
@@ -145,6 +150,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     AnalysisOutcome,
     AnalysisRequest,
     GeneratedIdea,
+    GrowthBlueprint,
     PostMetrics,
     ReplyCard,
     SocialAnalysis,
@@ -394,6 +400,7 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         pillar=doc.pillar,
         hook_type=doc.hook_type,
         experiment_id=doc.experiment_id,
+        blueprint_version=doc.blueprint_version,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -427,6 +434,7 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         pillar=i.pillar,
         hook_type=i.hook_type,
         experiment_id=i.experiment_id,
+        blueprint_version=i.blueprint_version,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -684,6 +692,9 @@ async def generate_ideas(
     # Only passed when there are some, so an IdeasFn without the kwarg keeps working.
     rules = await _approved_learnings(workspace_id, profile_key)
     extra: dict[str, Any] = {"learnings": rules} if rules else {}
+    bp = await social_blueprint.approved_for(workspace_id, profile_key)
+    if bp is not None:
+        extra["blueprint"] = bp
     try:
         generated = await ideas_fn(
             profile,
@@ -716,6 +727,7 @@ async def generate_ideas(
             pillar=item.pillar,
             hook_type=item.hook_type,
             status="new",
+            blueprint_version=bp.version if bp is not None else None,
         )
         await idea.insert()
         docs.append(idea)
@@ -818,7 +830,9 @@ async def _draft_daily(
     if ideas_fn is None or not doc.active or doc.onboarding_completed_at is None:
         return [], 0
     profile_key = str(doc.id)
-    left_week = doc.weekly_post_quota - await _daily_count(
+    # One read per run: the same version drives the quota, the prompt and the stamp.
+    bp = await social_blueprint.approved_for(workspace_id, profile_key)
+    left_week = _x_posts_per_week(doc.weekly_post_quota, bp) - await _daily_count(
         workspace_id, profile_key, now - timedelta(days=7)
     )
     left_today = DAILY_DRAFTS_PER_DAY - await _daily_count(
@@ -842,6 +856,8 @@ async def _draft_daily(
     arm = await _next_arm(exp) if exp is not None else ""
     if exp is not None:
         extra["experiment_arm"] = (exp.variable, arm)
+    if bp is not None:
+        extra["blueprint"] = bp
     kept: list[GeneratedIdea] = []
     reasons: list[str] = []
     dropped = 0
@@ -889,6 +905,7 @@ async def _draft_daily(
             status="new",
             source="daily",
             suggested_at=slot,
+            blueprint_version=bp.version if bp is not None else None,
         )
         if exp is not None:  # stamp the arm the draft was written for
             setattr(idea_doc, exp.variable, arm)
@@ -1629,6 +1646,7 @@ def _reply_to_domain(doc: _ReplyDoc) -> ReplyCard:
         intent_url=doc.intent_url,
         why=doc.why,
         status=doc.status,
+        blueprint_version=doc.blueprint_version,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -1648,6 +1666,7 @@ def _reply_to_response(r: ReplyCard) -> ReplyDraftResponse:
         intent_url=r.intent_url,
         why=r.why,
         status=r.status,
+        blueprint_version=r.blueprint_version,
         created_at=iso_utc(r.created_at),
         updated_at=iso_utc(r.updated_at),
     )
@@ -1709,7 +1728,9 @@ async def _draft_replies(
         return [], 0
 
     changes = await _gather_changes(list(doc.github_repos or ()), now - timedelta(hours=24))
-    generated = await draft_fn(_profile_to_domain(doc), candidates, changes=changes)
+    bp = await social_blueprint.approved_for(workspace_id, profile_key)
+    extra: dict[str, Any] = {"blueprint": bp} if bp is not None else {}
+    generated = await draft_fn(_profile_to_domain(doc), candidates, changes=changes, **extra)
     targets = {c.post_id: c for c in candidates}
     docs: list[_ReplyDoc] = []
     dropped = 0
@@ -1734,6 +1755,7 @@ async def _draft_replies(
             why=reply.why,
             status="new",
             source_text=source,
+            blueprint_version=bp.version if bp is not None else None,
         )
         try:
             await card.insert()
@@ -3478,3 +3500,12 @@ __all__ = [
     "setup_status",
     "skip_setup",
 ]
+
+
+def _x_posts_per_week(weekly_post_quota: int, bp: GrowthBlueprint | None) -> int:
+    """The daily drafts' X budget: the approved Blueprint's x channel (0 when the
+    Blueprint plans no X), else the profile's quota."""
+    if bp is None:
+        # ponytail: fallback until GX-15 removes the old strategy fields
+        return weekly_post_quota
+    return next((c.posts_per_week for c in bp.channels if c.channel == "x"), 0)

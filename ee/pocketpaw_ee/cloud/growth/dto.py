@@ -648,6 +648,7 @@ class DraftResponse(BaseModel):
     status: str
     demo_url: str | None
     profile_id: str | None = None
+    blueprint_version: int | None = None
     created_at: str | None
     updated_at: str | None
 

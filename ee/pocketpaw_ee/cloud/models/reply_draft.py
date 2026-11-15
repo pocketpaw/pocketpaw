@@ -6,6 +6,8 @@
 # (``new`` / ``posted`` / ``skipped``). ``source_text`` is internal: the exact
 # text the draft was checked against (the target post plus the product's recent
 # changes), so a later hand edit is re-checked against the same source.
+# ``blueprint_version`` is the approved Brand Blueprint version the drafter
+# followed (None when it had none).
 #
 # The unique (workspace, profile, target_post_id) index means a post never gets
 # two cards; a racing second insert is a DuplicateKeyError the drafter skips.
@@ -35,6 +37,8 @@ class ReplyDraft(TimestampedDocument):
     why: str = ""
     status: str = "new"
     source_text: str = ""
+    # The approved Blueprint version the agent followed; None when none was used.
+    blueprint_version: int | None = None
 
     class Settings(TimestampedDocument.Settings):
         name = "growth_social_reply_drafts"

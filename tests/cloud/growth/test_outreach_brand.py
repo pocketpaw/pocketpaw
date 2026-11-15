@@ -301,8 +301,16 @@ def test_mappers_carry_profile_id():
     assert s._to_response(s._to_domain(p)).profile_id == "brand-1"
     i = IcpDoc(workspace="w1", name="n", criteria="c", profile_id="brand-1")
     assert s._icp_to_response(s._icp_to_domain(i)).profile_id == "brand-1"
-    d = DraftDoc(workspace="w1", prospect_id="p", channel="email", body="b", profile_id="brand-1")
-    assert s._draft_to_response(s._draft_to_domain(d)).profile_id == "brand-1"
+    d = DraftDoc(
+        workspace="w1",
+        prospect_id="p",
+        channel="email",
+        body="b",
+        profile_id="brand-1",
+        blueprint_version=3,
+    )
+    out = s._draft_to_response(s._draft_to_domain(d))
+    assert (out.profile_id, out.blueprint_version) == ("brand-1", 3)
 
 
 # ---------------------------------------------------------------------------

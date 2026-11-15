@@ -343,6 +343,7 @@ class Draft:
     status: str = "draft"  # DraftStatus
     demo_url: str | None = None
     profile_id: str | None = None  # the brand, inherited from the prospect
+    blueprint_version: int | None = None  # the approved Blueprint the writer followed
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

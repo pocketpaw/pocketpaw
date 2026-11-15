@@ -20,6 +20,8 @@
 # Growth › Social profile). Creates validate it against the workspace; a draft
 # without one inherits its prospect's. Every list / queue read takes an
 # optional ``profile_id`` filter (``_with_profile``); absent means every row.
+# ``draft_prospect`` hands the writer the brand's approved Blueprint and stamps
+# its version on each draft (``blueprint_version``, server-set, never sent in).
 # ``propose_send`` / ``propose_send_batch`` file one gated Instinct proposal
 # per draft. Queues: the LinkedIn manual queue + markdown export, and
 # ``delivery_queue`` (per channel, latest MessageLog row attached).
@@ -157,6 +159,7 @@ def _draft_to_domain(doc: _DraftDoc) -> Draft:
         status=doc.status,
         demo_url=doc.demo_url,
         profile_id=getattr(doc, "profile_id", None),
+        blueprint_version=getattr(doc, "blueprint_version", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -174,6 +177,7 @@ def _draft_to_response(d: Draft) -> DraftResponse:
         status=d.status,
         demo_url=d.demo_url,
         profile_id=d.profile_id,
+        blueprint_version=d.blueprint_version,
         created_at=iso_utc(d.created_at),
         updated_at=iso_utc(d.updated_at),
     )
@@ -1479,8 +1483,13 @@ async def draft_prospect(
         raise CloudError(422, "prospect.no_channel", message)
 
     icp = await _icp_for(workspace_id, doc)
+    # The brand these drafts are written under (as ``_insert_draft`` decides it);
+    # its approved Blueprint, read once, is the writer's context and the stamp.
+    brand = body.profile_id or getattr(doc, "profile_id", None)
+    bp = await _approved_blueprint(workspace_id, brand)
+    extra: dict[str, Any] = {"blueprint": bp} if bp is not None else {}
     try:
-        written = await writer_fn(_to_domain(doc), icp, list(eligible), body.instructions)
+        written = await writer_fn(_to_domain(doc), icp, list(eligible), body.instructions, **extra)
     except CloudError:
         raise
     except ResearchUnavailable as exc:
@@ -1522,6 +1531,7 @@ async def draft_prospect(
                     variant="first_touch",
                     profile_id=body.profile_id,
                 ),
+                blueprint_version=bp.version if bp is not None else None,
             )
         )
 
@@ -1567,7 +1577,11 @@ async def create_draft(
 
 
 async def _insert_draft(
-    workspace_id: str, prospect_id: str, body: CreateDraftRequest
+    workspace_id: str,
+    prospect_id: str,
+    body: CreateDraftRequest,
+    *,
+    blueprint_version: int | None = None,
 ) -> DraftResponse:
     """Insert one draft against a prospect in ``workspace_id``.
 
@@ -1582,6 +1596,8 @@ async def _insert_draft(
     fields = body.model_dump()
     # A draft is written under its prospect's brand unless the caller named one.
     fields["profile_id"] = body.profile_id or getattr(prospect, "profile_id", None)
+    # Server-set only (never on the request): the writer's approved Blueprint version.
+    fields["blueprint_version"] = blueprint_version
     doc = _DraftDoc(workspace=workspace_id, prospect_id=str(prospect.id), **fields)
     await doc.insert()
     # no-event: growth has no realtime subscriber in v1; the drafts view polls.
@@ -2864,3 +2880,13 @@ __all__ = [
     "update_growth_settings",
     "upsert_by_domain",
 ]
+
+
+async def _approved_blueprint(workspace_id: str, profile_id: str | None) -> Any:
+    """The brand's approved Blueprint (a social ``GrowthBlueprint``), or None for an
+    unbranded row. Never another brand's, never a draft."""
+    if not profile_id:
+        return None
+    from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
+
+    return await social_blueprint.approved_for(workspace_id, profile_id)

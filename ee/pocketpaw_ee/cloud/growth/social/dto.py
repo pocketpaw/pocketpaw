@@ -397,6 +397,7 @@ class SocialIdeaResponse(BaseModel):
     pillar: str = ""
     hook_type: str = ""
     experiment_id: str = ""
+    blueprint_version: int | None = None
     created_at: str | None
     updated_at: str | None
 
@@ -418,6 +419,7 @@ class ReplyDraftResponse(BaseModel):
     intent_url: str
     why: str
     status: ReplyStatus
+    blueprint_version: int | None = None
     created_at: str | None
     updated_at: str | None
 

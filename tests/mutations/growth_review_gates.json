@@ -229,5 +229,40 @@
     "find": "        if brand:\n            out.setdefault(brand, []).append(d[\"_id\"])\n",
     "replace": "",
     "tests": "tests/cloud/growth/test_outreach_brand.py::test_backfill_gives_a_draft_its_prospects_brand_first"
+  },
+  {
+    "label": "blueprint: the outreach writer prompt drops the approved Blueprint",
+    "file": "ee/pocketpaw_ee/cloud/growth/writer.py",
+    "find": "        lines += blueprint_lines(blueprint, (\"identity\", \"audience\", \"voice\"))\n",
+    "replace": "        pass\n",
+    "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_draft_follows_the_approved_blueprint_and_carries_its_version"
+  },
+  {
+    "label": "blueprint: an outreach draft is not stamped with the Blueprint version",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "                blueprint_version=bp.version if bp is not None else None,\n",
+    "replace": "                blueprint_version=None,\n",
+    "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_draft_follows_the_approved_blueprint_and_carries_its_version"
+  },
+  {
+    "label": "blueprint: the outreach writer follows the draft instead of the approved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    doc = await _find(workspace_id, profile_id, \"approved\")\n",
+    "replace": "    doc = await _find(workspace_id, profile_id, \"draft\")\n",
+    "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_draft_follows_the_approved_blueprint_and_carries_its_version"
+  },
+  {
+    "label": "blueprint: a branded hunt's research drops the Blueprint",
+    "file": "ee/pocketpaw_ee/cloud/growth/discovery.py",
+    "find": "        blueprint=await _blueprint_context(workspace_id, getattr(icp, \"profile_id\", None)),\n",
+    "replace": "        blueprint=\"\",\n",
+    "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_hunt_research_carries_the_brand_blueprint"
+  },
+  {
+    "label": "blueprint: the research prompt leaves out the hunt's Blueprint",
+    "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
+    "find": "    if request.blueprint:\n",
+    "replace": "    if False:\n",
+    "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_hunt_research_carries_the_brand_blueprint"
   }
 ]
