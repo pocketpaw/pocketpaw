@@ -6,7 +6,8 @@
 #
 # What lives here:
 #   * Prospect / Icp / Draft / MessageLog value objects and their vocabularies
-#     (tiers, statuses, sources, sort and facet orders, ICP cadences).
+#     (tiers, statuses, sources, sort and facet orders, ICP cadences). The
+#     first three carry an optional ``profile_id``: the brand they belong to.
 #   * ``DRAFT_TRANSITIONS`` — the draft status machine the service enforces,
 #     and ``GATE_OWNED_TARGETS`` — ``approved`` / ``sent``, settable only by
 #     the Instinct send gate and the delivery paths, never the public route.
@@ -85,6 +86,9 @@ class Prospect:
     # about their pipeline changes. Validated against the workspace at entry —
     # a project from another tenant is a hard error, not a silent null.
     project_id: str | None = None
+    # The brand (Growth › Social profile id) this row is worked under. Nullable
+    # like ``project_id``: rows from before brands carry None.
+    profile_id: str | None = None
     tier: str = "unqualified"  # ProspectTier
     research_brief: str = ""
     emails: tuple[str, ...] = ()
@@ -186,6 +190,7 @@ class Icp:
     name: str
     criteria: str
     project_id: str | None = None
+    profile_id: str | None = None  # the brand this hunt runs for
     geography: str = ""
     exclusions: str = ""
     cadence: str = "off"  # IcpCadence
@@ -337,6 +342,7 @@ class Draft:
     variant: str = "first_touch"  # DraftVariant
     status: str = "draft"  # DraftStatus
     demo_url: str | None = None
+    profile_id: str | None = None  # the brand, inherited from the prospect
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

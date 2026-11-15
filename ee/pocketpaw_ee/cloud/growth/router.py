@@ -15,6 +15,11 @@
 # delivery queues (``/queue/{channel}``, latest delivery attempt attached) and
 # ``deliver-approved``; and the workspace growth settings (mock delivery).
 #
+# Brands: every outreach list / queue read (prospects, facets, ICPs, drafts,
+# the LinkedIn queue, ``/queue/{channel}``) takes an optional ``profile_id``
+# query param. Given, it filters to that brand (``""`` = rows with no brand);
+# omitted, the route returns every row exactly as before brands existed.
+#
 # Invariants: the status route refuses the gate-owned targets ``approved`` /
 # ``sent`` (403 ``draft.gate_required``) — approval happens only in the
 # Instinct Tray. Literal paths (``/prospects/facets``) are declared above the
@@ -131,6 +136,7 @@ async def list_prospects(
     status: ProspectStatus | None = Query(default=None),
     source: ProspectSource | None = Query(default=None),
     project_id: str | None = Query(default=None, max_length=64),
+    profile_id: str | None = Query(default=None, max_length=64),
     q: str | None = Query(default=None, max_length=200),
     sort: ProspectSort = Query(default="newest"),
     cursor: str | None = Query(default=None, max_length=200),
@@ -149,13 +155,15 @@ async def list_prospects(
 
     ``project_id`` scopes to one client's pipeline. Omitted means every
     project, which is the whole view for a workspace not using them; an empty
-    string means the rows with no client assigned."""
+    string means the rows with no client assigned. ``profile_id`` scopes to
+    one brand the same way; omitted means every brand."""
     return await growth_service.list_prospects(
         ctx,
         tier=tier,
         status=status,
         source=source,
         project_id=project_id,
+        profile_id=profile_id,
         q=q,
         sort=sort,
         cursor=cursor,
@@ -176,6 +184,7 @@ async def prospect_facets(
     status: ProspectStatus | None = Query(default=None),
     source: ProspectSource | None = Query(default=None),
     project_id: str | None = Query(default=None, max_length=64),
+    profile_id: str | None = Query(default=None, max_length=64),
     q: str | None = Query(default=None, max_length=200),
     ctx: RequestContext = Depends(request_context),
 ) -> ProspectFacetsResponse:
@@ -186,7 +195,13 @@ async def prospect_facets(
     counts describe the replied rows rather than collapsing to the selected
     tier. Every legal value is present, zeros included."""
     return await growth_service.prospect_facets(
-        ctx, tier=tier, status=status, source=source, project_id=project_id, q=q
+        ctx,
+        tier=tier,
+        status=status,
+        source=source,
+        project_id=project_id,
+        profile_id=profile_id,
+        q=q,
     )
 
 
@@ -290,6 +305,7 @@ async def create_icp(
 )
 async def list_icps(
     project_id: str | None = Query(default=None, max_length=64),
+    profile_id: str | None = Query(default=None, max_length=64),
     status: IcpStatus | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
@@ -297,7 +313,9 @@ async def list_icps(
     """The workspace's ICPs, newest first. A bare list, not the prospect
     list's page envelope — a workspace holds a handful of hand-written
     profiles, not thousands of rows."""
-    return await growth_service.list_icps(ctx, project_id=project_id, status=status, limit=limit)
+    return await growth_service.list_icps(
+        ctx, project_id=project_id, profile_id=profile_id, status=status, limit=limit
+    )
 
 
 @router.get(
@@ -404,11 +422,17 @@ async def list_drafts(
     prospect_id: str | None = Query(default=None),
     channel: DraftChannel | None = Query(default=None),
     status: DraftStatus | None = Query(default=None),
+    profile_id: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[DraftResponse]:
     return await growth_service.list_drafts(
-        ctx, prospect_id=prospect_id, channel=channel, status=status, limit=limit
+        ctx,
+        prospect_id=prospect_id,
+        channel=channel,
+        status=status,
+        profile_id=profile_id,
+        limit=limit,
     )
 
 
@@ -502,6 +526,7 @@ async def propose_draft_send_batch(
 )
 async def linkedin_queue(
     format: Literal["json", "md"] = Query(default="json"),
+    profile_id: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[LinkedInQueueItemResponse] | Response:
@@ -511,9 +536,11 @@ async def linkedin_queue(
     one section per prospect with the connect note and after-accept message.
     Manual send is the feature: there is no LinkedIn API integration."""
     if format == "md":
-        markdown = await growth_service.linkedin_queue_markdown(ctx, limit=limit)
+        markdown = await growth_service.linkedin_queue_markdown(
+            ctx, profile_id=profile_id, limit=limit
+        )
         return PlainTextResponse(markdown, media_type="text/markdown; charset=utf-8")
-    return await growth_service.linkedin_queue(ctx, limit=limit)
+    return await growth_service.linkedin_queue(ctx, profile_id=profile_id, limit=limit)
 
 
 @router.post(
@@ -572,12 +599,13 @@ async def update_growth_settings(
 )
 async def delivery_queue(
     channel: DraftChannel,
+    profile_id: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[DeliveryQueueItemResponse]:
     """One channel's proposed / approved / sent drafts, newest first, each with
     its prospect, recipient (``to``), opt-in and latest delivery attempt."""
-    return await growth_service.delivery_queue(ctx, channel, limit=limit)
+    return await growth_service.delivery_queue(ctx, channel, profile_id=profile_id, limit=limit)
 
 
 @router.post(

@@ -10,6 +10,9 @@
 # ``subject`` is email-only; ``UpdateDraftRequest`` has no ``status`` — the
 # lifecycle moves only through the status route and the Instinct gate.
 # ``project_id`` is three-valued on updates (None leave, id set, "" clear).
+# ``profile_id`` (the brand) is optional on prospect, ICP and draft creates
+# and echoed on their responses; the service checks it names a brand in the
+# caller's workspace.
 # ``ProspectResearch`` coerces loose agent output rather than rejecting it.
 # What the DTO cannot check (an observed vs guessed email, a project in the
 # caller's workspace) is enforced one layer up.
@@ -81,6 +84,9 @@ class CreateProspectRequest(BaseModel):
     # the caller's workspace (a project from another tenant is a 404) — the
     # DTO can only check the shape, since it has no tenancy context.
     project_id: str | None = None
+    # The brand this prospect is worked under (a Growth › Social profile id).
+    # Shape only here; the service validates it against the workspace.
+    profile_id: str | None = Field(default=None, max_length=64)
     tier: ProspectTier = "unqualified"
     research_brief: str = ""
     emails: list[str] = Field(default_factory=list)
@@ -369,6 +375,7 @@ class ProspectResponse(BaseModel):
     domain: str
     source: str
     project_id: str | None = None
+    profile_id: str | None = None
     tier: str
     research_brief: str
     emails: list[str]
@@ -435,6 +442,8 @@ class CreateIcpRequest(BaseModel):
     # caller's workspace (a project from another tenant is a 404) — the DTO has
     # no tenancy context, exactly like ``CreateProspectRequest``.
     project_id: str | None = None
+    # The brand this hunt runs for; validated by the service like project_id.
+    profile_id: str | None = Field(default=None, max_length=64)
     geography: str = Field(default="", max_length=500)
     exclusions: str = Field(default="", max_length=2000)
     cadence: IcpCadence = "off"
@@ -532,6 +541,7 @@ class IcpResponse(BaseModel):
     name: str
     criteria: str
     project_id: str | None
+    profile_id: str | None = None
     geography: str
     exclusions: str
     cadence: str
@@ -556,6 +566,8 @@ class CreateDraftRequest(BaseModel):
     body: str = Field(min_length=1, max_length=10_000)
     variant: DraftVariant = "first_touch"
     demo_url: str | None = Field(default=None, max_length=2048)
+    # The brand. Omitted means the prospect's brand (the usual case).
+    profile_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("body")
     @classmethod
@@ -622,6 +634,7 @@ class DraftResponse(BaseModel):
     variant: str
     status: str
     demo_url: str | None
+    profile_id: str | None = None
     created_at: str | None
     updated_at: str | None
 
@@ -633,6 +646,8 @@ class DraftProspectRequest(BaseModel):
 
     channels: list[DraftChannel] | None = None
     instructions: str = Field(default="", max_length=1000)
+    # The brand the drafts are written under. Omitted means the prospect's.
+    profile_id: str | None = Field(default=None, max_length=64)
 
 
 class DraftSkipped(BaseModel):
