@@ -1,9 +1,8 @@
 # ee/pocketpaw_ee/sites/badge.py — the FREE-TIER ATTRIBUTION BADGE: the
 # server-rendered "Built with PocketPaw" mark every un-upgraded site carries.
 #
-# 2026-10-01: BADGE_HREF now points at pocketpaw.xyz. The old target,
-# pocketpaw.dev, was never registered, so every free badge linked to a dead
-# (and squattable) domain.
+# The badge links to the Paw Sites builder (BADGE_HREF), so a visitor who
+# likes a site lands where they can make one.
 #
 # This is the enforcement half of the free tier. Removing the badge is what the
 # paid per-site plan sells, so the badge is not decoration — it is the only thing
@@ -158,12 +157,10 @@ _LEGACY_STYLE_RE = _tempered(
 # positive identification rather than "any element wearing our attribute name".
 _LEGACY_ANCHOR_RE = _tempered(r"<a\s+" + re.escape(BADGE_MARKER) + r'="1"', r"</a>", r"<a[\s>]")
 
-# Where the badge points. NOTE: this is the PRODUCT domain, which is open
-# decision #7 in the pricing spec (the sites' own hostname is still unsettled —
-# ``*.workers.dev`` today, ``sites.rohitk06.in`` on the proven custom-domain
-# lane). This constant is the single place it changes. pocketpaw.xyz is the
-# live product home; pocketpaw.dev was never registered (RDAP 404, 2026-10-01).
-BADGE_HREF = "https://pocketpaw.xyz"
+# Where the badge points: the Paw Sites builder in Paw OS, so a visitor who
+# likes the site can make their own. This constant is the single place it
+# changes (the sites' own hostname is a separate, still-open decision).
+BADGE_HREF = "https://os.pocketpaw.xyz/sites"
 
 BADGE_TEXT = "Built with PocketPaw"
 
