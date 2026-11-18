@@ -816,7 +816,9 @@ class ConnectSocialAccountRequest(BaseModel):
     platform: str = Field(max_length=64)
     # Strict allowlist: the return path is appended to the caller's origin, so
     # anything free-form would be an open redirect.
-    return_to: Literal["/growth/social/accounts", "/growth/next/settings"] | None = None
+    return_to: (
+        Literal["/growth/social/accounts", "/growth/next/settings", "/growth/settings"] | None
+    ) = None
 
 
 class TelegramConnectCode(BaseModel):

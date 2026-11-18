@@ -244,6 +244,11 @@ async def test_connect_return_to_is_an_allowlist(w1, postiz):
     )
     assert ok.status_code == 200
     assert postiz.connects[-1][2] == "http://localhost:5173/growth/next/settings"
+    new = await w1.post(
+        CONNECT, json={"platform": "x", "return_to": "/growth/settings"}, headers=LOCAL
+    )
+    assert new.status_code == 200
+    assert postiz.connects[-1][2] == "http://localhost:5173/growth/settings"
     tg = await w1.post(CONNECT, json={"platform": "x", "return_to": None}, headers=LOCAL)
     assert tg.status_code == 200
     assert postiz.connects[-1][2] == "http://localhost:5173/growth/social/accounts"
