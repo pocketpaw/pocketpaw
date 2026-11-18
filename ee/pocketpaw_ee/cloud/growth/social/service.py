@@ -2735,7 +2735,7 @@ async def connect_account(
         _, bot_name = _telegram_bot()
     profile = await _require_profile_doc(workspace_id, profile_id)
     org = await _ensure_postiz_org(postiz, workspace_id, profile)
-    redirect = f"{origin.rstrip('/')}/growth/social/accounts"
+    redirect = f"{origin.rstrip('/')}{body.return_to or '/growth/social/accounts'}"
     try:
         if body.platform == "telegram":
             code = await postiz.connect_state(decrypt(org.api_key_enc), body.platform, redirect)

@@ -237,6 +237,23 @@ async def test_connect_makes_one_org_per_profile_and_builds_the_return_url(w1, p
     assert doc.api_key_enc != "key-1" and decrypt(doc.api_key_enc) == "key-1"
 
 
+async def test_connect_return_to_is_an_allowlist(w1, postiz):
+    await _profile(w1)
+    ok = await w1.post(
+        CONNECT, json={"platform": "x", "return_to": "/growth/next/settings"}, headers=LOCAL
+    )
+    assert ok.status_code == 200
+    assert postiz.connects[-1][2] == "http://localhost:5173/growth/next/settings"
+    tg = await w1.post(CONNECT, json={"platform": "x", "return_to": None}, headers=LOCAL)
+    assert tg.status_code == 200
+    assert postiz.connects[-1][2] == "http://localhost:5173/growth/social/accounts"
+    n = len(postiz.connects)
+    for bad in ("https://evil.example", "//evil", "/growth/other"):
+        resp = await w1.post(CONNECT, json={"platform": "x", "return_to": bad}, headers=LOCAL)
+        assert resp.status_code == 422, bad
+    assert len(postiz.connects) == n
+
+
 async def test_platform_errors(w1, postiz):
     await _profile(w1)
     resp = await w1.post(CONNECT, json={"platform": "myspace"}, headers=LOCAL)
