@@ -59,6 +59,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     DEFAULT_IDEA_COUNT,
     MAX_BLUEPRINT_GOALS,
     MAX_BLUEPRINT_ITEMS,
+    MAX_BLUEPRINT_LEARNINGS,
     MAX_BLUEPRINT_PILLARS,
     MAX_IDEA_COUNT,
     MAX_LEARNING_CHARS,
@@ -1060,6 +1061,10 @@ class BlueprintRoadmapModel(BaseModel):
 
 _Pillars = Annotated[list[BlueprintPillarModel], Field(max_length=MAX_BLUEPRINT_PILLARS)]
 _Goals = Annotated[list[BlueprintGoalInput], Field(max_length=MAX_BLUEPRINT_GOALS)]
+_LearningIds = Annotated[
+    list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]],
+    Field(max_length=MAX_BLUEPRINT_LEARNINGS),
+]
 
 
 def _unique(values: list[str], what: str) -> None:
@@ -1070,8 +1075,9 @@ def _unique(values: list[str], what: str) -> None:
 
 class SaveBlueprintDraftRequest(BaseModel):
     """``PUT /blueprint/draft``: each section sent replaces that section of the draft;
-    an omitted section is kept. Status, version and approval are not editable here
-    (extra keys are a 422)."""
+    an omitted section is kept. ``learning_ids`` replaces the draft's learning ids
+    (each must name a learning of the same brand, checked in the service). Status,
+    version and approval are not editable here (extra keys are a 422)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1082,6 +1088,7 @@ class SaveBlueprintDraftRequest(BaseModel):
     channels: list[BlueprintChannelModel] | None = None
     goals: _Goals | None = None
     roadmap: BlueprintRoadmapModel | None = None
+    learning_ids: _LearningIds | None = None
 
     @model_validator(mode="after")
     def _distinct(self) -> SaveBlueprintDraftRequest:
@@ -1091,6 +1098,8 @@ class SaveBlueprintDraftRequest(BaseModel):
             _unique([c.channel for c in self.channels], "channels")
         if self.goals is not None:
             _unique([g.id for g in self.goals if g.id], "goal ids")
+        if self.learning_ids is not None:
+            _unique(self.learning_ids, "learning ids")
         return self
 
 

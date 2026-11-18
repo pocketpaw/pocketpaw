@@ -10818,8 +10818,12 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   its cadence (capped at 21) and no milestones. Seeded text goes through the same dash and number
   check as `regenerate`; a failing field seeds empty and a failing item is dropped.
 - `PUT /blueprint/draft` takes any of `identity`, `audience`, `voice`, `pillars`,
-  `channels`, `goals`, `roadmap`; each one sent replaces that section. Any other
+  `channels`, `goals`, `roadmap`, `learning_ids`; each one sent replaces that section. Any other
   key (`status`, `version`, `approved_by`…) is a 422. A goal without an `id` gets one.
+  `learning_ids` (at most 200, unique) must each name a learning of the same
+  workspace and brand, in any status; an unknown, malformed or foreign id is
+  `422 social.blueprint_unknown_learning` with `details.learning_ids` listing them.
+  Omitted or `null` keeps the stored ids; `[]` clears them.
   `404 social_blueprint.not_found` before the blueprint is seeded.
 - `regenerate` runs the website analyst and writes its text into a NEW draft
   version built on the current draft (or the approved), superseding the old draft.

@@ -1227,6 +1227,20 @@ async def _approved_learnings(workspace_id: str, profile: str) -> list[str]:
     return [d.text for d in docs]
 
 
+async def unknown_learning_ids(workspace_id: str, profile: str, ids: list[str]) -> list[str]:
+    """The ``ids`` that name no learning of this workspace and brand (any status),
+    sorted. A string that is not an ObjectId is unknown. The blueprint draft save
+    uses this; it is the only learning read outside this module."""
+    oids = {i: PydanticObjectId(i) for i in ids if PydanticObjectId.is_valid(i)}
+    found: set[str] = set()
+    if oids:
+        docs = await _LearningDoc.find(
+            {"_id": {"$in": list(oids.values())}, "workspace": workspace_id, "profile": profile}
+        ).to_list()
+        found = {str(d.id) for d in docs}
+    return sorted(i for i in ids if i not in oids or str(oids[i]) not in found)
+
+
 async def _running_experiment(
     workspace_id: str, profile: str, now: datetime
 ) -> _ExperimentDoc | None:
