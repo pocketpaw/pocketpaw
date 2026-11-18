@@ -23,7 +23,9 @@
 # max of 21) and no milestones. Roadmap dates are stored as ISO strings (BSON has
 # no date type); a stored phase that no longer parses is dropped on read. A draft
 # save that changes goals or the roadmap is a 422 when a phase names a goal id
-# the resulting draft does not have.
+# the resulting draft does not have. A draft save may also replace
+# ``learning_ids``; each must name a learning (any status) of the same workspace
+# and brand, else 422 ``social.blueprint_unknown_learning``.
 # Seeded and regenerated text must pass ``ideas.check_texts`` (no em or en dash,
 # no number the owner did not type): a failing item is dropped; a failing field
 # seeds empty, or on regenerate keeps its previous value. Seed's ICP sentences are
@@ -610,6 +612,23 @@ def _check_goal_refs(base: _BlueprintDoc, edit: dict[str, Any]) -> None:
         )
 
 
+async def _check_learning_refs(workspace_id: str, profile_id: str, edit: dict[str, Any]) -> None:
+    """When ``learning_ids`` is sent, every id must name a learning of this workspace
+    and brand; a foreign id reads the same as a missing one."""
+    ids = edit.get("learning_ids")
+    if not ids:
+        return
+    from pocketpaw_ee.cloud.growth.social import service as social_service
+
+    unknown = await social_service.unknown_learning_ids(workspace_id, profile_id, ids)
+    if unknown:
+        raise ValidationError(
+            "social.blueprint_unknown_learning",
+            "A learning id does not name a learning of this brand",
+            {"learning_ids": unknown},
+        )
+
+
 async def save_draft(
     ctx: RequestContext, body: SaveBlueprintDraftRequest, profile_id: str | None = None
 ) -> BlueprintStateResponse:
@@ -623,6 +642,7 @@ async def save_draft(
     if draft is None and approved is None:
         raise NotFound("social_blueprint")
     _check_goal_refs(draft or approved, edit)
+    await _check_learning_refs(workspace_id, profile.id, edit)
     if draft is None:
         draft = _BlueprintDoc(
             workspace=workspace_id,

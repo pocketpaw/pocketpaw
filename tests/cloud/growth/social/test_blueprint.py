@@ -5,7 +5,9 @@
 #
 # Covers: seed maps every section from the profile (analysis, quota, active ICPs
 # of this workspace only) and is idempotent; draft save replaces only the sections
-# sent, opens a draft from the approved, refuses status/version keys; approve
+# sent, opens a draft from the approved, refuses status/version keys; learning ids
+# saved on the draft must name learnings of the same workspace and brand (unknown,
+# malformed, foreign-workspace, other-brand and duplicate ids are 422); approve
 # supersedes the previous approved (one approved, one draft at most); regenerate
 # writes a new draft version, supersedes only the old draft, never touches the
 # approved, carries goals / channels / weights over and drops text with a dash or
@@ -30,6 +32,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 from pocketpaw_ee.cloud.growth.social.dto import GrowthBlueprintResponse
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
 from pocketpaw_ee.cloud.models.icp import Icp as IcpDoc
+from pocketpaw_ee.cloud.models.social_learning import SocialLearning as LearningDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as ProfileDoc
 
 from tests.cloud.growth.social.test_router import BASE, _client, _FakeAnalyzer
@@ -215,6 +218,57 @@ async def test_draft_save_before_seed_is_404(w1):
     pid = await _profile()
     resp = await w1.put(f"{BP}/draft", params={"profile_id": pid}, json={})
     assert resp.status_code == 404
+
+
+async def _learning(workspace: str, profile: str, status: str = "approved") -> str:
+    doc = LearningDoc(workspace=workspace, profile=profile, text="Short hooks win", status=status)
+    await doc.insert()
+    return str(doc.id)
+
+
+async def test_draft_save_learning_ids_round_trip_and_survive_other_edits(w1):
+    pid = await _profile()
+    await _seed(w1, pid)
+    a, b = await _learning("w1", pid), await _learning("w1", pid, status="proposed")
+    assert (await _save(w1, pid, {"learning_ids": [a, b]}))["draft"]["learning_ids"] == [a, b]
+    # An edit that omits learning_ids keeps the stored ones.
+    await _save(w1, pid, {"identity": {"summary": "Changed"}})
+    draft = (await w1.get(BP, params={"profile_id": pid})).json()["draft"]
+    assert draft["learning_ids"] == [a, b]
+    assert draft["identity"]["summary"] == "Changed"
+    # Approve carries them; a draft opened from the approved starts with them.
+    await _approve(w1, pid)
+    state = await _save(w1, pid, {"identity": {"summary": "Again"}})
+    assert state["draft"]["learning_ids"] == [a, b]
+    assert (await _save(w1, pid, {"learning_ids": []}))["draft"]["learning_ids"] == []
+
+
+async def test_draft_save_refuses_learning_ids_of_another_brand_or_workspace(w1):
+    pid, other = await _profile(), await _profile()
+    await _seed(w1, pid)
+    mine = await _learning("w1", pid)
+    foreign_ws = await _learning("w2", pid)
+    other_brand = await _learning("w1", other)
+    missing = "0123456789abcdef01234567"
+    for bad in (missing, "not-an-id", foreign_ws, other_brand):
+        resp = await w1.put(
+            f"{BP}/draft", params={"profile_id": pid}, json={"learning_ids": [mine, bad]}
+        )
+        assert resp.status_code == 422, (bad, resp.text)
+        error = resp.json()["error"]
+        assert error["code"] == "social.blueprint_unknown_learning"
+        assert error["details"] == {"learning_ids": [bad]}
+    draft = (await w1.get(BP, params={"profile_id": pid})).json()["draft"]
+    assert draft["learning_ids"] == []
+
+
+async def test_draft_save_refuses_duplicate_or_too_many_learning_ids(w1):
+    pid = await _profile()
+    await _seed(w1, pid)
+    a = await _learning("w1", pid)
+    for ids in ([a, a], ["x"] * 201):
+        resp = await w1.put(f"{BP}/draft", params={"profile_id": pid}, json={"learning_ids": ids})
+        assert resp.status_code == 422, resp.text
 
 
 async def test_approve_supersedes_the_previous_approved(w1):
