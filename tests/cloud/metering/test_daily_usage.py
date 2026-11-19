@@ -147,3 +147,12 @@ async def test_refund_swallows_a_storage_error(monkeypatch):
     await metering.refund(
         **_W, subject_id="w1", meter=DailyMeter.UPLOAD_FILES, amount=1, day="2026-10-01"
     )
+
+
+def test_daily_usage_rows_expire_after_90_days():
+    from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+
+    ttl = [i.document for i in DailyUsage.Settings.indexes if "expireAfterSeconds" in i.document]
+    assert len(ttl) == 1
+    assert ttl[0]["key"] == {"createdAt": 1}
+    assert ttl[0]["expireAfterSeconds"] == 90 * 86400
