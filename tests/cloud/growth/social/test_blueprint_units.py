@@ -317,7 +317,8 @@ async def test_a_migrated_legacy_blueprint_reads_exactly_as_before(w1):
     legacy = await _legacy(pid, 3, "approved")
     # Before migration the agents read the legacy row (read-only fallback).
     before = await social_blueprint.approved_for("w1", pid)
-    assert _fields(before) == _fields(social_blueprint._to_domain(legacy))
+    stored = await BlueprintDoc.get(legacy.id)
+    assert _fields(before) == _fields(social_blueprint._to_domain(stored))
     assert await UnitDoc.find({}).count() == 0
 
     report = await social_blueprint.migrate_profile("w1", pid)
@@ -405,10 +406,10 @@ async def test_migration_dry_run_real_run_idempotent_and_count_check(w1):
     dry = await script.migrate(dry_run=True)
     assert await UnitDoc.find({"profile_id": {"$in": [a, b]}}).count() == 0
     assert dry["brands"][f"w1/{a}"]["status"] == "migrated"
-    assert dry["legacy_approved"] == 1 and dry["unit_approved"] == 1  # c only, so far
+    assert dry["legacy_approved"] == 1 and dry["unit_approved"] == 0  # a not yet migrated
 
     real = await script.migrate(dry_run=False)
-    assert real["ok"] and real["legacy_approved"] == 1
+    assert real["ok"] and real["legacy_approved"] == real["unit_approved"] == 1
     assert await _chain(a, "brand") == {2: "approved", 3: "draft"}  # voice changed
     assert await _chain(a, "strategy") == {2: "approved"}
     assert await _chain(b, "strategy") == {1: "draft"}

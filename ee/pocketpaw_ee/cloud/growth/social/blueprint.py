@@ -1509,8 +1509,9 @@ async def legacy_profiles() -> list[tuple[str, str]]:
 
 
 async def migration_counts() -> tuple[int, int]:
-    """(brands with a legacy approved row, brands with approved brand AND strategy
-    units). Equal after a correct migration."""
+    """(brands with a legacy approved row, how many of THOSE have approved brand AND
+    strategy units). Equal after a correct migration; a brand that started on units
+    has no legacy row and is not counted."""
     # global-read: the migration's count check spans every tenant.
     legacy = {
         (d["workspace"], d["profile_id"])
@@ -1529,7 +1530,7 @@ async def migration_counts() -> tuple[int, int]:
         )
     ):
         have.setdefault((d["workspace"], d["profile_id"]), set()).add(d["unit"])
-    return len(legacy), sum(1 for units in have.values() if units == {"brand", "strategy"})
+    return len(legacy), sum(1 for key in legacy if have.get(key) == {"brand", "strategy"})
 
 
 __all__ = [

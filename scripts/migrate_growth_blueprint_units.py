@@ -10,9 +10,10 @@ so a brand this script has not reached yet is migrated on its first edit.
 
 Safe by construction: a brand that already has any unit row is skipped, so a
 re-run changes nothing, and the legacy collection is only read, never dropped.
-It ends with the count check: brands with a legacy approved row must equal
-brands with an approved ``brand`` AND ``strategy`` unit (exit 1 when they
-differ, after a real run). The Mongo URI is printed as host and database only.
+It ends with the count check: brands with a legacy approved row must equal how
+many of those brands have an approved ``brand`` AND ``strategy`` unit (a brand
+that started on units has no legacy row and is not counted). Exit 1 when they
+differ after a real run. The Mongo URI is printed as host and database only.
 
 Usage (dry run is the default; nothing is written without ``--apply``):
     uv run python scripts/migrate_growth_blueprint_units.py           # report only
@@ -58,7 +59,8 @@ async def migrate(*, dry_run: bool) -> dict[str, Any]:
     ok = legacy == units_ok
     print(
         f"count check: {legacy} brand(s) with a legacy approved Blueprint, "
-        f"{units_ok} with approved brand and strategy units -> {'OK' if ok else 'MISMATCH'}"
+        f"{units_ok} of them with approved brand and strategy units"
+        f" -> {'OK' if ok else 'MISMATCH'}"
     )
     return {"brands": brands, "legacy_approved": legacy, "unit_approved": units_ok, "ok": ok}
 
