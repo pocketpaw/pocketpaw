@@ -44,7 +44,8 @@
 # arms and are stamped. Learnings reach the ideas prompt only once approved.
 # ``setup_status`` derives the setup checklist (done beats a skip; the accounts
 # read is bounded at 4 s and never fatal); ``skip_setup`` edits ``setup_skipped``.
-# A profile upsert may set ``growth_branches`` (catalog branch ids, checked in dto).
+# A profile upsert may set ``growth_branches`` (catalog branch ids, checked in dto);
+# ``growth_branches()`` is the read the approved Blueprint uses to pause plays.
 # ``scheduled_ideas`` / ``waiting_ideas`` are the weekly Plan's idea reads.
 
 from __future__ import annotations
@@ -445,6 +446,14 @@ async def oldest_profile_id(workspace_id: str) -> str | None:
         .to_list()
     )
     return str(docs[0].id) if docs else None
+
+
+async def growth_branches(workspace_id: str, profile_id: str) -> tuple[str, ...]:
+    """System seam: the Growth branches this brand turned on, as stored (empty means
+    the default set, which the caller applies), or empty when the workspace has no
+    such brand. The approved Blueprint read uses this to pause plays on an off branch."""
+    doc = await _profile_doc(workspace_id, profile_id)
+    return tuple(doc.growth_branches or ()) if doc is not None else ()
 
 
 async def create_default_profile(workspace_id: str) -> str:
