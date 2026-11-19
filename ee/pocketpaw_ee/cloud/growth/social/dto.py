@@ -88,6 +88,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     LearningStatus,
     MilestoneStatus,
     MonthlyRevenue,
+    PillarKind,
     Platform,
     ReplyStatus,
     SetupKey,
@@ -983,6 +984,9 @@ class BlueprintPillarModel(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     weight: int = Field(default=0, ge=0, le=100)
     hooks: _BlueprintItems = Field(default_factory=list)
+    # Left out of a dump when unset, so a pillar without a kind stores and
+    # diffs exactly as it did before kinds existed.
+    kind: PillarKind | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class BlueprintChannelModel(BaseModel):

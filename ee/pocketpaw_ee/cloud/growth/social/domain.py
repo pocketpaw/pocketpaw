@@ -41,6 +41,7 @@ from datetime import date, datetime
 from typing import Literal, get_args
 from urllib.parse import urlsplit
 
+PillarKind = Literal["audience", "product"]
 TeamSize = Literal["solo", "2_10", "11_50", "51_200", "200_plus"]
 MonthlyRevenue = Literal["pre_revenue", "under_1k", "1k_10k", "10k_50k", "50k_250k", "250k_plus"]
 SocialRole = Literal["founder", "marketer", "social_media_manager", "agency", "creator", "other"]
@@ -440,6 +441,7 @@ class BlueprintPillar:
     name: str
     weight: int = 0
     hooks: tuple[str, ...] = ()
+    kind: PillarKind | None = None
 
 
 @dataclass(frozen=True)
