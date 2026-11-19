@@ -3,11 +3,12 @@
 Prospects, ICPs (hunts) and outreach drafts gained a nullable ``profile_id``
 (a Growth › Social ``SocialProfile`` id). Rows written before that carry none.
 For every workspace holding such rows: an unbranded draft first takes its
-prospect's brand; every row still unbranded then gets the workspace's OLDEST
-profile (by ``createdAt``, ties on ``_id``), or a new one named after the
-workspace when it has none (``active`` stays off, so nothing starts drafting
-posts). The Mongo URI is printed as host and database only, never with
-credentials.
+prospect's brand; every row still unbranded then gets the workspace's default
+brand from ``growth.service.resolve_brand``, the same rule every new row is
+written under: the OLDEST unarchived profile (by ``createdAt``, ties on
+``_id``), or a new one named after the workspace when it has none (``active``
+stays off, so nothing starts drafting posts). The Mongo URI is printed as host
+and database only, never with credentials.
 
 Safe by construction: it only ever matches rows whose ``profile_id`` is null
 or missing, so a branded row is never touched and a re-run changes nothing.
@@ -95,35 +96,13 @@ async def _drafts_by_prospect_brand(workspace_id: str) -> dict[str, list[Any]]:
     return out
 
 
-async def _oldest_profile_id(workspace_id: str) -> str | None:
-    from pocketpaw_ee.cloud.models.social_profile import SocialProfile
-
-    docs = (
-        await SocialProfile.find({"workspace": workspace_id})
-        .sort([("createdAt", 1), ("_id", 1)])
-        .limit(1)
-        .to_list()
-    )
-    return str(docs[0].id) if docs else None
-
-
-async def _workspace_name(workspace_id: str) -> str:
-    from beanie import PydanticObjectId
-    from pocketpaw_ee.cloud.models.workspace import Workspace
-
-    try:
-        ws = await Workspace.get(PydanticObjectId(workspace_id))
-    except Exception:  # noqa: BLE001 — a non-ObjectId workspace key has no doc
-        ws = None
-    return ws.name if ws is not None and ws.name else workspace_id
-
-
 async def backfill(*, dry_run: bool) -> dict[str, Any]:
     """Brand every unbranded outreach row. Returns a per-workspace report:
     ``{workspace_id: {"profile_id", "created", "counts": {collection: n}}}``.
     In dry-run ``profile_id`` is None when a brand WOULD be created, and
     nothing is written."""
-    from pocketpaw_ee.cloud.models.social_profile import SocialProfile
+    from pocketpaw_ee.cloud.growth.service import resolve_brand
+    from pocketpaw_ee.cloud.growth.social.service import oldest_profile_id
 
     cols = _collections()
     workspaces: set[str] = set()
@@ -163,20 +142,16 @@ async def backfill(*, dry_run: bool) -> dict[str, Any]:
             print(f"workspace={workspace_id} {counts} -> drafts took their prospect's brand")
             report[workspace_id] = {"profile_id": None, "created": False, "counts": counts}
             continue
-        profile_id = await _oldest_profile_id(workspace_id)
+        profile_id = await oldest_profile_id(workspace_id)
         created = profile_id is None
-        name = await _workspace_name(workspace_id) if created else None
 
         if dry_run:
-            target = f"new brand '{name}'" if created else f"brand {profile_id}"
+            target = "a new brand named after the workspace" if created else f"brand {profile_id}"
             print(f"[dry-run] workspace={workspace_id} {counts} -> {target}")
             report[workspace_id] = {"profile_id": profile_id, "created": created, "counts": counts}
             continue
 
-        if created:
-            doc = SocialProfile(workspace=workspace_id, company_name=name or workspace_id)
-            await doc.insert()
-            profile_id = str(doc.id)
+        profile_id = await resolve_brand(workspace_id, None)
         for model in cols.values():
             await _resolve(
                 model.get_pymongo_collection().update_many(

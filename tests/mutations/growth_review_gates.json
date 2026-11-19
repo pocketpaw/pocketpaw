@@ -178,7 +178,7 @@
     "label": "brand: another workspace's brand id is accepted on create",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
     "find": "    await social_service.get_profile(ctx, profile_id)\n",
-    "replace": "    return\n",
+    "replace": "    pass\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
@@ -189,10 +189,10 @@
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
-    "label": "backfill: picks the first-inserted brand instead of the oldest-created one",
-    "file": "scripts/backfill_growth_profile_id.py",
-    "find": ".sort([(\"createdAt\", 1), (\"_id\", 1)])",
-    "replace": ".sort([(\"_id\", 1)])",
+    "label": "brand: the default brand is the first-inserted profile instead of the oldest-created one",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": ".sort([(\"createdAt\", 1), (\"_id\", 1)])\n        .limit(1)\n",
+    "replace": ".sort([(\"_id\", 1)])\n        .limit(1)\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py::test_backfill_assigns_the_oldest_brand_per_workspace"
   },
   {
@@ -203,11 +203,11 @@
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
-    "label": "brand: a blank profile_id is stored as \"\" and escapes the unbranded filter and the backfill",
+    "label": "brand: a blank profile_id reaches the service as \"\" and 404s instead of taking the default brand",
     "file": "ee/pocketpaw_ee/cloud/growth/dto.py",
     "find": "    return v or None\n",
     "replace": "    return v\n",
-    "tests": "tests/cloud/growth/test_outreach_brand.py::test_a_blank_brand_is_stored_as_no_brand"
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_a_blank_brand_gets_the_default_brand"
   },
   {
     "label": "brand: discovery files prospects without the hunt's brand",
