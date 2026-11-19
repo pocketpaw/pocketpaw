@@ -258,8 +258,8 @@
   {
     "label": "blueprint: the outreach writer follows the draft instead of the approved",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    doc = await _find(workspace_id, profile_id, \"approved\")\n",
-    "replace": "    doc = await _find(workspace_id, profile_id, \"draft\")\n",
+    "find": "    return _compose(workspace_id, profile_id, rows, \"approved\")\n",
+    "replace": "    return _compose(workspace_id, profile_id, rows, \"draft\")\n",
     "tests": "tests/cloud/growth/test_blueprint_outreach.py::test_branded_draft_follows_the_approved_blueprint_and_carries_its_version"
   },
   {

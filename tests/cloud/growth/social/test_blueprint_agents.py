@@ -10,8 +10,9 @@
 # the owner's typed lines and never the website-scan analysis; the daily cron's X
 # budget follows the Blueprint's x channel (0 without one) and makes no drafts,
 # with a logged skip, until a Blueprint is approved; reply prompts carry the
-# Blueprint; every new idea and reply card carries ``blueprint_version``; the
-# reply mapper round trip.
+# Blueprint; every new idea and reply card carries ``blueprint_version`` (the
+# strategy unit's version, so a voice-only approve keeps the number); the reply
+# mapper round trip.
 
 from __future__ import annotations
 
@@ -170,7 +171,8 @@ async def test_a_draft_edit_leaves_the_prompt_and_approving_changes_it(w1, promp
     assert resp.status_code == 200, resp.text
     (idea,) = await _generate(w1, pid)
     assert "Tone: Loud and silly" in prompts[-1]
-    assert idea["blueprint_version"] == resp.json()["approved"]["version"] > v1
+    # A voice edit is a brand-unit version; the stamp is the strategy unit's version.
+    assert idea["blueprint_version"] == resp.json()["approved"]["version"] == v1
 
 
 @pytest.mark.asyncio

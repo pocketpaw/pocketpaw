@@ -44,6 +44,7 @@
 # arms and are stamped. Learnings reach the ideas prompt only once approved.
 # ``setup_status`` derives the setup checklist (done beats a skip; the accounts
 # read is bounded at 4 s and never fatal); ``skip_setup`` edits ``setup_skipped``.
+# A profile upsert may set ``growth_branches`` (catalog branch ids, checked in dto).
 # ``scheduled_ideas`` / ``waiting_ideas`` are the weekly Plan's idea reads.
 
 from __future__ import annotations
@@ -277,6 +278,7 @@ def _profile_to_domain(doc: _ProfileDoc) -> SocialProfile:
         reply_cards_per_day=doc.reply_cards_per_day,
         archived_at=doc.archived_at,
         setup_skipped=tuple(doc.setup_skipped or ()),
+        growth_branches=tuple(doc.growth_branches or ()),
     )
 
 
@@ -312,6 +314,7 @@ def _profile_to_response(p: SocialProfile) -> SocialProfileResponse:
         reply_cards_per_day=p.reply_cards_per_day,
         archived_at=iso_utc(p.archived_at),
         setup_skipped=list(p.setup_skipped),
+        growth_branches=list(p.growth_branches),
     )
 
 
@@ -504,6 +507,8 @@ def _apply_upsert(doc: _ProfileDoc, body: UpsertProfileRequest) -> None:
     if "reply_cards_per_day" in sent:
         per_day = body.reply_cards_per_day
         doc.reply_cards_per_day = REPLY_CARDS_PER_DAY_DEFAULT if per_day is None else per_day
+    if "growth_branches" in sent:
+        doc.growth_branches = list(body.growth_branches or [])
 
 
 def _apply_analysis_edit(doc: _ProfileDoc, patch: AnalysisPatch) -> None:

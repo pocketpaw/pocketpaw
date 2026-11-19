@@ -3,16 +3,22 @@
 # social router over mongomock-backed Beanie with per-workspace clients and a
 # fake analyser. No network, no model.
 #
+# These are the whole-page routes, which compose the per-unit store: version
+# chains are per unit (``_statuses(pid, unit)``) and the composed version is the
+# strategy unit's, so an identity-only edit drafts ``brand`` without bumping it.
+#
 # Covers: seed maps every section from the profile (analysis, quota, active ICPs
-# of this workspace only) and is idempotent; draft save replaces only the sections
-# sent, opens a draft from the approved, refuses status/version keys; learning ids
-# saved on the draft must name learnings of the same workspace and brand (unknown,
-# malformed, foreign-workspace, other-brand and duplicate ids are 422); approve
-# supersedes the previous approved (one approved, one draft at most); regenerate
-# writes a new draft version, supersedes only the old draft, never touches the
-# approved, carries goals / channels / weights over and drops text with a dash or
-# an invented number; diff per section; RBAC (writes need growth.manage);
-# tenancy on workspace and on profile; the doc -> domain -> response round trip.
+# of this workspace only) into v1 unit drafts and is idempotent; draft save
+# replaces only the sections sent, opens a unit draft from its approved, refuses
+# status/version keys; learning ids saved on the draft must name learnings of the
+# same workspace and brand (unknown, malformed, foreign-workspace, other-brand and
+# duplicate ids are 422); approve supersedes each unit's previous approved;
+# regenerate writes new brand/strategy draft versions, supersedes only the old
+# drafts, never touches the approved, carries goals / channels / weights over and
+# drops text with a dash or an invented number; diff per section (composed
+# approved vs composed draft, from/to echoed); RBAC (writes need growth.manage);
+# tenancy on workspace and on profile; the legacy doc -> domain -> response round
+# trip.
 
 from __future__ import annotations
 
@@ -31,6 +37,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 )
 from pocketpaw_ee.cloud.growth.social.dto import GrowthBlueprintResponse
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
+from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
 from pocketpaw_ee.cloud.models.icp import Icp as IcpDoc
 from pocketpaw_ee.cloud.models.social_learning import SocialLearning as LearningDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as ProfileDoc
@@ -104,8 +111,9 @@ async def _save(client, pid: str, body: dict) -> dict:
     return resp.json()
 
 
-async def _statuses(pid: str) -> dict[int, str]:
-    docs = await BlueprintDoc.find({"workspace": "w1", "profile_id": pid}).to_list()
+async def _statuses(pid: str, unit: str = "strategy") -> dict[int, str]:
+    """One unit's version chain; the composed Blueprint's version is the strategy's."""
+    docs = await UnitDoc.find({"workspace": "w1", "profile_id": pid, "unit": unit}).to_list()
     return {d.version: d.status for d in docs}
 
 
@@ -151,7 +159,7 @@ async def test_seed_maps_every_section_and_is_idempotent(w1):
 
     again = await _seed(w1, pid)
     assert again["draft"]["id"] == draft["id"]
-    assert await BlueprintDoc.find({"workspace": "w1"}).count() == 1
+    assert await UnitDoc.find({"workspace": "w1"}).count() == 4
 
 
 async def test_seed_without_analysis_falls_back_to_what_the_owner_typed(w1):
@@ -280,14 +288,18 @@ async def test_approve_supersedes_the_previous_approved(w1):
     first = (await _approve(w1, pid))["approved"]
     assert first["version"] == 1 and first["approved_by"] == "u1" and first["approved_at"]
 
+    # An identity edit drafts only the brand unit; the composed version is the
+    # strategy unit's, so it stays 1.
     state = await _save(w1, pid, {"identity": {"summary": "New summary"}})
-    assert state["draft"]["version"] == 2
+    assert state["draft"]["version"] == 1
     assert state["draft"]["voice"] == first["voice"]  # opened from the approved
     assert state["approved"]["id"] == first["id"]
 
     state = await _approve(w1, pid)
-    assert state["approved"]["version"] == 2 and state["draft"] is None
-    assert await _statuses(pid) == {1: "superseded", 2: "approved"}
+    assert state["approved"]["identity"]["summary"] == "New summary"
+    assert state["draft"] is None
+    assert await _statuses(pid, "brand") == {1: "superseded", 2: "approved"}
+    assert await _statuses(pid) == {1: "approved"}
 
     resp = await w1.post(f"{BP}/approve", params={"profile_id": pid})
     assert resp.status_code == 409
@@ -296,19 +308,19 @@ async def test_approve_supersedes_the_previous_approved(w1):
 def _race_on_draft_read(monkeypatch, client, pid: str, on_call: int) -> None:
     """Approve the draft right after the ``on_call``-th draft read: a concurrent approve
     landing between a request's load and its write."""
-    real = social_blueprint._find
+    real = social_blueprint._rows
     calls = {"n": 0}
 
-    async def racing(workspace_id: str, profile_id: str, status: str):
-        doc = await real(workspace_id, profile_id, status)
-        if status == "draft" and doc is not None:
+    async def racing(workspace_id: str, profile_id: str):
+        rows = await real(workspace_id, profile_id)
+        if any("draft" in r for r in rows.values()):
             calls["n"] += 1
             if calls["n"] == on_call:
-                monkeypatch.setattr(social_blueprint, "_find", real)
+                monkeypatch.setattr(social_blueprint, "_rows", real)
                 await _approve(client, pid)
-        return doc
+        return rows
 
-    monkeypatch.setattr(social_blueprint, "_find", racing)
+    monkeypatch.setattr(social_blueprint, "_rows", racing)
 
 
 async def test_approve_between_draft_load_and_save_is_409(w1, monkeypatch):
@@ -320,9 +332,9 @@ async def test_approve_between_draft_load_and_save_is_409(w1, monkeypatch):
     )
     assert resp.status_code == 409, resp.text
     assert resp.json()["error"]["code"] == "social.blueprint_stale"
-    assert await _statuses(pid) == {1: "approved"}
-    approved = await BlueprintDoc.find_one({"workspace": "w1", "profile_id": pid})
-    assert approved.identity["summary"] == _ANALYSIS["summary"]
+    assert await _statuses(pid, "brand") == {1: "approved"}
+    approved = await UnitDoc.find_one({"workspace": "w1", "profile_id": pid, "unit": "brand"})
+    assert approved.body["who_we_are"]["summary"] == _ANALYSIS["summary"]
 
 
 async def test_approve_during_regenerate_is_409_and_writes_nothing(w1, monkeypatch):
@@ -335,6 +347,7 @@ async def test_approve_during_regenerate_is_409_and_writes_nothing(w1, monkeypat
     resp = await w1.post(f"{BP}/regenerate", params={"profile_id": pid})
     assert resp.status_code == 409, resp.text
     assert await _statuses(pid) == {1: "approved"}
+    assert await _statuses(pid, "brand") == {1: "approved"}
 
 
 async def test_two_approved_after_a_crash_reads_the_highest_version(w1):
@@ -342,9 +355,10 @@ async def test_two_approved_after_a_crash_reads_the_highest_version(w1):
     await _seed(w1, pid)
     await _approve(w1, pid)
     # A crash between approving v2 and superseding v1 leaves both approved.
-    await BlueprintDoc(workspace="w1", profile_id=pid, version=2, status="approved").insert()
-    v1 = await BlueprintDoc.find_one({"workspace": "w1", "profile_id": pid, "version": 1})
-    await BlueprintDoc(workspace="w1", profile_id=pid, version=3, status="superseded").insert()
+    unit = {"workspace": "w1", "profile_id": pid, "unit": "strategy"}
+    await UnitDoc(**unit, version=2, status="approved").insert()
+    v1 = await UnitDoc.find_one({**unit, "version": 1})
+    await UnitDoc(**unit, version=3, status="superseded").insert()
     await v1.delete()
     await v1.insert()  # re-inserted last, so natural order would return it first
     assert (await social_blueprint.approved_for("w1", pid)).version == 2
@@ -373,7 +387,7 @@ async def test_regenerate_writes_a_new_draft_and_never_touches_the_approved(w1):
             },
         )
     )["draft"]
-    approved_before = (await BlueprintDoc.find_one({"status": "approved"})).model_dump()
+    approved_before = [d.model_dump() for d in await UnitDoc.find({"status": "approved"}).to_list()]
 
     fake = _FakeAnalyzer(
         AnalysisOutcome(
@@ -397,7 +411,7 @@ async def test_regenerate_writes_a_new_draft_and_never_touches_the_approved(w1):
 
     assert draft["version"] == 3 and draft["id"] != base["id"]
     assert await _statuses(pid) == {1: "approved", 2: "superseded", 3: "draft"}
-    approved_after = (await BlueprintDoc.find_one({"status": "approved"})).model_dump()
+    approved_after = [d.model_dump() for d in await UnitDoc.find({"status": "approved"}).to_list()]
     assert approved_after == approved_before
 
     # Text that passes the checks is taken; a number of the owner's ("2") is fine.
@@ -464,8 +478,9 @@ async def test_diff_reports_added_removed_and_changed_per_section(w1):
     for name in ("audience", "voice", "channels", "roadmap"):
         assert sections[name] == {"added": [], "removed": [], "changed": []}
 
+    # Composed versions span several unit chains, so from/to are echoed, not looked up.
     resp = await w1.get(f"{BP}/diff", params={"profile_id": pid, "from": 1, "to": 7})
-    assert resp.status_code == 404
+    assert resp.status_code == 200 and resp.json()["sections"]["goals"]["added"] == ["g1"]
 
 
 async def test_diff_of_a_partly_sent_section_that_means_the_same_is_empty(w1):
@@ -490,12 +505,13 @@ async def test_writes_on_one_profile_never_touch_another(w1):
     await _approve(w1, a)
     assert await _statuses(b) == {1: "approved"}
 
-    # B's next version counts B's versions only.
-    assert (await _save(w1, b, {"identity": {"summary": "B"}}))["draft"]["version"] == 2
+    # B's next brand version counts B's versions only.
+    await _save(w1, b, {"identity": {"summary": "B"}})
+    assert await _statuses(b, "brand") == {1: "approved", 2: "draft"}
 
     assert (await w1.post(f"{BP}/regenerate", params={"profile_id": a})).status_code == 200
     assert await _statuses(a) == {1: "superseded", 2: "approved", 3: "draft"}
-    assert await _statuses(b) == {1: "approved", 2: "draft"}
+    assert await _statuses(b) == {1: "approved"}
 
 
 async def test_an_archived_brand_is_still_read_by_id(w1):
@@ -522,7 +538,7 @@ async def test_writes_need_growth_manage(mongo_db):
                 kwargs["json"] = {}
             resp = await getattr(member, method)(f"{BP}{path}", **kwargs)
             assert resp.status_code == 403, (path, resp.text)
-    assert await BlueprintDoc.find({}).count() == 0
+    assert await UnitDoc.find({}).count() == 0
 
 
 async def test_tenancy_on_workspace_and_profile(w1, w2):
@@ -595,7 +611,9 @@ async def test_every_doc_field_survives_domain_and_response(mongo_db):
     await doc.insert()
     doc = await BlueprintDoc.get(doc.id)
 
-    domain_fields = {f.name for f in dataclasses.fields(GrowthBlueprint)}
+    # The per-unit fields are filled only for a Blueprint composed from units.
+    unit_fields = {"brand", "strategy", "plan", "plays", "unit_versions"}
+    domain_fields = {f.name for f in dataclasses.fields(GrowthBlueprint)} - unit_fields
     doc_fields = {_RENAMED.get(n, n) for n in BlueprintDoc.model_fields} - _NOT_MAPPED
     assert doc_fields == domain_fields, "a doc field has no domain field (or the reverse)"
     assert set(GrowthBlueprintResponse.model_fields) == domain_fields

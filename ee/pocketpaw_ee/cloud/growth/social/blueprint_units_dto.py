@@ -1,0 +1,361 @@
+# ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py — the wire and body
+# models of the per-unit Blueprint (``/blueprint/units...``).
+#
+# One body model per unit kind: ``BrandBody`` (``brand``), ``StrategyBody``
+# (``strategy``), ``PlanBody`` (``plan``) and ``PlayBody`` (every ``play:<id>``).
+# Every field defaults empty, so a body may be saved half-filled and a stored
+# body that predates a field still validates. Caps follow the legacy Blueprint
+# (``MAX_BLUEPRINT_ITEMS`` items of 300 chars, 2000-char text, 8 pillars, 20
+# goals). Objective ``baseline`` and ``deadline`` are optional because legacy
+# goals carry neither. Creator extras require a disclosure and usage rights (FTC).
+# ``BODY_MODELS`` maps a unit kind to its model; ``blueprint.py`` validates a body
+# against it and checks cross-unit goal references there (they need the store).
+# Request and response classes are distinct (cloud rule 4).
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+from pocketpaw_ee.cloud.growth.social.domain import (
+    MAX_BLUEPRINT_GOALS,
+    MAX_BLUEPRINT_LEARNINGS,
+    MAX_BLUEPRINT_PILLARS,
+    BlueprintChannelName,
+    BlueprintStatus,
+)
+from pocketpaw_ee.cloud.growth.social.dto import (
+    MAX_BLUEPRINT_POSTS_PER_WEEK,
+    MAX_BLUEPRINT_SENDS_PER_WEEK,
+    BlueprintPillarModel,
+    BlueprintRoadmapModel,
+    BlueprintSectionDiff,
+    _BlueprintItems,
+    _BlueprintText,
+    _unique,
+)
+
+UnitStatus = BlueprintStatus
+PlayStatus = Literal["core", "testing", "parked"]
+MAX_KEY_MESSAGES = 3
+MAX_CREATIVE_ANGLES = 3
+
+_Short = Annotated[str, StringConstraints(strip_whitespace=True, max_length=120)]
+_Id = Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)]
+_Amount = Annotated[float, Field(ge=0)]
+
+
+class _Body(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+# --- brand ---------------------------------------------------------------------------------
+
+
+class Vision(_Body):
+    why: _BlueprintText = ""
+    vision: _BlueprintText = ""
+
+
+class ToneOfVoice(_Body):
+    tone: _BlueprintText = ""
+    do: _BlueprintItems = Field(default_factory=list)
+    avoid: _BlueprintItems = Field(default_factory=list)
+
+
+class WhoWeAre(_Body):
+    summary: _BlueprintText = ""
+    product: _BlueprintText = ""
+    problem: _BlueprintText = ""
+
+
+class BrandAssets(_Body):
+    tagline: _BlueprintText = ""
+    colors: _BlueprintItems = Field(default_factory=list)
+    names: _BlueprintItems = Field(default_factory=list)
+
+
+class BrandBody(_Body):
+    vision: Vision = Field(default_factory=Vision)
+    brand_story: _BlueprintText = ""
+    messaging_framework: Annotated[list[_BlueprintText], Field(max_length=MAX_KEY_MESSAGES)] = (
+        Field(default_factory=list)
+    )
+    tone_of_voice: ToneOfVoice = Field(default_factory=ToneOfVoice)
+    archetype: _Short = ""
+    who_we_are: WhoWeAre = Field(default_factory=WhoWeAre)
+    proof: _BlueprintItems = Field(default_factory=list)
+    assets: BrandAssets = Field(default_factory=BrandAssets)
+
+
+# --- strategy ------------------------------------------------------------------------------
+
+
+class MarketResearch(_Body):
+    main_challenge: _BlueprintText = ""
+    alternatives: _BlueprintItems = Field(default_factory=list)
+    competitor_notes: _BlueprintItems = Field(default_factory=list)
+    interview_notes: _BlueprintItems = Field(default_factory=list)
+    trends: _BlueprintItems = Field(default_factory=list)
+    baseline: _BlueprintText = ""
+    tam_sam_som: _BlueprintText = ""
+
+
+class Positioning(_Body):
+    job_to_be_done: _BlueprintText = ""
+    value_proposition: _BlueprintText = ""
+    usp: _BlueprintText = ""
+    category: _BlueprintText = ""
+    statement: _BlueprintText = ""
+
+
+class Icp(_Body):
+    target: _BlueprintText = ""
+    segments: _BlueprintItems = Field(default_factory=list)
+    not_for: _BlueprintItems = Field(default_factory=list)
+    triggers: _BlueprintItems = Field(default_factory=list)
+    icp_sentences: _BlueprintItems = Field(default_factory=list)
+
+
+class Gtm(_Body):
+    icp: Icp = Field(default_factory=Icp)
+    pricing_notes: _BlueprintText = ""
+    launch_plan: _BlueprintText = ""
+
+
+class Objective(_Body):
+    """An owner-entered objective; ``id`` is minted by the service when empty."""
+
+    id: _Id = ""
+    metric: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+    baseline: _Amount | None = None
+    target: _Amount
+    deadline: date | None = None
+    channel: BlueprintChannelName | None = None
+
+
+class Goals(_Body):
+    business_goal: _BlueprintText = ""
+    objectives: Annotated[list[Objective], Field(max_length=MAX_BLUEPRINT_GOALS)] = Field(
+        default_factory=list
+    )
+
+    @model_validator(mode="after")
+    def _distinct(self) -> Goals:
+        _unique([o.id for o in self.objectives if o.id], "objective ids")
+        return self
+
+
+class Choices(_Body):
+    guiding_policy: _BlueprintText = ""
+    growth_engine: _BlueprintText = ""
+    core_play: _BlueprintText = ""
+    tests: _BlueprintItems = Field(default_factory=list)
+    not_doing: _BlueprintItems = Field(default_factory=list)
+
+
+class StrategyBody(_Body):
+    market_research: MarketResearch = Field(default_factory=MarketResearch)
+    positioning: Positioning = Field(default_factory=Positioning)
+    gtm: Gtm = Field(default_factory=Gtm)
+    goals: Goals = Field(default_factory=Goals)
+    choices: Choices = Field(default_factory=Choices)
+    content_pillars: Annotated[
+        list[BlueprintPillarModel], Field(max_length=MAX_BLUEPRINT_PILLARS)
+    ] = Field(default_factory=list)
+    learning_ids: Annotated[
+        list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]],
+        Field(max_length=MAX_BLUEPRINT_LEARNINGS),
+    ] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _distinct(self) -> StrategyBody:
+        _unique([p.name for p in self.content_pillars], "pillar names")
+        _unique(self.learning_ids, "learning ids")
+        return self
+
+
+# --- plan ----------------------------------------------------------------------------------
+
+
+class Budget(_Body):
+    money_per_month: _Amount | None = None
+    hours_per_week: _Amount | None = None
+
+
+class PlanBody(_Body):
+    roadmap: BlueprintRoadmapModel = Field(default_factory=BlueprintRoadmapModel)
+    budget: Budget = Field(default_factory=Budget)
+
+
+# --- play ----------------------------------------------------------------------------------
+
+
+class PillarShare(_Body):
+    pillar: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+    weight: int = Field(default=0, ge=0, le=100)
+
+
+class Kpi(_Body):
+    metric: _Short = ""
+    baseline: _Amount | None = None
+    target: _Amount | None = None
+
+
+class SeoExtras(_Body):
+    topic_clusters: _BlueprintItems = Field(default_factory=list)
+    article_queue: _BlueprintItems = Field(default_factory=list)
+    ai_search_targets: _BlueprintItems = Field(default_factory=list)
+
+
+class PaidExtras(_Body):
+    objective: _BlueprintText = ""
+    audience: _BlueprintText = ""
+    daily_budget: _Amount | None = None
+    creative_angles: Annotated[list[_BlueprintText], Field(max_length=MAX_CREATIVE_ANGLES)] = Field(
+        default_factory=list
+    )
+    landing_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] = ""
+
+    @field_validator("landing_url")
+    @classmethod
+    def _http(cls, v: str) -> str:
+        if v:
+            parts = urlsplit(v)
+            if parts.scheme not in ("http", "https") or not parts.netloc:
+                raise ValueError("landing_url must be an http(s) URL")
+        return v
+
+
+_Required = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+
+
+class CreatorExtras(_Body):
+    """Disclosure and usage rights are required: a creator post must say it is paid."""
+
+    program_type: _BlueprintText = ""
+    creator_profile: _BlueprintText = ""
+    payment: _BlueprintText = ""
+    brief: _BlueprintText = ""
+    disclosure: _Required
+    usage_rights: _Required
+
+
+class PlayBody(_Body):
+    status: PlayStatus = "testing"
+    role: _BlueprintText = ""
+    goal_id: _Id | None = None
+    audience: _BlueprintText = ""
+    formats: _BlueprintItems = Field(default_factory=list)
+    pillar_mix: Annotated[list[PillarShare], Field(max_length=MAX_BLUEPRINT_PILLARS)] = Field(
+        default_factory=list
+    )
+    posts_per_week: int = Field(default=0, ge=0, le=MAX_BLUEPRINT_POSTS_PER_WEEK)
+    sends_per_week: int = Field(default=0, ge=0, le=MAX_BLUEPRINT_SENDS_PER_WEEK)
+    voice_tweak: _BlueprintText = ""
+    cta: _BlueprintText = ""
+    repurpose_from: _Id | None = None
+    kpi: Kpi = Field(default_factory=Kpi)
+    budget: _Amount | None = None
+    hours: _Amount | None = None
+    rules: _BlueprintItems = Field(default_factory=list)
+    autonomy: _BlueprintText = ""
+    seo: SeoExtras | None = None
+    paid: PaidExtras | None = None
+    creator: CreatorExtras | None = None
+
+
+BODY_MODELS: dict[str, type[_Body]] = {
+    "brand": BrandBody,
+    "strategy": StrategyBody,
+    "plan": PlanBody,
+    "play": PlayBody,
+}
+
+
+# --- requests / responses ------------------------------------------------------------------
+
+
+class SaveUnitDraftRequest(BaseModel):
+    """``PUT /blueprint/units/{unit}/draft``: the unit's whole body plus the
+    ``version`` and ``rev`` of the row the editor started from (the draft, else the
+    approved, else 0 / 0). Either one stale is a 409."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: dict
+    base_version: int = Field(ge=0)
+    base_rev: int = Field(ge=0)
+
+
+class BlueprintUnitRowResponse(BaseModel):
+    id: str
+    unit: str
+    version: int
+    rev: int
+    status: UnitStatus
+    body: dict
+    created_by: str
+    approved_by: str | None
+    approved_at: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class BlueprintUnitStateResponse(BaseModel):
+    unit: str
+    approved: BlueprintUnitRowResponse | None
+    draft: BlueprintUnitRowResponse | None
+
+
+class BranchResponse(BaseModel):
+    id: str
+    label: str
+    purpose: str
+    groups: list[str]
+    leaves: list[str]
+    plan_only: bool
+
+
+class PlayResponse(BaseModel):
+    id: str
+    label: str
+    branch: str
+    leaf: str
+    platform: str
+    peso: str
+    acts: bool
+
+
+class PlayCatalogResponse(BaseModel):
+    branches: list[BranchResponse]
+    plays: list[PlayResponse]
+
+
+class BlueprintUnitsResponse(BaseModel):
+    """Every unit's approved and draft rows (units without rows are omitted) plus
+    the play catalog."""
+
+    profile_id: str
+    units: list[BlueprintUnitStateResponse]
+    catalog: PlayCatalogResponse
+
+
+class BlueprintUnitDiffResponse(BaseModel):
+    """Field-level: dotted body paths (``gtm.icp.segments``) added, removed or
+    changed between two versions of one unit. Empty values count as absent."""
+
+    unit: str
+    from_version: int
+    to_version: int
+    fields: BlueprintSectionDiff

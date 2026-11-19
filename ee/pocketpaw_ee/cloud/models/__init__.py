@@ -1,223 +1,16 @@
 """Cloud document models — re-exports for Beanie init.
 
-Updated: 2026-10-03 (AV-3, feat/ai-visibility-core) — added ``AiVisibilityCheck``
-(one stored "do AI assistants name this business?" check) and ``AiVisibilitySite``
-(a site's questions and latest check state). Kept out of ``__all__``: only
-``ee.cloud.ai_visibility.service`` / ``service_admin`` import them.
+Every Beanie document class is imported here and listed in
+``get_all_documents()``, which ``init_beanie`` reads: a document missing from
+that list has no collection binding, so its first query fails at runtime.
+Registering a new doc here is load-bearing.
 
-Updated: 2026-10-02 (feat/studio-templates) — added ``StudioTemplate`` (a Studio
-generation published as a template; see studio_templates/service.py).
-
-Updated: 2026-10-01 (DS-1, feat/discover-index) — added ``DiscoverListing`` (one
-public Discover card per source item; see discover/service_admin.py).
-Updated: 2026-10-01 (CN-3, fix/canon-daily-caps) — the six per-meter daily
-counters (``FileComprehensionUsage``, ``FileTranscriptionUsage``,
-``GuestTurnUsage``, ``IllustrationUsage``, ``WorkspaceTurnUsage``,
-``WorkspaceUploadUsage``) are gone, replaced by ONE ``DailyUsage`` doc keyed
-``(subject_type, subject_id, meter, day)`` in the ``daily_usage`` collection.
-Kept out of ``__all__``: only ``ee.cloud.metering.service`` imports it.
-Registering it is load-bearing — an unregistered doc makes
-``get_pymongo_collection()`` raise inside the fail-closed meters, so every
-comprehension / transcription / illustration / guest turn would be refused.
-
-Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added ``MeetingKnock`` (a guest
-asking to join a meeting; see meetings/lobby_service.py).
-
-Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``ReleasedSlug`` (a site
-address given up by a rename, held 30 days for the workspace that released it)
-to the imports and ``get_all_documents()`` so the ``released_slugs`` collection
-is wired into ``init_beanie``. Kept out of ``__all__``: only
-``pocketpaw_ee.sites.service`` imports the doc class directly.
-
-Updated: 2026-08-29 (T2 "Audio/video transcription at ingest") — added
-``FileTranscriptionUsage`` (one row per workspace per UTC day, the atomic
-counter behind the media-transcription daily cap) to the imports and
-``get_all_documents()`` so the ``file_transcription_usage`` collection is wired
-into ``init_beanie``. Kept out of ``__all__``: only
-``ee.cloud.uploads.transcription_budget`` imports the doc class directly.
-Registering it here is load-bearing — an unregistered document makes
-``get_pymongo_collection()`` raise inside that budget's fail-CLOSED except, so
-every transcription is refused and the feature reads as switched off.
-
-Updated: 2026-09-11 (feat/abuse-budgets) — added ``WorkspaceUploadUsage`` and
-``WorkspaceTurnUsage`` (one row per workspace per UTC day each, the atomic
-counters behind the upload and agent-run daily caps) to the imports and
-``get_all_documents()`` so both collections are wired into ``init_beanie``.
-Kept out of ``__all__``: only ``ee.cloud.uploads.upload_budget`` and
-``ee.cloud.chat.runs.turn_budget`` import the doc classes directly.
-
-Updated: 2026-08-28 (FC-3 "File comprehension") — added
-``FileComprehensionUsage`` (one row per workspace per UTC day, the atomic
-counter behind the comprehension daily cap) to the imports and
-``get_all_documents()`` so the ``file_comprehension_usage`` collection is
-wired into ``init_beanie``. Kept out of ``__all__``: only
-``ee.cloud.uploads.comprehension_budget`` imports the doc class directly.
-
-Updated: 2026-09-04 (IR-2a, feat/sites-import-design-brief) — added
-``SiteDesignBrief`` (the captured design brief a rebuild-mode site import
-generates from) to the imports, ``__all__`` and ``get_all_documents()`` so the
-``site_design_briefs`` collection is wired into ``init_beanie``. It is its own
-collection because rebuild mints neither a pocket nor a Site doc to hang it on.
-
-Updated: 2026-07-27 (integration/growth-v1) — G-6's ``WhatsAppSendLog`` is
-gone: it and G-5's ``MessageLog`` were the same send record built in parallel
-under two names, unified onto ``MessageLog`` (which gained the ``sending`` /
-``blocked`` outcomes, ``blocked_reason``, ``error_code`` and
-``opted_in_at_attempt``). The stale G-6 note below is kept for history.
-
-Superseded: 2026-07-27 (feat/growth-g6) — added ``WhatsAppSendLog`` (the /growth
-per-attempt outbound WhatsApp compliance record: one row per attempt, including
-the attempts the opt-in guard REFUSED) to the imports and
-``get_all_documents()`` so the ``growth_whatsapp_send_logs`` collection is wired
-into ``init_beanie``. Kept out of ``__all__`` like ``Prospect`` / ``Draft`` —
-only ``ee.cloud.growth.service`` imports the doc class directly (import-linter
-"Growth" contract).
-Updated: 2026-07-29 (feat/growth-discovery) — added ``Icp`` (the standing
-description of who a workspace wants, plus the discovery cadence) to the
-imports and ``get_all_documents()`` so the ``growth_icps`` collection is wired
-into ``init_beanie``. Kept out of ``__all__`` like the other growth docs.
-Updated: 2026-07-27 (feat/growth-g4 merge) — merged integration/ship-v1 into the
-growth stack so the ``_growth_send`` gate slice can wire the sixth gated kind on
-top of ship's instinct-router changes; both changelog blocks below retained.
-Updated: 2026-07-27 (feat/growth-g5) — added ``MessageLog`` (the /growth
-outbound audit row: one record per delivery ATTEMPT, ``sent`` | ``failed``) to
-the imports and ``get_all_documents()`` so the ``growth_message_logs``
-collection is wired into ``init_beanie``. Kept out of ``__all__`` like
-``Prospect`` / ``Draft`` — only ``ee.cloud.growth.service`` imports the doc
-class directly (import-linter "Growth" contract).
-Updated: 2026-07-27 (feat/growth-g3) — added ``Draft`` (the /growth per-channel
-outreach draft: workspace-scoped, attached to a prospect, status lifecycle
-enforced in the service) to the imports and ``get_all_documents()`` so the
-``growth_drafts`` collection is wired into ``init_beanie``. Kept out of
-``__all__`` like ``Prospect`` — only ``ee.cloud.growth.service`` imports the
-doc class directly (import-linter "Growth" contract).
-Updated: 2026-07-27 (feat/growth-g1) — added ``Prospect`` (the /growth
-outbound-engine prospect store: workspace-scoped, unique (workspace, domain)
-dedupe key) to the imports and ``get_all_documents()`` so the
-``growth_prospects`` collection is wired into ``init_beanie``. Kept out of
-``__all__`` so it can't be star-imported into routers/DTOs/domains — only
-``ee.cloud.growth.service`` imports the doc class directly (import-linter
-"Growth" contract).
-Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added ``ShipApp`` and
-``ShipDeploy`` (the /ship app + deploy-attempt docs) to the imports, ``__all__``
-and ``get_all_documents()`` so the ``ship_apps`` / ``ship_deploys`` collections
-are wired into ``init_beanie``. Only ``ee.cloud.ship.store`` imports the doc
-classes directly (import-linter "Ship" contract).
-
-Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — added ``WorkspaceVm`` (the
-workspace→Daytona-VM mapping, moved out of the local
-``~/.pocketpaw/daytona_workspace_vm_map.json`` file into the ``workspace_vms``
-collection) to the imports, ``__all__``, and ``get_all_documents()`` so the
-collection is wired into ``init_beanie``. Only ``ee.cloud.daytona.store``
-imports the doc class directly.
-Updated: 2026-07-15 (WC-1, feat/websandbox-registry) — added ``WebSandbox``
-(the Web Cursor sandbox registry: the (workspace_id, user_id, repo) -> sandbox
-tenancy/auth oracle) to the imports, ``__all__``, and ``get_all_documents()`` so
-the ``web_sandboxes`` collection is wired into ``init_beanie``. Only
-``ee.cloud.websandbox.service`` imports the doc class directly (import-linter
-"WebSandbox" contract).
-Updated: 2026-07-08 (feat/external-alerting-delivery) — added
-``NotificationDeliveryConfig`` (the per-workspace external-delivery config: Slack
-incoming-webhook + generic HTTPS webhook + enabled switch + per-kind routing) to
-the imports, ``__all__``, and ``get_all_documents()`` so the
-``notification_delivery_configs`` collection is wired into ``init_beanie``. Only
-``ee.cloud.notifications`` (service writes, delivery reads) imports the doc class
-directly (import-linter "Notifications" contract).
-Updated: 2026-07-03 (feat/files-share-links FL-12b) — added ``ShareLink`` (the
-public, token-gated file share-link doc) to the lazy uploads loader,
-``get_all_documents()`` and ``__all__`` so the ``file_share_links`` collection
-is wired into ``init_beanie``. Only ``ee.cloud.uploads.share_store`` writes it.
-Updated: 2026-06-30 (feat/session-supervisor SS-3) — added
-``AgentSessionRuntimeDoc`` (the durable, tenant-scoped
-``(workspace, session_id, agent_id) -> cli_session_id`` mapping) to the
-imports, ``__all__``, and ``get_all_documents()`` so the
-``agent_session_runtimes`` collection is wired into ``init_beanie``. Only
-``ee.cloud.agent_sessions.runtime_service`` imports the doc class directly.
-Updated: 2026-06-30 (feat/session-supervisor SS-2) — added ``SessionTranscriptDoc``
-(the durable, tenant-scoped transcript rows backing the Mongo ``SessionStore``)
-to the imports, ``__all__``, and ``get_all_documents()`` so the
-``session_transcripts`` collection is wired into ``init_beanie``. Only
-``ee.cloud.agent_sessions.store`` imports the doc class directly.
-Updated: 2026-06-09 (feat/push-subscription-store, pocketpaw#1391) — added the
-``PushSubscription`` (with its ``PushKeys`` subdoc) and ``VapidKeypair``
-tenant-scoped Web Push documents to the imports and ``get_all_documents()``
-registry so the push-subscription store + per-workspace VAPID keypair are
-wired into ``init_beanie``. Only ``ee.cloud.push.service`` imports those doc
-classes directly (import-linter contract); they're kept out of ``__all__`` so
-they can't be star-imported into routers/DTOs/domains.
-Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2) — added the
-``Lead`` and ``Site`` tenant-scoped Paw Sites documents (plus their
-``LeadSource`` / ``SiteDomain`` subdocs) to the imports, ``__all__``, and the
-``get_all_documents()`` registry so the cloud capture sink is wired into
-``init_beanie``.
-Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — added
-``ForesightWorkspaceScenario`` (RFC 08 v1.0 wave 3) to the registered
-docs + ``__all__`` so workspace-scoped custom scenarios are wired into
-``init_beanie``. Only ``ee.cloud.foresight.scenarios`` imports the doc
-class directly (import-linter contract).
-Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — added
-``ForesightWorkspaceConfig`` to the registered docs + ``__all__`` so RFC 08
-v1.0's per-workspace onboarding threshold override is wired into
-``init_beanie``. Only ``ee.cloud.foresight.service`` imports the doc class
-directly (import-linter contract).
-Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) — added
-``ForesightPredictionRecord`` to the registered docs + ``__all__`` so the
-RFC 08 §9 calibration buffer's Mongo persistence is wired into ``init_beanie``.
-Updated: 2026-05-21 (PR #1177 security pass) — dropped PocketBackendCredential
-from ``__all__`` so it cannot be star-imported into routers/DTOs/domains; it
-remains registered in ``get_all_documents()`` for Beanie init.
-Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 follow-up item 3) — added
-``SiteRateCounter`` (the atomic per-minute capture rate-limit counter) to the
-imports, ``__all__``, and ``get_all_documents()`` so the counter collection is
-wired into ``init_beanie``.
-Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added
-``BeltWorkspaceConfig`` (the per-workspace Belt console allowlist-extension doc)
-to the imports, ``__all__``, and ``get_all_documents()`` so the console's
-add-repo route persistence is wired into ``init_beanie``. Only
-``ee.cloud.belt.service`` imports the doc class directly.
-Updated: 2026-06-11 (feat/firestore-fabric-ingest) — added
-``FabricIngestConfig`` (the per-workspace Firestore→Fabric mapping) and
-``FabricIngestState`` (the per-(workspace, collection) sync bookkeeping) to the
-imports, ``__all__``, and ``get_all_documents()`` so the ingestion worker's
-collections are wired into ``init_beanie``. Only
-``ee.cloud.fabric_ingest.service`` imports the doc classes directly.
-Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — added ``WorkspaceJobDoc``
-(the durable status record for ARQ-backed pocket jobs) to the imports,
-``__all__``, and ``get_all_documents()`` so the ``workspace_jobs`` collection is
-wired into ``init_beanie``. Only ``ee.cloud.jobs.service`` writes the doc
-directly (import-linter "Jobs" contract).
-Updated: 2026-06-18 (feat/branch-primitive-versions, BP-1) — registered the
-``ArtifactVersion`` doc (the universal Branch-primitive version log) in
-``get_all_documents()`` via the lazy ``_ensure_version_docs()`` helper. The doc
-lives in the ``pocketpaw_ee.versions`` package (its own entity), so it is
-imported lazily here — the same out-of-models discipline the belt/mandates docs
-use — to keep ``cloud.models`` from hard-importing the versions package. Only
-``pocketpaw_ee.versions.service`` imports the doc class directly.
-Updated: 2026-06-24 (integration/billing-credits, BC-2) — added ``Payment``
-(the top-up payment record captured via a verified Dodo webhook) to the imports,
-``__all__``, and ``get_all_documents()`` so the ``billing_payments`` collection
-is wired into ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
-Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription``
-(the recurring plan subscription record captured via a verified Dodo
-``subscription.active`` webhook) to the imports, ``__all__``, and
-``get_all_documents()`` so the ``billing_subscriptions`` collection is wired into
-``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
-Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added ``InstinctRuleDoc``
-(the persisted, approved, workspace-scoped, owned rule discovered from exhaust) to
-the imports, ``__all__``, and ``get_all_documents()`` so the ``instinct_rules``
-collection is wired into ``init_beanie`` and the ``beanie_test_db`` fixture. Only
-``ee.cloud.rules.service`` imports the doc class directly (import-linter "Rules").
-Updated: 2026-07-09 (feat/instinct-guardrail-rules) — added
-``InstinctWorkspaceConfig`` (the per-workspace tri-state override on the global
-``instinct_enforce_discovered_rules`` flag) to the imports, ``__all__``, and
-``get_all_documents()`` so the ``instinct_workspace_configs`` collection is wired
-into ``init_beanie``. Only ``ee.cloud.rules.service`` writes it (import-linter
-"Rules").
-Updated: 2026-07-11 (feat/external-alerting-c2c3) — added
-``WorkspaceAutomationConfig`` (the per-workspace opt-out for the always-on
-background sweeps) to the imports, ``__all__``, and ``get_all_documents()`` so the
-``workspace_automation_configs`` collection is wired into ``init_beanie``. Only
-``ee.cloud.automations_status.service`` writes it (import-linter "AutomationsStatus").
+Docs that only one service may write (the growth docs, including the per-unit
+``GrowthBlueprintUnit`` and the legacy ``GrowthBlueprint``; metering, uploads
+budgets, AI visibility, Studio templates and similar) are kept out of
+``__all__``; the import-linter contracts in ``ee/pyproject.toml`` name the one
+module allowed to import each. ``FileUpload`` loads lazily (see
+``get_all_documents``). The history of what was added when lives in git.
 """
 
 from __future__ import annotations
@@ -268,6 +61,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint
+from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit
 from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
@@ -798,6 +592,9 @@ def get_all_documents():
         # Each brand profile's versioned Brand Blueprint. Only
         # ``ee.cloud.growth.social.blueprint`` imports it.
         GrowthBlueprint,
+        # Per-unit Blueprint version chains (brand, strategy, plan, play:<id>);
+        # same import boundary.
+        GrowthBlueprintUnit,
         ReplyDraft,
         PushSubscription,
         VapidKeypair,

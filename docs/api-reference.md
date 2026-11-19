@@ -10301,7 +10301,11 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `POST /api/v1/growth/social/blueprint/seed` | Write version 1 as a draft from the profile. A no-op once any version exists. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/regenerate` | Rerun the analyst into a new draft version. Never touches the approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/approve` | The draft becomes the approved; the previous approved is superseded. `growth.manage`. |
-| `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=` (versions): per-section `added`, `removed` and `changed` keys. |
+| `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=`: per-section `added`, `removed` and `changed` keys, composed approved against composed draft. |
+| `GET /api/v1/growth/social/blueprint/units` | Every Blueprint unit's approved and draft rows, plus the play catalog (see Blueprint units). |
+| `PUT /api/v1/growth/social/blueprint/units/{unit}/draft` | `{body, base_version, base_rev}`: replace one unit's draft; `409` when either is stale. `growth.manage`. |
+| `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
+| `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
 | `POST /api/v1/growth/social/setup-status/skip` | `{key, skipped?}`: skip one checklist row, or un-skip it with `skipped: false`. Idempotent; an unknown key is a 422. Returns the checklist. |
 | `GET /api/v1/growth/social/plan` | `?week=YYYY-Www`: the week's post slots per day, computed from the approved blueprint and the ideas (see Weekly Plan). |
@@ -10356,9 +10360,16 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
   "reply_watch_handles": ["somefounder"],
   "reply_queries": ["csv export"],
   "reply_cards_per_day": 15,
-  "setup_skipped": []
+  "setup_skipped": [],
+  "growth_branches": []
 }
 ```
+
+`growth_branches` are the Growth nav branches the brand turned on, ids from the
+play catalog (`strategy`, `content`, `outbound`, `paid`, `pr`, `partnerships`,
+`growth-loops`, `results`, `settings`). `[]` means the default set (strategy,
+content, outbound, results, settings). `PUT /profile` takes it; an unknown id is a
+422, duplicates are dropped in order, and `null` resets it to `[]`.
 
 `active`, `weekly_post_quota` and `github_repos` are the product registry the
 daily drafting job reads: a profile drafts only while `active` is `true`
@@ -10770,11 +10781,24 @@ read by id) returns `{rows: [{key, state}]}` with the keys always in this order:
 
 ### Brand Blueprint — `/api/v1/growth/social/blueprint`
 
-Each profile has a versioned plan the owner edits as a draft and approves; the
-drafting agents follow the approved one. Every route takes `?profile_id=` like
-its siblings. Reads need `growth.read`; every write needs `growth.manage`
-(ADMIN). At most one version per profile is `approved` and at most one is
-`draft`; older ones are `superseded`.
+Each profile has a plan the owner edits as drafts and approves; the drafting
+agents follow the approved one. It is stored as units (see Blueprint units below),
+each with its own version chain, and the whole-page routes in this section read
+and write it composed into one object. Every route takes `?profile_id=` like its
+siblings. Reads need `growth.read`; every write needs `growth.manage` (ADMIN).
+
+The composed `version` is the `strategy` unit's version, so an edit that touches
+only another unit (an identity or voice change is a `brand` edit) does not change
+it; `blueprint_version` stamps on drafts carry the same number. `approved` is
+`null` until both `brand` and `strategy` have an approved version. A `channels`
+row is derived from the brand's active (`core` or `testing`) acting plays:
+`posts_per_week` sums the post plays on that channel (`x-organic` +
+`x-authority` for `x`), `sends_per_week` the send plays (`cold-email` for
+`email`, `linkedin-outreach` for `linkedin`). A channel or cadence no play carries
+(`whatsapp`, sends on `x` / `reddit`, posts on `email`) is not stored: on
+`PUT /blueprint/draft` a non-zero one is `422 social.blueprint_unmapped_channel`
+with `details.fields` naming each (`whatsapp.sends_per_week=6`); a zero one is
+dropped.
 
 ```json
 {
@@ -10816,7 +10840,8 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   At most 20 phases and 20 milestones per phase.
   A phase's `goal_ids` must name goals of the same draft: a save that leaves one
   dangling (a new phase, or a removed goal) is `422 social.blueprint_unknown_goal`.
-- `seed` builds version 1 from the profile's analysis (or what the owner typed
+- `seed` builds version 1 drafts of `brand`, `strategy`, `plan` and
+  `play:x-organic` from the profile's analysis (or what the owner typed
   when there is none): summary, product, problem, audience segments, tone, avoid,
   the content pillars at equal weights summing to 100 with the hooks dealt across
   them, the weekly post quota as the `x` channel's `posts_per_week`, and the
@@ -10826,15 +10851,18 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   its cadence (capped at 21) and no milestones. Seeded text goes through the same dash and number
   check as `regenerate`; a failing field seeds empty and a failing item is dropped.
 - `PUT /blueprint/draft` takes any of `identity`, `audience`, `voice`, `pillars`,
-  `channels`, `goals`, `roadmap`, `learning_ids`; each one sent replaces that section. Any other
+  `channels`, `goals`, `roadmap`, `learning_ids`; each one sent replaces that
+  section, and every unit whose body changes gets a draft (opened from its
+  approved when it has none). A channel left out parks its plays. Any other
   key (`status`, `version`, `approved_by`…) is a 422. A goal without an `id` gets one.
   `learning_ids` (at most 200, unique) must each name a learning of the same
   workspace and brand, in any status; an unknown, malformed or foreign id is
   `422 social.blueprint_unknown_learning` with `details.learning_ids` listing them.
   Omitted or `null` keeps the stored ids; `[]` clears them.
   `404 social_blueprint.not_found` before the blueprint is seeded.
-- `regenerate` runs the website analyst and writes its text into a NEW draft
-  version built on the current draft (or the approved), superseding the old draft.
+- `regenerate` runs the website analyst and writes its text into NEW draft
+  versions of `brand` and `strategy` (and `plan` when a first roadmap is seeded)
+  built on the current drafts (or the approved), superseding their old drafts.
   Numbers are never generated: channels, goals, the roadmap and learning ids are
   copied over (when the base roadmap is empty, the first roadmap is seeded as in
   `seed`), a pillar keeps its weight by name, and a newly named pillar gets 0.
@@ -10842,16 +10870,91 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   field keeps its previous value). `503 social.analyzer_unavailable` with no
   analyser, `404` before seeding, `422` with neither website nor description,
   `502 social.blueprint_regenerate_failed` when the run fails.
-- `approve` sets `approved_by` / `approved_at`. `409 social.blueprint_no_draft`
-  when there is no draft.
+- `approve` approves every unit that has a draft (the strategy last) and sets
+  `approved_by` / `approved_at` on each. `409 social.blueprint_no_draft` when no
+  unit has a draft; `422 social.blueprint_unknown_goal` when a phase or play of the
+  result names a goal its strategy lacks.
 - Writes to an existing version are conditional: a draft save, an approve, or a
   regenerate whose draft was approved or replaced since it was read is
-  `409 social.blueprint_stale`. Reload and retry.
+  `409 social.blueprint_stale`. Reload and retry. A save or approve that touches
+  several units rechecks all of them before its first write, so a 409 never
+  leaves part of it applied.
 - `diff` returns `{from_version, to_version, sections: {identity, audience,
   voice, pillars, channels, goals, roadmap}}`, each `{added, removed, changed}`.
   Keys are field names for the object sections (an empty value counts as absent)
   and pillar names, channel names, goal ids or roadmap phase ids for the lists.
-  An unknown version is `404 social_blueprint_version.not_found`.
+  The composed versions span several unit chains, so `from` and `to` are echoed
+  back but do not pick rows: the diff is always the composed approved against the
+  composed draft (one side standing in for a missing other). `404
+  social_blueprint_version.not_found` when the brand has neither.
+- A brand still on the legacy single-chain store reads from it unchanged; its first
+  Blueprint write migrates it to units (`scripts/migrate_growth_blueprint_units.py`
+  migrates every brand at once, dry run by default, and lists every non-zero
+  cadence it drops). The `strategy` unit is written last and marks a brand as
+  migrated, so a run that dies part way keeps reading the legacy row and the next
+  run resumes.
+
+### Blueprint units — `/api/v1/growth/social/blueprint/units`
+
+A unit is `brand`, `strategy`, `plan` or `play:<id>` for a play id in the catalog
+(anything else is `422 social.blueprint_unknown_unit`). Each unit keeps its own
+chain: at most one `approved` and one `draft`, older versions `superseded`.
+
+```json
+{
+  "profile_id": "6702…",
+  "units": [{"unit": "brand",
+             "approved": {"id": "…", "unit": "brand", "version": 1, "rev": 1,
+                          "status": "approved",
+                          "body": {"…": "…"}, "created_by": "…", "approved_by": "…",
+                          "approved_at": "…", "created_at": "…", "updated_at": "…"},
+             "draft": null}],
+  "catalog": {"branches": [{"id": "content", "label": "Content", "purpose": "…",
+                            "groups": ["…"], "leaves": ["…"], "plan_only": false}],
+              "plays": [{"id": "x-organic", "label": "X organic", "branch": "content",
+                         "leaf": "Social media", "platform": "X", "peso": "shared",
+                         "acts": true}]}
+}
+```
+
+- Bodies (every field optional, extra keys are `422 social.blueprint_invalid_body`):
+  `brand`: `vision {why, vision}`, `brand_story`, `messaging_framework` (at most 3),
+  `tone_of_voice {tone, do, avoid}`, `archetype`, `who_we_are {summary, product,
+  problem}`, `proof`, `assets {tagline, colors, names}`.
+  `strategy`: `market_research {main_challenge, alternatives, competitor_notes,
+  interview_notes, trends, baseline, tam_sam_som}`, `positioning {job_to_be_done,
+  value_proposition, usp, category, statement}`, `gtm {icp {target, segments,
+  not_for, triggers, icp_sentences}, pricing_notes, launch_plan}`, `goals
+  {business_goal, objectives [{id, metric, baseline, target, deadline, channel}]}`,
+  `choices {guiding_policy, growth_engine, core_play, tests, not_doing}`,
+  `content_pillars [{name, weight, hooks}]`, `learning_ids`.
+  `plan`: `roadmap` (as above), `budget {money_per_month, hours_per_week}`.
+  `play:<id>`: `status` (`core`, `testing` default, `parked`), `role`, `goal_id`,
+  `audience`, `formats`, `pillar_mix [{pillar, weight}]`, `posts_per_week` 0..50,
+  `sends_per_week` 0..5000, `voice_tweak`, `cta`, `repurpose_from`, `kpi {metric,
+  baseline, target}`, `budget`, `hours`, `rules`, `autonomy`, and optional extras
+  `seo {topic_clusters, article_queue, ai_search_targets}`, `paid {objective,
+  audience, daily_budget, creative_angles (at most 3), landing_url}`, `creator
+  {program_type, creator_profile, payment, brief, disclosure, usage_rights}`
+  (disclosure and usage rights required). Objectives, phases and milestones sent
+  without an id get one.
+- `PUT …/{unit}/draft` takes `{body, base_version, base_rev}`: the `version` and
+  `rev` of the row the editor loaded (the draft, else the approved, else `0` and
+  `0`). `rev` goes up on every write to a row, including an in-place draft save,
+  so two tabs saving the same draft get a `409 social.blueprint_stale` on the
+  second save; so does any other mismatch. A plan phase or play naming a goal id the strategy
+  (draft, else approved) lacks is `422 social.blueprint_unknown_goal`.
+- `POST …/{unit}/approve`: `409 social.blueprint_no_draft` without a draft. A plan
+  or play must name only goals of the APPROVED strategy (`422
+  social.blueprint_unknown_goal`); a strategy that drops a goal a plan or play
+  still names is `422 social.blueprint_goal_in_use` with `details.units` mapping
+  each such unit to its missing goal ids.
+- Only acting plays (`x-organic`, `x-authority`, `reddit-community`,
+  `linkedin-content`, `cold-email`, `linkedin-outreach`) feed the composed
+  Blueprint's channels; every other play is plan-only.
+- `GET …/{unit}/diff?from_version=&to_version=` returns `{unit, from_version,
+  to_version, fields: {added, removed, changed}}` with dotted body paths
+  (`gtm.icp.segments`); empty values count as absent, lists are compared whole.
 
 ### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`
 

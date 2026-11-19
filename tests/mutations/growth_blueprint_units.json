@@ -1,0 +1,128 @@
+[
+  {
+    "label": "units: a stale base_version saves anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if (body.base_version, body.base_rev) != ((base.version, base.rev) if base else (0, 0)):\n        raise _stale()\n",
+    "replace": "    if body.base_version != (base.version if base else 0):\n        raise _stale()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a strategy approve may drop a goal a plan still names",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        _check_goals_in_use(rows, _goal_ids(draft.body))\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a plan names a goal the strategy lacks",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        unknown = _named_goals(unit, new_body) - _goal_ids(current.body if current else None)\n",
+    "replace": "        unknown = set()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: agents follow a Blueprint without an approved strategy",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    return picked if \"brand\" in picked and \"strategy\" in picked else None\n",
+    "replace": "    return picked if picked else None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a parked play still feeds its channel",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    return body.get(\"status\") in (\"core\", \"testing\")\n",
+    "replace": "    return True\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a play id outside the catalog is accepted",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if unit.startswith(_PLAY) and unit[len(_PLAY) :] in PLAY_IDS:\n",
+    "replace": "    if unit.startswith(_PLAY):\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a re-run migration writes the brand again",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if await _has_strategy(workspace_id, profile_id):\n        return {\"status\": \"skipped\", \"units\": [], \"dropped\": []}\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the dry run writes",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if dry_run:\n        return report\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: two tabs on one draft overwrite each other (rev not in the match)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        \"status\": \"draft\",\n        \"rev\": doc.rev,\n",
+    "replace": "        \"status\": \"draft\",\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the skip guard counts any unit row, stranding a half-migrated brand",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        {\"workspace\": workspace_id, \"profile_id\": profile_id, \"unit\": \"strategy\"}\n",
+    "replace": "        {\"workspace\": workspace_id, \"profile_id\": profile_id}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the migration writes strategy first",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    docs.sort(key=lambda d: d.unit == \"strategy\")",
+    "replace": "    docs.sort(key=lambda d: d.unit != \"strategy\")",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: an unmapped legacy cadence is dropped silently on save",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if \"channels\" in edit and (unmapped := _unmapped(edit[\"channels\"])):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the whole-page approve skips the up-front staleness check",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    await _check_unchanged(workspace_id, profile.id, rows, drafts)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the count check ignores the plays and the plan",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        complete += expected <= have\n",
+    "replace": "        complete += {\"brand\", \"strategy\"} <= have\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  }
+]

@@ -24,11 +24,14 @@
 # ``hook_type`` tags (``clean_tag``, 40 characters); an experiment tests one
 # ``ExperimentVariable`` on one ``ExperimentMetric``; ``GeneratedLearning`` is a
 # model-proposed rule before it is checked and stored.
-# ``GrowthBlueprint`` is one version of a profile's Brand Blueprint; its numbers are
-# never model-written. Its ``roadmap`` is dated phases, each with a weekly cadence
-# per channel and milestones; ``POST_CHANNELS`` are the channels the weekly Plan
-# gives slots to (email / whatsapp sends stay in the Blueprint). ``SETUP_KEYS``
-# are the "Set up" checklist rows in order.
+# ``GrowthBlueprint`` is a profile's Brand Blueprint, stitched from its per-unit
+# versions (``version`` is the strategy unit's); its numbers are never
+# model-written. ``SocialProfile.growth_branches`` are the Growth branches the
+# brand turned on (empty means the default set). Its ``roadmap`` is dated
+# phases, each with a weekly cadence per channel and milestones;
+# ``POST_CHANNELS`` are the channels the weekly Plan gives slots to (email /
+# whatsapp sends stay in the Blueprint). ``SETUP_KEYS`` are the "Set up"
+# checklist rows in order.
 
 from __future__ import annotations
 
@@ -238,6 +241,7 @@ class SocialProfile:
     reply_cards_per_day: int = REPLY_CARDS_PER_DAY_DEFAULT
     archived_at: datetime | None = None
     setup_skipped: tuple[str, ...] = ()
+    growth_branches: tuple[str, ...] = ()
 
     def has_description(self) -> bool:
         return any((self.description.get(key) or "").strip() for key in DESCRIPTION_FIELDS)
@@ -508,3 +512,10 @@ class GrowthBlueprint:
     approved_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # The per-unit Blueprint: each unit's body as stored (empty for a legacy row),
+    # ``plays`` keyed by play id, and the version of every unit stitched in.
+    brand: dict = field(default_factory=dict)
+    strategy: dict = field(default_factory=dict)
+    plan: dict = field(default_factory=dict)
+    plays: dict = field(default_factory=dict)
+    unit_versions: dict = field(default_factory=dict)

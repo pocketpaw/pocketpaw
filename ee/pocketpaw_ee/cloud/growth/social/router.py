@@ -16,7 +16,9 @@
 # ``/experiments`` (create, list, close; no update route), ``/review`` (read-only)
 # and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
 # growth.read, writes growth.write. ``/blueprint`` (read, diff; draft save, seed,
-# regenerate, approve) is the profile's versioned plan; its writes are growth.manage.
+# regenerate, approve) is the profile's Blueprint composed from its units, and
+# ``/blueprint/units`` (list; per unit: draft save, approve, diff) edits one unit;
+# Blueprint writes are growth.manage.
 # ``GET /plan?week=YYYY-Www`` is the computed weekly post slots (growth.read). The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
 # OAuth return URL from the caller's origin, validated against the CORS
@@ -36,6 +38,12 @@ from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_front
 from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social import plan as social_plan
 from pocketpaw_ee.cloud.growth.social import service as social_service
+from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import (
+    BlueprintUnitDiffResponse,
+    BlueprintUnitsResponse,
+    BlueprintUnitStateResponse,
+    SaveUnitDraftRequest,
+)
 from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaSource,
     IdeaStatus,
@@ -403,6 +411,65 @@ async def diff_blueprint(
 ) -> BlueprintDiffResponse:
     """Per-section added / removed / changed keys between two versions."""
     return await social_blueprint.diff(ctx, from_version, to_version, profile_id)
+
+
+# Per-unit Blueprint: one version chain per unit (``brand``, ``strategy``, ``plan``,
+# ``play:<id>``). Reads growth.read, writes growth.manage, like the routes above.
+
+
+@router.get(
+    "/blueprint/units",
+    response_model=BlueprintUnitsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_blueprint_units(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintUnitsResponse:
+    """Every unit's approved and draft rows, plus the play catalog."""
+    return await social_blueprint.units(ctx, profile_id)
+
+
+@router.put(
+    "/blueprint/units/{unit}/draft",
+    response_model=BlueprintUnitStateResponse,
+    dependencies=_MANAGE,
+)
+async def save_blueprint_unit_draft(
+    unit: str,
+    body: SaveUnitDraftRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> BlueprintUnitStateResponse:
+    """Replace the unit's draft body; 409 when ``base_version`` is stale."""
+    return await social_blueprint.save_unit_draft(ctx, unit, body, profile_id)
+
+
+@router.post(
+    "/blueprint/units/{unit}/approve",
+    response_model=BlueprintUnitStateResponse,
+    dependencies=_MANAGE,
+)
+async def approve_blueprint_unit(
+    unit: str, profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintUnitStateResponse:
+    """The unit's draft becomes its approved version; 409 when there is no draft."""
+    return await social_blueprint.approve_unit(ctx, unit, profile_id)
+
+
+@router.get(
+    "/blueprint/units/{unit}/diff",
+    response_model=BlueprintUnitDiffResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def diff_blueprint_unit(
+    unit: str,
+    from_version: int = Query(ge=1),
+    to_version: int = Query(ge=1),
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> BlueprintUnitDiffResponse:
+    """Field-level added / removed / changed body paths between two unit versions."""
+    return await social_blueprint.unit_diff(ctx, unit, from_version, to_version, profile_id)
 
 
 @router.get(

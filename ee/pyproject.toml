@@ -1183,6 +1183,8 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.webhooks",
     "pocketpaw_ee.cloud.growth.social.router",
     "pocketpaw_ee.cloud.growth.social.dto",
+    "pocketpaw_ee.cloud.growth.social.blueprint_units_dto",
+    "pocketpaw_ee.cloud.growth.social.play_catalog",
     "pocketpaw_ee.cloud.growth.social.domain",
     "pocketpaw_ee.cloud.growth.social.analyst",
     "pocketpaw_ee.cloud.growth.social.ideas",
@@ -1216,6 +1218,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.social_experiment",
     "pocketpaw_ee.cloud.models.social_learning",
     "pocketpaw_ee.cloud.models.growth_blueprint",
+    "pocketpaw_ee.cloud.models.growth_blueprint_unit",
 ]
 
 [[tool.importlinter.contracts]]
