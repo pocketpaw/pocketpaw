@@ -43,8 +43,6 @@ HIDDEN: frozenset[str] = frozenset(
         "/studio/vector",
         "/studio/photo",
         "/studio/design",
-        # LiveKit is not confirmed on the hosted deployment yet.
-        "/meetings",
         "/browser",
     }
 )
@@ -59,6 +57,8 @@ ALPHA: frozenset[str] = frozenset(
         "/discover",
         "/partners",
         "/sidepanel",
+        # LiveKit is not confirmed on the hosted deployment yet.
+        "/meetings",
         "/studio/quick",
         "channel:whatsapp",
         "channel:signal",
