@@ -16,12 +16,19 @@
 #
 # ``used`` rather than ``count``: ``count`` shadows a query method on the parent
 # Document, and a cap whose field resolves to a method mostly works.
+#
+# Rows expire 90 days after ``createdAt`` (set by ``try_spend``'s
+# ``$setOnInsert``). A cap only ever reads today's row, so older rows are
+# history nobody queries; 90 days keeps a quarter for support questions.
 
 from __future__ import annotations
 
 from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
+
+#: How long a day's counter row is kept.
+DAILY_USAGE_TTL_SECONDS = 90 * 86400
 
 
 class DailyUsage(TimestampedDocument):
@@ -46,6 +53,7 @@ class DailyUsage(TimestampedDocument):
                 unique=True,
                 name="uq_daily_usage_subject_meter_day",
             ),
+            IndexModel([("createdAt", 1)], expireAfterSeconds=DAILY_USAGE_TTL_SECONDS),
         ]
 
 
