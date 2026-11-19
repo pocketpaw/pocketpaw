@@ -169,5 +169,59 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint_units.py"
     ]
+  },
+  {
+    "label": "units: a pillar's kind is dropped on the way to the agents",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "                kind=_pillar_kind(p.get(\"kind\")),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the Blueprint page drops a pillar's kind",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "hooks=list(p.hooks), kind=p.kind)",
+    "replace": "hooks=list(p.hooks))",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "units: regenerate forgets a surviving pillar's kind",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "                p[\"kind\"] = kind\n",
+    "replace": "                pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint.py"
+    ]
+  },
+  {
+    "label": "units: the drafting prompt hides pillar kinds",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "            weight = f\"{p.weight}, {p.kind}\" if p.kind else str(p.weight)\n",
+    "replace": "            weight = str(p.weight)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_analyst.py"
+    ]
+  },
+  {
+    "label": "units: the drafting prompt never says lean on audience pillars",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "    if \"pillars\" in parts and any(p.kind for p in bp.pillars):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_analyst.py"
+    ]
+  },
+  {
+    "label": "units: the lean-on-audience line shows with no kinds set",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "    if \"pillars\" in parts and any(p.kind for p in bp.pillars):\n",
+    "replace": "    if \"pillars\" in parts and bp.pillars:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_analyst.py"
+    ]
   }
 ]

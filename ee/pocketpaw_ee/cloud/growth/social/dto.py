@@ -34,7 +34,8 @@
 # (``RenameProfileRequest``) needs a trimmed, non-empty name of at most 120
 # characters, the same cap as ``company_name``. A blueprint draft save replaces
 # only the sections sent and refuses status, version and approval keys; pillar
-# names, channels and goal ids are unique within the draft. A roadmap phase runs
+# names, channels and goal ids are unique within the draft, and a pillar's
+# optional ``kind`` is left out of a dump when unset. A roadmap phase runs
 # ``start`` <= ``end`` (inclusive days), its milestones fall inside it, its cadence
 # names each channel once at 0..21 posts a week, and a milestone link is http(s).
 # Phase and milestone ids are unique across the roadmap (the service mints a

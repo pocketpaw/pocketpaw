@@ -19,7 +19,8 @@
 # script (dry run writes nothing,
 # real run, idempotent, count check over every mapped unit), a migration that dies
 # part way (legacy still read, the next run resumes) and the legacy fallback read
-# plus migrate-on-write.
+# plus migrate-on-write; a pillar kind round-trips through the units and
+# ``approved_for`` (an unset kind stays absent, an unknown one is 422).
 
 from __future__ import annotations
 

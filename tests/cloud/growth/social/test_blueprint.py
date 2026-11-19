@@ -14,11 +14,11 @@
 # same workspace and brand (unknown, malformed, foreign-workspace, other-brand and
 # duplicate ids are 422); approve supersedes each unit's previous approved;
 # regenerate writes new brand/strategy draft versions, supersedes only the old
-# drafts, never touches the approved, carries goals / channels / weights over and
-# drops text with a dash or an invented number; diff per section (composed
-# approved vs composed draft, from/to echoed); RBAC (writes need growth.manage);
-# tenancy on workspace and on profile; the legacy doc -> domain -> response round
-# trip.
+# drafts, never touches the approved, carries goals / channels / weights / pillar
+# kinds over and drops text with a dash or an invented number; diff per section
+# (composed approved vs composed draft, from/to echoed); RBAC (writes need
+# growth.manage); tenancy on workspace and on profile; the legacy doc -> domain ->
+# response round trip.
 
 from __future__ import annotations
 

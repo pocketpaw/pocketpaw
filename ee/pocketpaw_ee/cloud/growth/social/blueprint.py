@@ -42,9 +42,11 @@
 #
 # Numbers are never model-written: pillar weights are owner-entered or an equal
 # split computed here, cadences come from the profile or the owner, goals are
-# owner-entered only. ``seed`` and ``regenerate`` text must pass
-# ``ideas.check_texts`` (no em or en dash, no number the owner did not type); a
-# first two-phase roadmap is seeded when there is none. Writes to an existing row
+# owner-entered only. A pillar's ``kind`` (audience or product) is owner-set too;
+# regenerate keeps it, like the weight, for a pillar whose name survives. ``seed``
+# and ``regenerate`` text must pass ``ideas.check_texts`` (no em or en dash, no
+# number the owner did not type); a first two-phase roadmap is seeded when there
+# is none. Writes to an existing row
 # are conditional on its status; approve marks a draft approved before superseding
 # the rest, so a crash leaves two approved (the highest version wins on read),
 # never zero; the unique version index stops two writers forking a version.
