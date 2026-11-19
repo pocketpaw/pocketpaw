@@ -17,7 +17,7 @@
 # and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
 # growth.read, writes growth.write. ``/blueprint`` (read, diff; draft save, seed,
 # regenerate, approve) is the profile's Blueprint composed from its units, and
-# ``/blueprint/units`` (list; per unit: draft save, approve, diff) edits one unit;
+# ``/blueprint/units`` (list; per unit: draft save, discard, approve, diff) edits a unit;
 # Blueprint writes are growth.manage.
 # ``GET /plan?week=YYYY-Www`` is the computed weekly post slots (growth.read). The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
@@ -454,6 +454,22 @@ async def approve_blueprint_unit(
 ) -> BlueprintUnitStateResponse:
     """The unit's draft becomes its approved version; 409 when there is no draft."""
     return await social_blueprint.approve_unit(ctx, unit, profile_id)
+
+
+@router.delete(
+    "/blueprint/units/{unit}/draft",
+    response_model=BlueprintUnitStateResponse,
+    dependencies=_MANAGE,
+)
+async def discard_blueprint_unit_draft(
+    unit: str,
+    rev: int = Query(ge=0),
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> BlueprintUnitStateResponse:
+    """Drop the unit's draft; 404 without one, 409 on a stale ``rev``, 422 for a core
+    unit that was never approved."""
+    return await social_blueprint.discard_unit_draft(ctx, unit, rev, profile_id)
 
 
 @router.get(
