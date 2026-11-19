@@ -868,7 +868,7 @@
     "label": "blueprint: the ideas prompt reads the website-scan analysis",
     "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
     "find": "    lines += owner_lines(profile.description)\n    lines.append(\"</company-profile>\")\n",
-    "replace": "    lines += owner_lines(profile.description)\n    if profile.analysis is not None:\n        lines.append(f\"Summary: {fence(profile.analysis.summary)}\")\n    lines.append(\"</company-profile>\")\n",
+    "replace": "    lines += owner_lines(profile.description)\n    if profile.analysis is not None:\n        lines.append(f\"Tone: {fence(profile.analysis.tone)}\")\n    lines.append(\"</company-profile>\")\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]

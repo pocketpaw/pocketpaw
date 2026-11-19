@@ -41,7 +41,8 @@
 # ``blueprint`` is the brand's approved Blueprint (``analyst.blueprint_lines``,
 # fenced), the prompt's only source of strategy; the service passes only an
 # approved one, never a draft. The company facts and the owner's typed
-# description are always in; the website-scan ``profile.analysis`` never is.
+# description are always in; the website-scan ``profile.analysis`` never is
+# (only the media prompt below still reads it).
 
 from __future__ import annotations
 
