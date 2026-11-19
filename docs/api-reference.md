@@ -10304,6 +10304,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=`: per-section `added`, `removed` and `changed` keys, composed approved against composed draft. |
 | `GET /api/v1/growth/social/blueprint/units` | Every Blueprint unit's approved and draft rows, plus the play catalog (see Blueprint units). |
 | `PUT /api/v1/growth/social/blueprint/units/{unit}/draft` | `{body, base_version, base_rev}`: replace one unit's draft; `409` when either is stale. `growth.manage`. |
+| `DELETE /api/v1/growth/social/blueprint/units/{unit}/draft` | `?rev=`: drop one unit's draft (it becomes `superseded`); `404` without a draft, `409` on a stale `rev`, `422` for a core unit never approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
@@ -10949,6 +10950,15 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   social.blueprint_unknown_goal`); a strategy that drops a goal a plan or play
   still names is `422 social.blueprint_goal_in_use` with `details.units` mapping
   each such unit to its missing goal ids.
+- `DELETE …/{unit}/draft?rev=` drops the unit's draft and returns the unit's
+  `{unit, approved, draft}` with `draft: null`. `rev` is required and must be the
+  draft's current `rev` (`409 social.blueprint_stale` otherwise); no draft is `404
+  social_blueprint_draft.not_found`. The row is marked `superseded`, so its version
+  number stays taken and stays diffable. A play can always be discarded; one with no
+  approved row then leaves the units list, which is how a mis-added play is removed.
+  `brand`, `strategy` and `plan` need an approved row first (`422
+  social.blueprint_draft_unapproved`): a brand with no strategy row reads its legacy
+  Blueprint again.
 - Only acting plays (`x-organic`, `x-authority`, `reddit-community`,
   `linkedin-content`, `cold-email`, `linkedin-outreach`) feed the composed
   Blueprint's channels; every other play is plan-only.

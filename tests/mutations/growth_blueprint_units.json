@@ -124,5 +124,32 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint_units.py"
     ]
+  },
+  {
+    "label": "units: a never-approved core draft can be discarded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if kind != \"play\" and mine.get(\"approved\") is None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a play draft needs an approved row to be discarded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if kind != \"play\" and mine.get(\"approved\") is None:\n",
+    "replace": "    if mine.get(\"approved\") is None:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a discard lands at a stale rev",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if rev != draft.rev:\n        raise _stale()\n",
+    "replace": "    if False:\n        raise _stale()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
   }
 ]

@@ -7,10 +7,12 @@
 # A brand's Blueprint is a set of units (``brand``, ``strategy``, ``plan``,
 # ``play:<id>`` for a ``play_catalog`` id), each its own version chain: at most one
 # ``approved`` and one ``draft`` per unit, older versions ``superseded``. Unit
-# routes (``units``, ``save_unit_draft``, ``approve_unit``, ``unit_diff``) edit one
-# unit; a save carries the version it started from and a stale one is a 409
-# ``social.blueprint_stale``. A plan phase or play naming a goal the strategy
-# (draft, else approved) lacks is a 422 on save; on approve the check is against
+# routes (``units``, ``save_unit_draft``, ``approve_unit``, ``discard_unit_draft``,
+# ``unit_diff``) edit one unit; a save carries the version it started from and a
+# discard the draft's ``rev``, and a stale one is a 409 ``social.blueprint_stale``.
+# A discard supersedes the draft; a core unit needs an approved row first (422).
+# A plan phase or play naming a goal the strategy (draft, else approved) lacks is
+# a 422 on save; on approve the check is against
 # the approved strategy, and approving a strategy that drops a goal a plan or play
 # still names is a 422 ``social.blueprint_goal_in_use`` listing those units.
 #
@@ -1150,6 +1152,37 @@ async def approve_unit(
     return await _unit_result(workspace_id, profile.id, unit)
 
 
+async def discard_unit_draft(
+    ctx: RequestContext, unit: str, rev: int, profile_id: str | None = None
+) -> BlueprintUnitStateResponse:
+    """Drop the unit's draft by marking it superseded (like a regenerate replacing a
+    draft), so the version stays taken and diffable but no read shows it. 404 without
+    a draft; 409 when ``rev`` is not the draft's; 422 for a core unit with no approved
+    row, since a lone ``strategy`` draft is what marks the brand migrated. A play with
+    no approved row leaves the units list."""
+    kind = _kind(unit)
+    workspace_id, profile = await _profile(ctx, profile_id)
+    await migrate_profile(workspace_id, profile.id)
+    rows = await _rows(workspace_id, profile.id)
+    mine = rows.get(unit, {})
+    draft = mine.get("draft")
+    if draft is None:
+        raise NotFound("social_blueprint_draft", unit)
+    if rev != draft.rev:
+        raise _stale()
+    if kind != "play" and mine.get("approved") is None:
+        raise ValidationError(
+            "social.blueprint_draft_unapproved",
+            "This section has never been approved, so its draft can't be discarded. "
+            "Edit the draft instead.",
+            {"unit": unit},
+        )
+    if not await _set_if(_draft_match(workspace_id, profile.id, draft), {"status": "superseded"}):
+        raise _stale()
+    # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
+    return await _unit_result(workspace_id, profile.id, unit)
+
+
 # ---------------------------------------------------------------------------
 # Writes: the whole-page (legacy) routes, as wrappers over the units
 # ---------------------------------------------------------------------------
@@ -1616,6 +1649,7 @@ __all__ = [
     "approved_for",
     "catalog",
     "diff",
+    "discard_unit_draft",
     "get",
     "legacy_profiles",
     "migrate_profile",
