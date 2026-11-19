@@ -29,6 +29,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 )
 from pocketpaw_ee.cloud.growth.social.plan import active_phase
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
+from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as IdeaDoc
 
 from tests.cloud.growth.social.test_blueprint import _profile, _save, _seed
@@ -126,8 +127,10 @@ async def test_draft_save_changes_the_roadmap(w1):
     assert (got["start"], got["end"], got["goal_ids"]) == ("2030-02-01", "2030-02-05", ["g1"])
     assert got["cadence"] == phase["cadence"]
     assert [m["status"] for m in got["milestones"]] == ["planned", "done"]
-    stored = await BlueprintDoc.find_one({"workspace": "w1", "profile_id": pid})
-    assert isinstance(stored.roadmap["phases"][0]["start"], str)  # BSON has no date
+    stored = await UnitDoc.find_one(
+        {"workspace": "w1", "profile_id": pid, "unit": "plan", "status": "draft"}
+    )
+    assert isinstance(stored.body["roadmap"]["phases"][0]["start"], str)  # BSON has no date
 
 
 async def test_phase_goal_ids_must_name_goals_of_the_draft(w1):

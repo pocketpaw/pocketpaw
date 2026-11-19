@@ -170,7 +170,8 @@ async def test_a_draft_edit_leaves_the_prompt_and_approving_changes_it(w1, promp
     assert resp.status_code == 200, resp.text
     (idea,) = await _generate(w1, pid)
     assert "Tone: Loud and silly" in prompts[-1]
-    assert idea["blueprint_version"] == resp.json()["approved"]["version"] > v1
+    # A voice edit is a brand-unit version; the stamp is the strategy unit's version.
+    assert idea["blueprint_version"] == resp.json()["approved"]["version"] == v1
 
 
 @pytest.mark.asyncio
