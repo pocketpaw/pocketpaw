@@ -379,7 +379,9 @@ async def test_regenerate_writes_a_new_draft_and_never_touches_the_approved(w1):
             pid,
             {
                 "goals": goals,
-                "pillars": [{"name": "Speed", "weight": 60, "hooks": ["old hook"]}],
+                "pillars": [
+                    {"name": "Speed", "weight": 60, "hooks": ["old hook"], "kind": "audience"}
+                ],
                 "channels": [
                     {"channel": "x", "posts_per_week": 5, "sends_per_week": 0},
                     {"channel": "email", "posts_per_week": 0, "sends_per_week": 30},
@@ -422,8 +424,9 @@ async def test_regenerate_writes_a_new_draft_and_never_touches_the_approved(w1):
     assert draft["voice"]["tone"] == base["voice"]["tone"]
     assert draft["voice"]["avoid"] == ["jargon"]
     # Numbers are carried over, never generated: weights by name, a new pillar 0.
+    # A surviving pillar keeps its kind; a new one has none.
     assert draft["pillars"] == [
-        {"name": "Speed", "weight": 60, "hooks": ["Stop chasing"]},
+        {"name": "Speed", "weight": 60, "hooks": ["Stop chasing"], "kind": "audience"},
         {"name": "Craft", "weight": 0, "hooks": []},
     ]
     assert draft["goals"] == base["goals"] == goals

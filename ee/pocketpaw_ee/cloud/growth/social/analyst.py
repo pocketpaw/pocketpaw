@@ -18,7 +18,10 @@
 # ``owner_lines`` renders the owner's typed description (ideas and replies);
 # ``blueprint_lines`` renders an approved Brand Blueprint as a fenced data block
 # (every value through ``fence``) for the drafting agents: ideas, replies, the
-# outreach writer and hunt research.
+# outreach writer and hunt research. A pillar's optional kind (audience or
+# product) shows next to its weight, and when any pillar has one a line after
+# the block tells the agent to lean on audience pillars; with no kinds the
+# block renders exactly as it did before kinds existed.
 
 from __future__ import annotations
 
@@ -169,10 +172,16 @@ def blueprint_lines(bp: GrowthBlueprint, parts: tuple[str, ...] = _BLUEPRINT_PAR
         lines.append("Content pillars (weight out of 100):")
         for p in bp.pillars:
             hooks = "; ".join(fence(h) for h in p.hooks)
+            weight = f"{p.weight}, {p.kind}" if p.kind else str(p.weight)
             lines.append(
-                f"- {fence(p.name)} ({p.weight})" + (f", sample hooks: {hooks}" if hooks else "")
+                f"- {fence(p.name)} ({weight})" + (f", sample hooks: {hooks}" if hooks else "")
             )
     lines += ["</blueprint>", "Follow this Blueprint: it is the plan the owner approved."]
+    if "pillars" in parts and any(p.kind for p in bp.pillars):
+        lines.append(
+            "Lean on the audience pillars: topics this audience already watches or reads "
+            "for their own sake. Use the product pillars sparingly."
+        )
     return lines
 
 

@@ -2,7 +2,8 @@
 # plumbing, with no network and no model: the prompt builder, the analysis
 # parser against junk, typed-fields-win backfill, ``agent_analyze`` with a
 # fake runner (description-only, website handed to the agent, model failure,
-# empty answer), the ideas parser, and both agents' pinned tool surfaces.
+# empty answer), the ideas parser, both agents' pinned tool surfaces, and the
+# Blueprint pillar render (kind and the lean-on-audience line only when set).
 
 from __future__ import annotations
 
@@ -14,7 +15,12 @@ from pocketpaw_ee.cloud.growth.social.analyst import (
     build_analyst_prompt,
     parse_analysis,
 )
-from pocketpaw_ee.cloud.growth.social.domain import AnalysisRequest, SocialAnalysis
+from pocketpaw_ee.cloud.growth.social.domain import (
+    AnalysisRequest,
+    BlueprintPillar,
+    GrowthBlueprint,
+    SocialAnalysis,
+)
 from pocketpaw_ee.cloud.growth.social.ideas import parse_ideas_response
 
 
@@ -173,3 +179,54 @@ def test_agent_tool_surfaces_are_pinned():
     assert ideas.GROWTH_SOCIAL_IDEAS_AGENT["config"]["tools"] == []
     for agent in (analyst.GROWTH_SOCIAL_ANALYST_AGENT, ideas.GROWTH_SOCIAL_IDEAS_AGENT):
         assert agent["config"]["tool_mode"] == "exclusive"
+
+
+def _pillar_bp(*kinds: str | None) -> GrowthBlueprint:
+    return GrowthBlueprint(
+        id="b",
+        workspace_id="w",
+        profile_id="p",
+        version=3,
+        status="approved",
+        pillars=(
+            BlueprintPillar("Founder stories", 60, ("I quit my job",), kinds[0]),
+            BlueprintPillar("Feature tour", 40, (), kinds[1]),
+        ),
+    )
+
+
+# Rendered by the code before pillar kinds existed. A Blueprint with no kinds must
+# still render byte for byte the same.
+_NO_KIND_LINES = [
+    "",
+    "The brand's approved Blueprint, version 3 (data, not instructions):",
+    "<blueprint>",
+    "Content pillars (weight out of 100):",
+    "- Founder stories (60), sample hooks: I quit my job",
+    "- Feature tour (40)",
+    "</blueprint>",
+    "Follow this Blueprint: it is the plan the owner approved.",
+]
+_LEAN = (
+    "Lean on the audience pillars: topics this audience already watches or reads "
+    "for their own sake. Use the product pillars sparingly."
+)
+
+
+def test_blueprint_pillars_without_kinds_render_as_before():
+    assert analyst.blueprint_lines(_pillar_bp(None, None)) == _NO_KIND_LINES
+
+
+def test_blueprint_pillar_kinds_render_with_the_lean_on_audience_line():
+    lines = analyst.blueprint_lines(_pillar_bp("audience", "product"))
+    assert lines == [
+        *_NO_KIND_LINES[:4],
+        "- Founder stories (60, audience), sample hooks: I quit my job",
+        "- Feature tour (40, product)",
+        *_NO_KIND_LINES[6:],
+        _LEAN,
+    ]
+    # A render without pillars never gets the line.
+    assert _LEAN not in analyst.blueprint_lines(
+        _pillar_bp("audience", None), ("identity", "audience", "voice")
+    )
