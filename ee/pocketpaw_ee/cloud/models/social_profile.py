@@ -12,6 +12,8 @@
 # ``archived_at`` set means the brand is archived: it leaves the profile list,
 # the default-profile pick and every cron sweep, but a read by id still works.
 # ``setup_skipped`` holds the "Set up" checklist rows the owner chose to skip.
+# ``growth_branches`` are the Growth nav branches the brand turned on (ids from
+# ``growth.social.play_catalog``); empty means the default set.
 #
 # ``description`` and ``analysis`` are plain dicts, shaped and validated by
 # ``growth.social.dto`` on the way in and out. Only ``ee.cloud.growth.social.
@@ -53,6 +55,7 @@ class SocialProfile(TimestampedDocument):
     reply_cards_per_day: int = 15
     archived_at: datetime | None = None
     setup_skipped: list[str] = Field(default_factory=list)
+    growth_branches: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "growth_social_brands"

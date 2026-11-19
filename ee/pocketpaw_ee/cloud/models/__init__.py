@@ -268,6 +268,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint
+from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit
 from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
@@ -798,6 +799,9 @@ def get_all_documents():
         # Each brand profile's versioned Brand Blueprint. Only
         # ``ee.cloud.growth.social.blueprint`` imports it.
         GrowthBlueprint,
+        # Per-unit Blueprint version chains (brand, strategy, plan, play:<id>);
+        # same import boundary.
+        GrowthBlueprintUnit,
         ReplyDraft,
         PushSubscription,
         VapidKeypair,

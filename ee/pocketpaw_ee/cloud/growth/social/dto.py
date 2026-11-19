@@ -16,7 +16,9 @@
 # order) reset to their defaults on an explicit ``null``; so do the reply-card
 # settings: ``reply_watch_handles`` (at most 30 X handles, leading ``@`` dropped,
 # deduped ignoring case), ``reply_queries`` (at most 5, each trimmed and at most
-# 200 characters) and ``reply_cards_per_day`` (1..25, default 15). A reply edit
+# 200 characters) and ``reply_cards_per_day`` (1..25, default 15).
+# ``growth_branches`` must name branches of the play catalog (deduped in order;
+# ``[]`` or ``null`` means the default set). A reply edit
 # needs ``draft_text`` (at most 280 characters) and/or ``status``. Idea edits need at
 # least one field; script beats and hashtags are trimmed and capped, and the
 # ``pillar`` / ``hook_type`` tags are trimmed and cut to 40 characters. A post
@@ -94,6 +96,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     TeamSize,
     clean_tag,
 )
+from pocketpaw_ee.cloud.growth.social.play_catalog import BRANCH_IDS
 
 MAX_SCRIPT_BEATS = 12
 MAX_HASHTAGS = 15
@@ -196,6 +199,19 @@ class UpsertProfileRequest(BaseModel):
     reply_watch_handles: list[str] | None = None
     reply_queries: list[str] | None = None
     reply_cards_per_day: int | None = Field(default=None, ge=1, le=MAX_REPLY_CARDS_PER_DAY)
+    growth_branches: list[str] | None = None
+
+    @field_validator("growth_branches")
+    @classmethod
+    def _branches(cls, v: list[str] | None) -> list[str] | None:
+        """Branch ids from the play catalog, deduplicated in order; ``[]`` or null
+        means the default set."""
+        if v is None:
+            return None
+        unknown = sorted({b for b in v if b not in BRANCH_IDS})
+        if unknown:
+            raise ValueError(f"unknown growth_branches: {', '.join(unknown)}")
+        return list(dict.fromkeys(v))
 
     @field_validator("github_repos")
     @classmethod
@@ -316,6 +332,7 @@ class SocialProfileResponse(BaseModel):
     reply_cards_per_day: int
     archived_at: str | None = None
     setup_skipped: list[str] = Field(default_factory=list)
+    growth_branches: list[str] = Field(default_factory=list)
 
 
 class RenameProfileRequest(BaseModel):
