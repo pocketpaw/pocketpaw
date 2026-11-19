@@ -308,7 +308,9 @@ async def test_a_pillar_kind_round_trips_through_the_units_and_approved_for(w1):
     await _ok(w1, pid, "brand")
     await _ok(w1, pid, "strategy")
     bad = [{"name": "x", "kind": "meme"}]
-    await _put(w1, pid, "strategy", {"content_pillars": bad}, 1, status=422)
+    err = await _put(w1, pid, "strategy", {"content_pillars": bad}, 1, status=422)
+    locs = [e["loc"] for e in err["error"]["details"]["errors"]]
+    assert locs == [["content_pillars", "0", "kind"]]
 
     units = (await w1.get(UNITS, params={"profile_id": pid})).json()["units"]
     strategy = next(u for u in units if u["unit"] == "strategy")
