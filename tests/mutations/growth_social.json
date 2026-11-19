@@ -762,7 +762,8 @@
     "find": "                \"workspace\": workspace_id,\n                \"profile_id\": profile_id,\n                \"status\": {\"$in\"",
     "replace": "                \"profile_id\": profile_id,\n                \"status\": {\"$in\"",
     "tests": [
-      "tests/cloud/growth/social/test_blueprint.py"
+      "tests/cloud/growth/social/test_blueprint.py",
+      "tests/cloud/growth/social/test_blueprint_units.py"
     ]
   },
   {
@@ -798,7 +799,8 @@
     "find": "    elif not await _set_if(_draft_match(workspace_id, profile_id, draft), {\"body\": body}):\n        raise _stale()",
     "replace": "    elif not await _set_if({\"_id\": draft.id}, {\"body\": body}):\n        raise _stale()",
     "tests": [
-      "tests/cloud/growth/social/test_blueprint.py"
+      "tests/cloud/growth/social/test_blueprint.py",
+      "tests/cloud/growth/social/test_blueprint_units.py"
     ]
   },
   {

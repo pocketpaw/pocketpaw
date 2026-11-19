@@ -557,21 +557,36 @@ async def test_a_stale_whole_page_approve_writes_nothing(w1, monkeypatch):
     assert await UnitDoc.find({"profile_id": pid, "status": "approved"}).count() == 0
 
 
-async def test_a_save_landing_between_read_and_write_is_409(w1, monkeypatch):
+@pytest.mark.parametrize(
+    "landed",
+    [
+        {"$set": {"body.brand_story": "tab b"}, "$inc": {"rev": 1}},  # another tab's save
+        {"$set": {"status": "approved"}, "$inc": {"rev": 1}},  # an approve
+    ],
+)
+async def test_a_write_landing_between_read_and_write_is_409(w1, monkeypatch, landed):
     pid = await _profile()
     await _put(w1, pid, "brand", {"brand_story": "a"}, 0)
     real = social_blueprint._rows
 
-    async def other_tab_writes_after_our_read(workspace_id: str, profile_id: str):
+    async def other_write_after_our_read(workspace_id: str, profile_id: str):
         rows = await real(workspace_id, profile_id)
         monkeypatch.setattr(social_blueprint, "_rows", real)
         await UnitDoc.get_pymongo_collection().update_one(
-            {"profile_id": pid, "unit": "brand", "status": "draft"},
-            {"$set": {"body.brand_story": "tab b"}, "$inc": {"rev": 1}},
+            {"profile_id": pid, "unit": "brand", "status": "draft"}, landed
         )
         return rows
 
-    monkeypatch.setattr(social_blueprint, "_rows", other_tab_writes_after_our_read)
+    monkeypatch.setattr(social_blueprint, "_rows", other_write_after_our_read)
     await _put(w1, pid, "brand", {"brand_story": "tab a"}, 1, rev=0, status=409)
     stored = await UnitDoc.find_one({"profile_id": pid, "unit": "brand"})
-    assert stored.body["brand_story"] == "tab b"
+    assert stored.body["brand_story"] != "tab a"
+
+
+async def test_reads_never_mix_in_another_workspace_rows(w1):
+    pid = await _profile()
+    await _approved_core(w1, pid)
+    # A row under the same profile id in another workspace (forged) stays invisible.
+    await UnitDoc(workspace="w2", profile_id=pid, unit="strategy", version=1).insert()
+    assert await social_blueprint.approved_for("w2", pid) is None
+    assert (await social_blueprint.approved_for("w1", pid)).identity.summary == "Acme"
