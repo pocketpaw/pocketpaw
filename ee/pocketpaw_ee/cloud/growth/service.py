@@ -339,14 +339,13 @@ async def create(ctx: RequestContext, body: CreateProspectRequest) -> ProspectRe
     workspace_id = _require_workspace(ctx)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
-    profile_id = await resolve_brand(workspace_id, body.profile_id)
-
     existing = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if existing is not None:
         raise ConflictError(
             "prospect.domain_taken",
             f"A prospect for domain '{body.domain}' already exists in this workspace",
         )
+    profile_id = await resolve_brand(workspace_id, body.profile_id)
 
     doc = _ProspectDoc(workspace=workspace_id, **{**body.model_dump(), "profile_id": profile_id})
     await doc.insert()
@@ -889,9 +888,11 @@ async def upsert_by_domain(
     # client's prospect. Un-assigning is an explicit act: PATCH with ``""``.
     if body.project_id:
         doc.project_id = body.project_id
-    # The brand is set-only for the same reason: a re-import that names no
-    # brand must not un-brand a row.
-    if body.profile_id:
+    # The brand is set-once: an upsert fills a missing brand (a legacy row) but
+    # never moves a row to another brand. Pulse add and hunt discovery pass the
+    # hunt's brand, and a prospect found by a second brand's hunt stays where it
+    # is, with its drafts. Moving a prospect is an explicit act, not an upsert.
+    if body.profile_id and not doc.profile_id:
         doc.profile_id = body.profile_id
     # Discovery provenance follows the same set-only rule, for the same reason
     # doubled: an enrichment call that carries no ICP and no source URLs must

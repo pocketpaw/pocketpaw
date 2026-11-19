@@ -194,6 +194,26 @@ async def test_bulk_rows_store_the_brand_and_upsert_never_unbrands(w1):
 
 
 @pytest.mark.asyncio
+async def test_upsert_never_moves_a_prospect_to_another_brand(w1):
+    a = await _brand("w1", "A")
+    b = await _brand("w1", "B")
+    await w1.post(f"{API}/prospects/bulk", json={"rows": [_payload(domain="one.io", profile_id=a)]})
+    # A second brand's import (or hunt / pulse add) naming the same domain keeps brand A.
+    await w1.post(f"{API}/prospects/bulk", json={"rows": [_payload(domain="one.io", profile_id=b)]})
+    one = await ProspectDoc.find_one({"workspace": "w1", "domain": "one.io"})
+    assert one.profile_id == a
+
+
+@pytest.mark.asyncio
+async def test_upsert_fills_the_brand_on_a_legacy_unbranded_row(w1):
+    a = await _brand("w1", "A")
+    await ProspectDoc(workspace="w1", domain="old.io", source="manual", profile_id=None).insert()
+    await w1.post(f"{API}/prospects/bulk", json={"rows": [_payload(domain="old.io", profile_id=a)]})
+    old = await ProspectDoc.find_one({"workspace": "w1", "domain": "old.io"})
+    assert old.profile_id == a
+
+
+@pytest.mark.asyncio
 async def test_another_workspaces_brand_is_refused_on_create(w1):
     foreign = await _brand("w2", "Theirs")
     assert (await w1.post(f"{API}/prospects", json=_payload(profile_id=foreign))).status_code == 404
