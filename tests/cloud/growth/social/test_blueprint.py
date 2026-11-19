@@ -3,16 +3,22 @@
 # social router over mongomock-backed Beanie with per-workspace clients and a
 # fake analyser. No network, no model.
 #
+# These are the whole-page routes, which compose the per-unit store: version
+# chains are per unit (``_statuses(pid, unit)``) and the composed version is the
+# strategy unit's, so an identity-only edit drafts ``brand`` without bumping it.
+#
 # Covers: seed maps every section from the profile (analysis, quota, active ICPs
-# of this workspace only) and is idempotent; draft save replaces only the sections
-# sent, opens a draft from the approved, refuses status/version keys; learning ids
-# saved on the draft must name learnings of the same workspace and brand (unknown,
-# malformed, foreign-workspace, other-brand and duplicate ids are 422); approve
-# supersedes the previous approved (one approved, one draft at most); regenerate
-# writes a new draft version, supersedes only the old draft, never touches the
-# approved, carries goals / channels / weights over and drops text with a dash or
-# an invented number; diff per section; RBAC (writes need growth.manage);
-# tenancy on workspace and on profile; the doc -> domain -> response round trip.
+# of this workspace only) into v1 unit drafts and is idempotent; draft save
+# replaces only the sections sent, opens a unit draft from its approved, refuses
+# status/version keys; learning ids saved on the draft must name learnings of the
+# same workspace and brand (unknown, malformed, foreign-workspace, other-brand and
+# duplicate ids are 422); approve supersedes each unit's previous approved;
+# regenerate writes new brand/strategy draft versions, supersedes only the old
+# drafts, never touches the approved, carries goals / channels / weights over and
+# drops text with a dash or an invented number; diff per section (composed
+# approved vs composed draft, from/to echoed); RBAC (writes need growth.manage);
+# tenancy on workspace and on profile; the legacy doc -> domain -> response round
+# trip.
 
 from __future__ import annotations
 

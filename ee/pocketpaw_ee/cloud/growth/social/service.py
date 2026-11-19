@@ -44,6 +44,7 @@
 # arms and are stamped. Learnings reach the ideas prompt only once approved.
 # ``setup_status`` derives the setup checklist (done beats a skip; the accounts
 # read is bounded at 4 s and never fatal); ``skip_setup`` edits ``setup_skipped``.
+# A profile upsert may set ``growth_branches`` (catalog branch ids, checked in dto).
 # ``scheduled_ideas`` / ``waiting_ideas`` are the weekly Plan's idea reads.
 
 from __future__ import annotations

@@ -10,8 +10,9 @@
 # the owner's typed lines and never the website-scan analysis; the daily cron's X
 # budget follows the Blueprint's x channel (0 without one) and makes no drafts,
 # with a logged skip, until a Blueprint is approved; reply prompts carry the
-# Blueprint; every new idea and reply card carries ``blueprint_version``; the
-# reply mapper round trip.
+# Blueprint; every new idea and reply card carries ``blueprint_version`` (the
+# strategy unit's version, so a voice-only approve keeps the number); the reply
+# mapper round trip.
 
 from __future__ import annotations
 

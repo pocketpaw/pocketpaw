@@ -1,7 +1,9 @@
 # tests/cloud/growth/social/test_roadmap_plan.py — the Blueprint roadmap and the
 # weekly Plan (``PUT /blueprint/draft`` with a roadmap, ``GET /plan``). Same
 # harness as test_blueprint.py: the social router over mongomock-backed Beanie.
-# "Today" is frozen through ``blueprint._today``.
+# "Today" is frozen through ``blueprint._today``. The plan tests insert legacy
+# Blueprint rows, so they read through the not-yet-migrated fallback; route-driven
+# saves land in the per-unit store (the roadmap lives on the ``plan`` unit).
 #
 # Covers: roadmap validation (dates, milestone in phase, channel enum, cadence
 # 0..21, link scheme); a draft save stores the roadmap with ISO-string dates and
