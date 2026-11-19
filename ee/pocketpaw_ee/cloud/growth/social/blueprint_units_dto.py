@@ -287,20 +287,22 @@ BODY_MODELS: dict[str, type[_Body]] = {
 
 
 class SaveUnitDraftRequest(BaseModel):
-    """``PUT /blueprint/units/{unit}/draft``: the unit's whole body plus the version
-    the editor started from (the draft's, else the approved's, else 0). A stale
-    ``base_version`` is a 409."""
+    """``PUT /blueprint/units/{unit}/draft``: the unit's whole body plus the
+    ``version`` and ``rev`` of the row the editor started from (the draft, else the
+    approved, else 0 / 0). Either one stale is a 409."""
 
     model_config = ConfigDict(extra="forbid")
 
     body: dict
     base_version: int = Field(ge=0)
+    base_rev: int = Field(ge=0)
 
 
 class BlueprintUnitRowResponse(BaseModel):
     id: str
     unit: str
     version: int
+    rev: int
     status: UnitStatus
     body: dict
     created_by: str

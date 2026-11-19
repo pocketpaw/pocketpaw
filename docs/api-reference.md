@@ -10303,7 +10303,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `POST /api/v1/growth/social/blueprint/approve` | The draft becomes the approved; the previous approved is superseded. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/diff` | `?from=&to=`: per-section `added`, `removed` and `changed` keys, composed approved against composed draft. |
 | `GET /api/v1/growth/social/blueprint/units` | Every Blueprint unit's approved and draft rows, plus the play catalog (see Blueprint units). |
-| `PUT /api/v1/growth/social/blueprint/units/{unit}/draft` | `{body, base_version}`: replace one unit's draft; `409` when `base_version` is stale. `growth.manage`. |
+| `PUT /api/v1/growth/social/blueprint/units/{unit}/draft` | `{body, base_version, base_rev}`: replace one unit's draft; `409` when either is stale. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
@@ -10795,7 +10795,10 @@ row is derived from the brand's active (`core` or `testing`) acting plays:
 `posts_per_week` sums the post plays on that channel (`x-organic` +
 `x-authority` for `x`), `sends_per_week` the send plays (`cold-email` for
 `email`, `linkedin-outreach` for `linkedin`). A channel or cadence no play carries
-(`whatsapp`, sends on `x` / `reddit`, posts on `email`) is not stored.
+(`whatsapp`, sends on `x` / `reddit`, posts on `email`) is not stored: on
+`PUT /blueprint/draft` a non-zero one is `422 social.blueprint_unmapped_channel`
+with `details.fields` naming each (`whatsapp.sends_per_week=6`); a zero one is
+dropped.
 
 ```json
 {
@@ -10873,7 +10876,9 @@ row is derived from the brand's active (`core` or `testing`) acting plays:
   result names a goal its strategy lacks.
 - Writes to an existing version are conditional: a draft save, an approve, or a
   regenerate whose draft was approved or replaced since it was read is
-  `409 social.blueprint_stale`. Reload and retry.
+  `409 social.blueprint_stale`. Reload and retry. A save or approve that touches
+  several units rechecks all of them before its first write, so a 409 never
+  leaves part of it applied.
 - `diff` returns `{from_version, to_version, sections: {identity, audience,
   voice, pillars, channels, goals, roadmap}}`, each `{added, removed, changed}`.
   Keys are field names for the object sections (an empty value counts as absent)
@@ -10884,7 +10889,10 @@ row is derived from the brand's active (`core` or `testing`) acting plays:
   social_blueprint_version.not_found` when the brand has neither.
 - A brand still on the legacy single-chain store reads from it unchanged; its first
   Blueprint write migrates it to units (`scripts/migrate_growth_blueprint_units.py`
-  migrates every brand at once, dry run by default).
+  migrates every brand at once, dry run by default, and lists every non-zero
+  cadence it drops). The `strategy` unit is written last and marks a brand as
+  migrated, so a run that dies part way keeps reading the legacy row and the next
+  run resumes.
 
 ### Blueprint units — `/api/v1/growth/social/blueprint/units`
 
@@ -10896,7 +10904,8 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
 {
   "profile_id": "6702…",
   "units": [{"unit": "brand",
-             "approved": {"id": "…", "unit": "brand", "version": 1, "status": "approved",
+             "approved": {"id": "…", "unit": "brand", "version": 1, "rev": 1,
+                          "status": "approved",
                           "body": {"…": "…"}, "created_by": "…", "approved_by": "…",
                           "approved_at": "…", "created_at": "…", "updated_at": "…"},
              "draft": null}],
@@ -10929,9 +10938,11 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   {program_type, creator_profile, payment, brief, disclosure, usage_rights}`
   (disclosure and usage rights required). Objectives, phases and milestones sent
   without an id get one.
-- `PUT …/{unit}/draft` takes `{body, base_version}`; `base_version` is the unit's
-  draft version, else its approved version, else `0`. Anything else is
-  `409 social.blueprint_stale`. A plan phase or play naming a goal id the strategy
+- `PUT …/{unit}/draft` takes `{body, base_version, base_rev}`: the `version` and
+  `rev` of the row the editor loaded (the draft, else the approved, else `0` and
+  `0`). `rev` goes up on every write to a row, including an in-place draft save,
+  so two tabs saving the same draft get a `409 social.blueprint_stale` on the
+  second save; so does any other mismatch. A plan phase or play naming a goal id the strategy
   (draft, else approved) lacks is `422 social.blueprint_unknown_goal`.
 - `POST …/{unit}/approve`: `409 social.blueprint_no_draft` without a draft. A plan
   or play must name only goals of the APPROVED strategy (`422

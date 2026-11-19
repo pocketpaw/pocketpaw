@@ -25,8 +25,15 @@
 # with the composed draft whatever versions were asked for.
 #
 # Migration: ``migrate_profile`` splits a brand's legacy approved and draft rows
-# into units at their legacy version numbers. Every write migrates the brand first;
-# reads of a brand with no unit rows fall back to its legacy rows (never writing).
+# into units at their legacy version numbers, ``strategy`` last. Every write
+# migrates the brand first; reads of a brand with no ``strategy`` row fall back to
+# its legacy rows (never writing), so a half-finished migration still reads the
+# legacy Blueprint and the next run resumes it. Every row carries a ``rev`` bumped
+# on each write: a unit draft save must name the ``base_rev`` it read (two tabs on
+# one draft is a 409), and the whole-page save and approve recheck every unit they
+# will write before the first write. A non-zero legacy cadence no play carries is a
+# 422 ``social.blueprint_unmapped_channel`` on the whole-page save, and is listed
+# under ``dropped`` in a migration report.
 #
 # Numbers are never model-written: pillar weights are owner-entered or an equal
 # split computed here, cadences come from the profile or the owner, goals are
@@ -354,8 +361,13 @@ async def _rows(workspace_id: str, profile_id: str) -> dict[str, dict[str, _Unit
     return out
 
 
-async def _has_units(workspace_id: str, profile_id: str) -> bool:
-    found = await _UnitDoc.find_one({"workspace": workspace_id, "profile_id": profile_id})
+async def _has_strategy(workspace_id: str, profile_id: str) -> bool:
+    """Whether the brand is on units. Keyed on ``strategy`` because migration and seed
+    write it LAST: a brand whose run died part way still reads its legacy rows, and
+    the next run resumes (its inserts skip rows that already exist)."""
+    found = await _UnitDoc.find_one(
+        {"workspace": workspace_id, "profile_id": profile_id, "unit": "strategy"}
+    )
     return found is not None
 
 
@@ -392,6 +404,19 @@ def _primary_play(channel: str, cadence: str) -> str | None:
     return next(
         (p.id for p in PLAYS if p.acts and p.channel == channel and p.cadence == cadence), None
     )
+
+
+def _unmapped(channels: Any) -> list[str]:
+    """``channel.field=n`` for each non-zero legacy cadence no play carries
+    (``whatsapp``, sends on x or reddit, posts on email). Zero values drop silently."""
+    out = []
+    for c in _dicts(channels):
+        name = _str(c.get("channel"))
+        for cadence in ("posts", "sends"):
+            value = _int(c.get(f"{cadence}_per_week"))
+            if value and _primary_play(name, cadence) is None:
+                out.append(f"{name}.{cadence}_per_week={value}")
+    return out
 
 
 def _active(body: dict[str, Any]) -> bool:
@@ -589,7 +614,7 @@ async def _legacy_find(workspace_id: str, profile_id: str, status: str) -> _Blue
 
 async def _state(workspace_id: str, profile_id: str) -> BlueprintStateResponse:
     rows = await _rows(workspace_id, profile_id)
-    if not rows and not await _has_units(workspace_id, profile_id):
+    if not await _has_strategy(workspace_id, profile_id):
         return BlueprintStateResponse(
             approved=_response(await _legacy_find(workspace_id, profile_id, "approved")),
             draft=_response(await _legacy_find(workspace_id, profile_id, "draft")),
@@ -613,10 +638,10 @@ async def approved_for(workspace_id: str, profile_id: str) -> GrowthBlueprint | 
     """The approved Blueprint the drafting agents follow, stitched from the approved
     units; None unless ``brand`` and ``strategy`` are both approved. A brand not yet
     migrated reads its legacy approved row. Never falls back to another profile."""
-    rows = await _rows(workspace_id, profile_id)
-    if not rows and not await _has_units(workspace_id, profile_id):
+    if not await _has_strategy(workspace_id, profile_id):
         doc = await _legacy_find(workspace_id, profile_id, "approved")
         return _to_domain(doc) if doc is not None else None
+    rows = await _rows(workspace_id, profile_id)
     return _compose(workspace_id, profile_id, rows, "approved")
 
 
@@ -627,6 +652,7 @@ def _unit_row(doc: _UnitDoc | None) -> BlueprintUnitRowResponse | None:
         id=str(doc.id),
         unit=doc.unit,
         version=doc.version,
+        rev=doc.rev,
         status=doc.status,
         body=doc.body,
         created_by=doc.created_by,
@@ -878,7 +904,7 @@ def _stale() -> ConflictError:
 async def _set_if(match: dict[str, Any], fields: dict[str, Any]) -> bool:
     """One conditional write: ``fields`` lands only if a row still matches ``match``."""
     result = await _UnitDoc.get_pymongo_collection().update_one(
-        match, {"$set": {**fields, "updatedAt": datetime.now(UTC)}}
+        match, {"$set": {**fields, "updatedAt": datetime.now(UTC)}, "$inc": {"rev": 1}}
     )
     return result.matched_count == 1
 
@@ -894,7 +920,7 @@ async def _supersede_others(
             "unit": unit,
             "_id": {"$ne": keep},
         },
-        {"$set": {"status": "superseded", "updatedAt": datetime.now(UTC)}},
+        {"$set": {"status": "superseded", "updatedAt": datetime.now(UTC)}, "$inc": {"rev": 1}},
     )
 
 
@@ -908,12 +934,14 @@ async def _insert(doc: _UnitDoc) -> None:
 
 
 def _draft_match(workspace_id: str, profile_id: str, doc: _UnitDoc) -> dict[str, Any]:
+    """Still this unit's draft, at the ``rev`` it was read at (every write bumps it)."""
     return {
         "_id": doc.id,
         "workspace": workspace_id,
         "profile_id": profile_id,
         "unit": doc.unit,
         "status": "draft",
+        "rev": doc.rev,
     }
 
 
@@ -926,8 +954,9 @@ async def _write_draft(
     user_id: str,
 ) -> None:
     """Replace the unit's draft body, or open a draft at the unit's next version.
-    Conditional on the row still being this unit's draft: an approve or a
-    regenerate that landed since the read turns this save into a 409."""
+    Conditional on the row still being this unit's draft at the rev it was read
+    at: any write that landed since the read (a save from another tab, an
+    approve, a regenerate) turns this save into a 409."""
     if draft is None:
         await _insert(
             _UnitDoc(
@@ -1069,8 +1098,8 @@ async def save_unit_draft(
     profile_id: str | None = None,
 ) -> BlueprintUnitStateResponse:
     """Replace the unit's draft body (opening a draft when there is none). 409 when
-    ``base_version`` is not the unit's current version (draft, else approved, else
-    0); 422 when a plan or play names a goal the strategy (draft, else approved)
+    ``base_version`` / ``base_rev`` are not the unit's current row's (draft, else
+    approved, else 0 / 0); 422 when a plan or play names a goal the strategy (draft, else approved)
     lacks."""
     body = SaveUnitDraftRequest.model_validate(body)
     kind = _kind(unit)
@@ -1089,7 +1118,7 @@ async def save_unit_draft(
     mine = rows.get(unit, {})
     draft = mine.get("draft")
     base = draft or mine.get("approved")
-    if body.base_version != (base.version if base else 0):
+    if (body.base_version, body.base_rev) != ((base.version, base.rev) if base else (0, 0)):
         raise _stale()
     await _write_draft(workspace_id, profile.id, unit, draft, new_body, ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
@@ -1126,6 +1155,23 @@ async def approve_unit(
 # ---------------------------------------------------------------------------
 
 
+def _tag(doc: _UnitDoc | None) -> tuple[Any, int] | None:
+    return (doc.id, doc.rev) if doc is not None else None
+
+
+async def _check_unchanged(
+    workspace_id: str, profile_id: str, seen: dict[str, dict[str, _UnitDoc]], units: Any
+) -> None:
+    """409 before the first write when any unit about to be written changed since
+    ``seen`` was read, so a stale multi-unit edit never lands half applied. The
+    conditional writes after it still guard the narrow window that remains."""
+    now = await _rows(workspace_id, profile_id)
+    for unit in units:
+        a, b = seen.get(unit, {}), now.get(unit, {})
+        if any(_tag(a.get(s)) != _tag(b.get(s)) for s in ("approved", "draft")):
+            raise _stale()
+
+
 def _current(rows: dict[str, dict[str, _UnitDoc]]) -> dict[str, _UnitDoc]:
     """Per unit the row an edit builds on: the draft, else the approved."""
     out = {unit: r.get("draft") or r.get("approved") for unit, r in rows.items()}
@@ -1137,9 +1183,10 @@ async def seed(ctx: RequestContext, profile_id: str | None = None) -> BlueprintS
     profile posts on, from the profile. Does nothing once the brand has a Blueprint."""
     workspace_id, profile = await _profile(ctx, profile_id)
     await migrate_profile(workspace_id, profile.id)
-    if not await _has_units(workspace_id, profile.id):
+    if not await _has_strategy(workspace_id, profile.id):
         bodies = _apply_legacy({}, await _seed_sections(ctx, profile))
-        for unit, body in bodies.items():
+        # Strategy last: it is what marks the brand as on units (``_has_strategy``).
+        for unit, body in sorted(bodies.items(), key=lambda kv: kv[0] == "strategy"):
             doc = _UnitDoc(
                 workspace=workspace_id,
                 profile_id=profile.id,
@@ -1196,10 +1243,21 @@ async def save_draft(
     plays = set().union(*(_named_goals(u, b) for u, b in bodies.items() if u.startswith(_PLAY)))
     _check_goal_refs(_to_legacy(bodies), edit, plays)
     await _check_learning_refs(workspace_id, profile.id, edit.get("learning_ids"))
-    for unit, new_body in _apply_legacy(bodies, edit).items():
-        if new_body != bodies.get(unit):
-            draft = rows.get(unit, {}).get("draft")
-            await _write_draft(workspace_id, profile.id, unit, draft, new_body, ctx.user_id or "")
+    if "channels" in edit and (unmapped := _unmapped(edit["channels"])):
+        raise ValidationError(
+            "social.blueprint_unmapped_channel",
+            "No play carries this cadence; set it to 0 or remove the channel",
+            {"fields": unmapped},
+        )
+    changed = {
+        unit: new_body
+        for unit, new_body in _apply_legacy(bodies, edit).items()
+        if new_body != bodies.get(unit)
+    }
+    await _check_unchanged(workspace_id, profile.id, rows, changed)
+    for unit, new_body in changed.items():
+        draft = rows.get(unit, {}).get("draft")
+        await _write_draft(workspace_id, profile.id, unit, draft, new_body, ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     return await _state(workspace_id, profile.id)
 
@@ -1305,6 +1363,7 @@ async def approve(ctx: RequestContext, profile_id: str | None = None) -> Bluepri
     named = set().union(*(_named_goals(u, d.body) for u, d in resulting.items()))
     if named - goals:
         raise _unknown_goal(named - goals)
+    await _check_unchanged(workspace_id, profile.id, rows, drafts)
     for unit in sorted(drafts, key=lambda u: u == "strategy"):
         await _approve_row(workspace_id, profile.id, drafts[unit], ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
@@ -1362,7 +1421,7 @@ async def diff(
     other). A brand not yet migrated diffs its legacy versions as before."""
     workspace_id, profile = await _profile(ctx, profile_id)
     rows = await _rows(workspace_id, profile.id)
-    if not rows and not await _has_units(workspace_id, profile.id):
+    if not await _has_strategy(workspace_id, profile.id):
         old_doc = await _legacy_version(workspace_id, profile.id, from_version)
         new_doc = await _legacy_version(workspace_id, profile.id, to_version)
         old, new = old_doc.model_dump(), new_doc.model_dump()
@@ -1438,15 +1497,17 @@ async def migrate_profile(
 ) -> dict[str, Any]:
     """Split the brand's legacy approved and draft rows into units. The approved row
     becomes every unit's approved version, at the legacy version number; the draft
-    becomes a draft (same number) for each unit it changes. Idempotent: a brand
-    that has any unit row is skipped, and a concurrent migrate's rows are kept.
-    Returns ``{"status": "skipped" | "empty" | "migrated", "units": [...]}``."""
-    if await _has_units(workspace_id, profile_id):
-        return {"status": "skipped", "units": []}
+    becomes a draft (same number) for each unit it changes. ``strategy`` rows are
+    written last and a brand with one is skipped, so a run that died part way is
+    resumed by the next (rows that exist are kept, a concurrent migrate's too).
+    Returns ``{"status": "skipped" | "empty" | "migrated", "units": [...],
+    "dropped": [...]}``; ``dropped`` names every non-zero cadence no play carries."""
+    if await _has_strategy(workspace_id, profile_id):
+        return {"status": "skipped", "units": [], "dropped": []}
     approved = await _legacy_find(workspace_id, profile_id, "approved")
     draft = await _legacy_find(workspace_id, profile_id, "draft")
     if approved is None and draft is None:
-        return {"status": "empty", "units": []}
+        return {"status": "empty", "units": [], "dropped": []}
     docs: list[_UnitDoc] = []
     base: dict[str, dict] = {}
     if approved is not None:
@@ -1479,7 +1540,18 @@ async def migrate_profile(
             for unit, body in _apply_legacy(base, _legacy_sections(draft)).items()
             if body != base.get(unit)
         ]
-    report = {"status": "migrated", "units": [(d.unit, d.status, d.version) for d in docs]}
+    docs.sort(key=lambda d: d.unit == "strategy")  # strategy last, see the docstring
+    dropped = [
+        f"{row.status}:{field}"
+        for row in (approved, draft)
+        if row is not None
+        for field in _unmapped(row.channels)
+    ]
+    report = {
+        "status": "migrated",
+        "units": [(d.unit, d.status, d.version) for d in docs],
+        "dropped": dropped,
+    }
     if dry_run:
         return report
     for doc in docs:
@@ -1509,28 +1581,33 @@ async def legacy_profiles() -> list[tuple[str, str]]:
 
 
 async def migration_counts() -> tuple[int, int]:
-    """(brands with a legacy approved row, how many of THOSE have approved brand AND
-    strategy units). Equal after a correct migration; a brand that started on units
-    has no legacy row and is not counted."""
+    """(brands with a legacy approved row, how many of THOSE have an approved row for
+    every unit their legacy approved maps to: brand, strategy, plan and the plays its
+    channels land on). Equal after a complete migration; a brand that started on
+    units has no legacy row and is not counted."""
     # global-read: the migration's count check spans every tenant.
-    legacy = {
-        (d["workspace"], d["profile_id"])
-        for d in await _all(
-            _BlueprintDoc.get_pymongo_collection().find(
-                {"status": "approved"}, {"workspace": 1, "profile_id": 1}
+    legacy = sorted(
+        {
+            (d["workspace"], d["profile_id"])
+            for d in await _all(
+                _BlueprintDoc.get_pymongo_collection().find(
+                    {"status": "approved"}, {"workspace": 1, "profile_id": 1}
+                )
             )
-        )
-    }
-    have: dict[tuple[str, str], set[str]] = {}
-    # global-read: as above.
-    for d in await _all(
-        _UnitDoc.get_pymongo_collection().find(
-            {"status": "approved", "unit": {"$in": ["brand", "strategy"]}},
-            {"workspace": 1, "profile_id": 1, "unit": 1},
-        )
-    ):
-        have.setdefault((d["workspace"], d["profile_id"]), set()).add(d["unit"])
-    return len(legacy), sum(1 for key in legacy if have.get(key) == {"brand", "strategy"})
+        }
+    )
+    complete = 0
+    for workspace_id, profile_id in legacy:
+        approved = await _legacy_find(workspace_id, profile_id, "approved")
+        expected = set(_apply_legacy({}, _legacy_sections(approved))) if approved else set()
+        have = {
+            d.unit
+            for d in await _UnitDoc.find(
+                {"workspace": workspace_id, "profile_id": profile_id, "status": "approved"}
+            ).to_list()
+        }
+        complete += expected <= have
+    return len(legacy), complete
 
 
 __all__ = [

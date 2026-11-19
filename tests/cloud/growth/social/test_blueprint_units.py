@@ -3,15 +3,18 @@
 # legacy-row migration. Same harness as test_blueprint.py: the social router over
 # mongomock-backed Beanie, no network, no model.
 #
-# Covers: draft, approve and supersede run per unit; a stale ``base_version`` is a
-# 409; unit ids outside the play catalog and bad bodies are 422 (creator extras
-# need disclosure and usage rights); cross-unit goal checks on save and approve;
-# ``approved_for`` is None until brand AND strategy are approved, derives channels
-# from active acting plays only, and reads a migrated legacy row exactly as the
-# legacy row read; the whole-page routes round-trip through the units; the
-# field-level unit diff; ``growth_branches`` on the profile; the migration script
-# (dry run writes nothing, real run, idempotent, count check) and the legacy
-# fallback read plus migrate-on-write.
+# Covers: draft, approve and supersede run per unit; a stale ``base_version`` or
+# ``base_rev`` (two tabs on one draft) is a 409; unit ids outside the play catalog
+# and bad bodies are 422 (creator extras need disclosure and usage rights);
+# cross-unit goal checks on save and approve; ``approved_for`` is None until brand
+# AND strategy are approved, derives channels from active acting plays only, and
+# reads a migrated legacy row exactly as the legacy row read; the whole-page routes
+# round-trip through the units; the field-level unit diff; ``growth_branches`` on
+# the profile; non-zero cadences no play carries (422 on the whole-page save,
+# ``dropped`` in a migration report); the migration script (dry run writes nothing,
+# real run, idempotent, count check over every mapped unit), a migration that dies
+# part way (legacy still read, the next run resumes) and the legacy fallback read
+# plus migrate-on-write.
 
 from __future__ import annotations
 
@@ -21,9 +24,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social import play_catalog
+from pocketpaw_ee.cloud.growth.social.domain import BlueprintChannel
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
 from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
 
@@ -40,11 +45,23 @@ async def w1(mongo_db: Any):
         yield client
 
 
-async def _put(client, pid: str, unit: str, body: dict, base: int, status: int = 200) -> dict:
+async def _rev(pid: str, unit: str) -> int:
+    """The rev of the unit's current row (draft, else approved), as an editor reads it."""
+    docs = await UnitDoc.find(
+        {"workspace": "w1", "profile_id": pid, "unit": unit, "status": {"$ne": "superseded"}}
+    ).to_list()
+    current = next((d for d in docs if d.status == "draft"), docs[0] if docs else None)
+    return current.rev if current else 0
+
+
+async def _put(
+    client, pid: str, unit: str, body: dict, base: int, status: int = 200, rev: int | None = None
+) -> dict:
+    rev = await _rev(pid, unit) if rev is None else rev
     resp = await client.put(
         f"{UNITS}/{unit}/draft",
         params={"profile_id": pid},
-        json={"body": body, "base_version": base},
+        json={"body": body, "base_version": base, "base_rev": rev},
     )
     assert resp.status_code == status, resp.text
     return resp.json()
@@ -109,7 +126,7 @@ async def test_a_stale_base_version_is_409(w1):
     resp = await w1.put(
         f"{UNITS}/brand/draft",
         params={"profile_id": pid},
-        json={"body": {"brand_story": "b"}, "base_version": 0},
+        json={"body": {"brand_story": "b"}, "base_version": 0, "base_rev": 0},
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "social.blueprint_stale"
@@ -119,13 +136,37 @@ async def test_a_stale_base_version_is_409(w1):
     assert (await _put(w1, pid, "brand", {"brand_story": "c"}, 1))["draft"]["version"] == 2
 
 
+async def test_two_tabs_on_one_draft_the_second_save_is_409(w1):
+    pid = await _profile()
+    row = (await _put(w1, pid, "brand", {"brand_story": "a"}, 0))["draft"]
+    assert row["rev"] == 0
+    tab_a = await _put(w1, pid, "brand", {"brand_story": "tab a"}, 1, rev=row["rev"])
+    assert tab_a["draft"]["rev"] == 1 and tab_a["draft"]["version"] == 1
+    resp = await w1.put(
+        f"{UNITS}/brand/draft",
+        params={"profile_id": pid},
+        json={"body": {"brand_story": "tab b"}, "base_version": 1, "base_rev": row["rev"]},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "social.blueprint_stale"
+    stored = await UnitDoc.find_one({"profile_id": pid, "unit": "brand"})
+    assert stored.body["brand_story"] == "tab a"
+    # A missing base_rev is a 422, not a silent overwrite.
+    resp = await w1.put(
+        f"{UNITS}/brand/draft",
+        params={"profile_id": pid},
+        json={"body": {"brand_story": "c"}, "base_version": 1},
+    )
+    assert resp.status_code == 422
+
+
 async def test_unknown_units_and_bad_bodies_are_422(w1):
     pid = await _profile()
     for unit in ("play:not-a-play", "goals", "play:"):
         resp = await w1.put(
             f"{UNITS}/{unit}/draft",
             params={"profile_id": pid},
-            json={"body": {}, "base_version": 0},
+            json={"body": {}, "base_version": 0, "base_rev": 0},
         )
         assert resp.status_code == 422, unit
     for unit, body in (
@@ -139,7 +180,7 @@ async def test_unknown_units_and_bad_bodies_are_422(w1):
         resp = await w1.put(
             f"{UNITS}/{unit}/draft",
             params={"profile_id": pid},
-            json={"body": body, "base_version": 0},
+            json={"body": body, "base_version": 0, "base_rev": 0},
         )
         assert resp.status_code == 422, (unit, body)
     creator = {"creator": {"disclosure": "#ad", "usage_rights": "90 days, organic only"}}
@@ -156,7 +197,7 @@ async def test_plans_and_plays_must_name_goals_of_the_strategy(w1):
     resp = await w1.put(
         f"{UNITS}/plan/draft",
         params={"profile_id": pid},
-        json={"body": plan, "base_version": 0},
+        json={"body": plan, "base_version": 0, "base_rev": 0},
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["details"]["goal_ids"] == ["g1"]
@@ -254,10 +295,13 @@ _LEGACY = {
     "audience": {"segments": ["a"], "icp_sentences": ["i"]},
     "voice": {"tone": "t", "avoid": ["v"]},
     "pillars": [{"name": "n", "weight": 40, "hooks": ["h"]}],
+    # The three non-zero cadences no play carries (x sends, email posts, whatsapp)
+    # are dropped by the migration and a 422 on the whole-page save.
     "channels": [
-        {"channel": "x", "posts_per_week": 0, "sends_per_week": 0},
+        {"channel": "x", "posts_per_week": 0, "sends_per_week": 4},
         {"channel": "reddit", "posts_per_week": 2, "sends_per_week": 0},
-        {"channel": "email", "posts_per_week": 0, "sends_per_week": 9},
+        {"channel": "email", "posts_per_week": 1, "sends_per_week": 9},
+        {"channel": "whatsapp", "posts_per_week": 0, "sends_per_week": 6},
         {"channel": "linkedin", "posts_per_week": 3, "sends_per_week": 12},
     ],
     "goals": [{"id": "g", "metric": "m", "target": 3.5, "channel": "x"}],
@@ -284,6 +328,14 @@ _LEGACY = {
     },
     "learning_ids": ["l1"],
 }
+
+_MAPPED_CHANNELS = [
+    {"channel": "x", "posts_per_week": 0, "sends_per_week": 0},
+    {"channel": "reddit", "posts_per_week": 2, "sends_per_week": 0},
+    {"channel": "email", "posts_per_week": 0, "sends_per_week": 9},
+    {"channel": "linkedin", "posts_per_week": 3, "sends_per_week": 12},
+]
+_DROPPED = ["x.sends_per_week=4", "email.posts_per_week=1", "whatsapp.sends_per_week=6"]
 
 _UNIT_ONLY = {"brand", "strategy", "plan", "plays", "unit_versions"}
 _META = {"id", "created_at", "updated_at"}
@@ -323,8 +375,16 @@ async def test_a_migrated_legacy_blueprint_reads_exactly_as_before(w1):
 
     report = await social_blueprint.migrate_profile("w1", pid)
     assert report["status"] == "migrated"
+    assert report["dropped"] == [f"approved:{f}" for f in _DROPPED]
     after = await social_blueprint.approved_for("w1", pid)
-    assert _fields(after) == _fields(before)
+    expected = {
+        **_fields(before),
+        "channels": tuple(
+            BlueprintChannel(c["channel"], c["posts_per_week"], c["sends_per_week"])
+            for c in _MAPPED_CHANNELS
+        ),
+    }
+    assert _fields(after) == expected  # only the unmapped cadences changed
     assert after.version == 3 and after.unit_versions["strategy"] == 3
     assert after.plays["linkedin-outreach"]["sends_per_week"] == 12
     assert after.plays["x-organic"]["status"] == "core"
@@ -334,7 +394,14 @@ async def test_whole_page_routes_round_trip_through_the_units(w1):
     pid = await _profile()
     await _seed(w1, pid)
     sections = {k: v for k, v in _LEGACY.items() if k not in ("learning_ids",)}
-    state = await _save(w1, pid, sections)
+    resp = await w1.put(f"{BP}/draft", params={"profile_id": pid}, json=sections)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "social.blueprint_unmapped_channel"
+    assert resp.json()["error"]["details"]["fields"] == _DROPPED
+    # Zero cadences with no play drop silently.
+    zeroes = {"channel": "whatsapp", "posts_per_week": 0, "sends_per_week": 0}
+    state = await _save(w1, pid, {**sections, "channels": [*_MAPPED_CHANNELS, zeroes]})
+    sections["channels"] = _MAPPED_CHANNELS
     draft = state["draft"]
     for name, value in sections.items():
         assert draft[name] == value, name
@@ -348,7 +415,7 @@ async def test_whole_page_routes_round_trip_through_the_units(w1):
     approved = {k: state["approved"][k] for k in sections}
     assert approved == sections
     # Dropping a channel parks its play; the composed Blueprint no longer lists it.
-    state = await _save(w1, pid, {"channels": _LEGACY["channels"][:1]})
+    state = await _save(w1, pid, {"channels": _MAPPED_CHANNELS[:1]})
     assert [c["channel"] for c in state["draft"]["channels"]] == ["x"]
     assert by_unit["play:reddit-community"]["draft"]["body"]["status"] == "core"
     reddit = await UnitDoc.find_one(
@@ -429,3 +496,82 @@ async def test_a_write_migrates_the_brand_first(w1):
     assert state["approved"]["version"] == 4 and state["draft"]["identity"]["summary"] == "edited"
     assert await _chain(pid, "brand") == {4: "approved", 5: "draft"}
     assert (await social_blueprint.approved_for("w1", pid)).identity.summary == "s"
+
+
+async def test_a_migration_that_dies_part_way_reads_legacy_and_resumes(w1, monkeypatch):
+    pid = await _profile()
+    await _legacy(pid, 2, "approved")
+    before = await social_blueprint.approved_for("w1", pid)
+    real = UnitDoc.insert
+
+    async def flaky(self, *args, **kwargs):
+        if self.unit == "plan":
+            raise RuntimeError("connection blip")
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(UnitDoc, "insert", flaky)
+    with pytest.raises(RuntimeError):
+        await social_blueprint.migrate_profile("w1", pid)
+    # Strategy is written last, so the brand still reads its legacy Blueprint.
+    assert await _chain(pid, "brand") == {2: "approved"}
+    assert await _chain(pid, "strategy") == {}
+    assert _fields(await social_blueprint.approved_for("w1", pid)) == _fields(before)
+    assert (await w1.get(BP, params={"profile_id": pid})).json()["approved"]["version"] == 2
+
+    monkeypatch.setattr(UnitDoc, "insert", real)
+    report = await social_blueprint.migrate_profile("w1", pid)  # resumes
+    assert report["status"] == "migrated"
+    assert await _chain(pid, "plan") == {2: "approved"}
+    assert await _chain(pid, "strategy") == {2: "approved"}
+    assert await social_blueprint.migration_counts() == (1, 1)
+    assert (await social_blueprint.approved_for("w1", pid)).identity == before.identity
+
+
+async def test_the_count_check_needs_every_mapped_unit(w1):
+    pid = await _profile()
+    await _legacy(pid, 1, "approved")
+    await social_blueprint.migrate_profile("w1", pid)
+    assert await social_blueprint.migration_counts() == (1, 1)
+    await UnitDoc.find_one({"profile_id": pid, "unit": "play:reddit-community"}).delete()
+    assert await social_blueprint.migration_counts() == (1, 0)
+
+
+async def test_a_stale_whole_page_approve_writes_nothing(w1, monkeypatch):
+    pid = await _profile()
+    await _seed(w1, pid)
+    real = social_blueprint._rows
+    calls = {"n": 0}
+
+    async def other_tab_saves_first(workspace_id: str, profile_id: str):
+        rows = await real(workspace_id, profile_id)
+        calls["n"] += 1
+        if calls["n"] == 1:  # another tab edits the plan after approve read its rows
+            await UnitDoc.get_pymongo_collection().update_one(
+                {"profile_id": pid, "unit": "plan", "status": "draft"}, {"$inc": {"rev": 1}}
+            )
+        return rows
+
+    monkeypatch.setattr(social_blueprint, "_rows", other_tab_saves_first)
+    resp = await w1.post(f"{BP}/approve", params={"profile_id": pid})
+    assert resp.status_code == 409, resp.text
+    assert await UnitDoc.find({"profile_id": pid, "status": "approved"}).count() == 0
+
+
+async def test_a_save_landing_between_read_and_write_is_409(w1, monkeypatch):
+    pid = await _profile()
+    await _put(w1, pid, "brand", {"brand_story": "a"}, 0)
+    real = social_blueprint._rows
+
+    async def other_tab_writes_after_our_read(workspace_id: str, profile_id: str):
+        rows = await real(workspace_id, profile_id)
+        monkeypatch.setattr(social_blueprint, "_rows", real)
+        await UnitDoc.get_pymongo_collection().update_one(
+            {"profile_id": pid, "unit": "brand", "status": "draft"},
+            {"$set": {"body.brand_story": "tab b"}, "$inc": {"rev": 1}},
+        )
+        return rows
+
+    monkeypatch.setattr(social_blueprint, "_rows", other_tab_writes_after_our_read)
+    await _put(w1, pid, "brand", {"brand_story": "tab a"}, 1, rev=0, status=409)
+    stored = await UnitDoc.find_one({"profile_id": pid, "unit": "brand"})
+    assert stored.body["brand_story"] == "tab b"

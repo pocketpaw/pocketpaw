@@ -10,10 +10,17 @@ so a brand this script has not reached yet is migrated on its first edit.
 
 Safe by construction: a brand that already has any unit row is skipped, so a
 re-run changes nothing, and the legacy collection is only read, never dropped.
+Every non-zero legacy cadence no play carries (``whatsapp``, sends on x or
+reddit, posts on email) is printed as ``dropped``, in a dry run too. Strategy
+rows are written last and mark a brand migrated, so a run that died part way is
+resumed by the next one.
+
 It ends with the count check: brands with a legacy approved row must equal how
-many of those brands have an approved ``brand`` AND ``strategy`` unit (a brand
-that started on units has no legacy row and is not counted). Exit 1 when they
-differ after a real run. The Mongo URI is printed as host and database only.
+many of those brands have an approved row for every unit their legacy approved
+maps to (brand, strategy, plan and the plays its channels land on). A brand that
+started on units has no legacy row and is not counted. A dry run reports
+``pending`` before migration; a real run exits 1 on ``MISMATCH``. The Mongo
+URI is printed as host and database only.
 
 Usage (dry run is the default; nothing is written without ``--apply``):
     uv run python scripts/migrate_growth_blueprint_units.py           # report only
@@ -53,14 +60,16 @@ async def migrate(*, dry_run: bool) -> dict[str, Any]:
         tag = "[dry-run] " if dry_run else ""
         units = ", ".join(f"{u}={s}@v{v}" for u, s, v in report["units"]) or "-"
         print(f"{tag}workspace={workspace_id} profile={profile_id} {report['status']}: {units}")
+        for field in report["dropped"]:
+            print(f"{tag}  dropped (no play carries it): {field}")
     if not brands:
         print("No legacy Blueprint rows.")
     legacy, units_ok = await blueprint.migration_counts()
     ok = legacy == units_ok
+    verdict = "OK" if ok else ("pending" if dry_run else "MISMATCH")
     print(
         f"count check: {legacy} brand(s) with a legacy approved Blueprint, "
-        f"{units_ok} of them with approved brand and strategy units"
-        f" -> {'OK' if ok else 'MISMATCH'}"
+        f"{units_ok} of them with an approved row for every unit it maps to -> {verdict}"
     )
     return {"brands": brands, "legacy_approved": legacy, "unit_approved": units_ok, "ok": ok}
 

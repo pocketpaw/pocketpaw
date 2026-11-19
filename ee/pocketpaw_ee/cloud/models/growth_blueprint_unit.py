@@ -9,7 +9,8 @@
 # marks the draft approved before superseding the rest, so a crash leaves two
 # approved, never zero, and reads take the highest version. The unique
 # (workspace, profile_id, unit, version) index makes two writers racing for the
-# same next version fail instead of forking history.
+# same next version fail instead of forking history. ``rev`` is bumped by every
+# write to the row; a draft edit is conditional on the rev it was read at.
 #
 # ``body`` is a plain dict shaped and validated by
 # ``growth.social.blueprint_units_dto`` (one body model per unit kind). Numbers in
@@ -37,6 +38,7 @@ class GrowthBlueprintUnit(TimestampedDocument):
     unit: str
     version: int
     status: str = "draft"
+    rev: int = 0
     body: dict = Field(default_factory=dict)
     created_by: str = ""
     approved_by: str | None = None
