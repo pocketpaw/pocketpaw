@@ -325,19 +325,6 @@ async def _profile(ctx: RequestContext, profile_id: str | None) -> tuple[str, So
     return await social_service.require_profile(ctx, profile_id)
 
 
-async def _find(workspace_id: str, profile_id: str, status: str, unit: str) -> _UnitDoc | None:
-    """The unit's newest version in ``status``; deterministic even if a crash left two."""
-    docs = (
-        await _UnitDoc.find(
-            {"workspace": workspace_id, "profile_id": profile_id, "status": status, "unit": unit}
-        )
-        .sort([("version", -1)])
-        .limit(1)
-        .to_list()
-    )
-    return docs[0] if docs else None
-
-
 async def _next_version(workspace_id: str, profile_id: str, unit: str) -> int:
     docs = (
         await _UnitDoc.find({"workspace": workspace_id, "profile_id": profile_id, "unit": unit})

@@ -714,7 +714,7 @@
   {
     "label": "blueprint: approve leaves the previous approved in place",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    await _supersede_others(workspace_id, profile.id, \"approved\", draft.id)\n",
+    "find": "    await _supersede_others(workspace_id, profile_id, draft.unit, \"approved\", draft.id)\n",
     "replace": "",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
@@ -723,8 +723,8 @@
   {
     "label": "blueprint: regenerate supersedes the approved along with the old draft",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    await _supersede_others(workspace_id, profile.id, \"draft\", doc.id)\n",
-    "replace": "    await _supersede_others(workspace_id, profile.id, \"approved\", doc.id)\n",
+    "find": "        await _supersede_others(workspace_id, profile.id, doc.unit, \"draft\", doc.id)\n",
+    "replace": "        await _supersede_others(workspace_id, profile.id, doc.unit, \"approved\", doc.id)\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -759,8 +759,8 @@
   {
     "label": "tenancy: blueprint reads drop the workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "{\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}",
-    "replace": "{\"profile_id\": profile_id, \"status\": status}",
+    "find": "                \"workspace\": workspace_id,\n                \"profile_id\": profile_id,\n                \"status\": {\"$in\"",
+    "replace": "                \"profile_id\": profile_id,\n                \"status\": {\"$in\"",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -768,8 +768,8 @@
   {
     "label": "tenancy: blueprint reads drop the profile filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "{\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}",
-    "replace": "{\"workspace\": workspace_id, \"status\": status}",
+    "find": "                \"workspace\": workspace_id,\n                \"profile_id\": profile_id,\n                \"status\": {\"$in\"",
+    "replace": "                \"workspace\": workspace_id,\n                \"status\": {\"$in\"",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -777,8 +777,8 @@
   {
     "label": "tenancy: blueprint supersede writes drop the profile filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "            \"workspace\": workspace_id,\n            \"profile_id\": profile_id,\n            \"status\": status,\n            \"_id\": {\"$ne\": keep},",
-    "replace": "            \"workspace\": workspace_id,\n            \"status\": status,\n            \"_id\": {\"$ne\": keep},",
+    "find": "            \"workspace\": workspace_id,\n            \"profile_id\": profile_id,\n            \"status\": status,\n            \"unit\": unit,\n            \"_id\": {\"$ne\": keep},",
+    "replace": "            \"workspace\": workspace_id,\n            \"status\": status,\n            \"unit\": unit,\n            \"_id\": {\"$ne\": keep},",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -786,8 +786,8 @@
   {
     "label": "tenancy: blueprint next version counts every profile's versions",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "        await _BlueprintDoc.find({\"workspace\": workspace_id, \"profile_id\": profile_id})\n        .sort([(\"version\", -1)])",
-    "replace": "        await _BlueprintDoc.find({\"workspace\": workspace_id})\n        .sort([(\"version\", -1)])",
+    "find": "        await _UnitDoc.find({\"workspace\": workspace_id, \"profile_id\": profile_id, \"unit\": unit})\n        .sort([(\"version\", -1)])",
+    "replace": "        await _UnitDoc.find({\"workspace\": workspace_id, \"unit\": unit})\n        .sort([(\"version\", -1)])",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -795,8 +795,8 @@
   {
     "label": "blueprint: a stale draft save overwrites the approved",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "        if not await _set_if(match, edit):\n            raise _stale()",
-    "replace": "        match.pop(\"status\")\n        if not await _set_if(match, edit):\n            raise _stale()",
+    "find": "    elif not await _set_if(_draft_match(workspace_id, profile_id, draft), {\"body\": body}):\n        raise _stale()",
+    "replace": "    elif not await _set_if({\"_id\": draft.id}, {\"body\": body}):\n        raise _stale()",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -831,8 +831,8 @@
   {
     "label": "blueprint: two approved after a crash read in insertion order",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "            {\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}\n        )\n        .sort([(\"version\", -1)])",
-    "replace": "            {\"workspace\": workspace_id, \"profile_id\": profile_id, \"status\": status}\n        )\n        .sort([(\"_id\", 1)])",
+    "find": "        .sort([(\"version\", 1)])\n        .to_list()",
+    "replace": "        .to_list()",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]
@@ -894,8 +894,8 @@
   {
     "label": "blueprint: the drafting agents follow the draft instead of the approved",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    doc = await _find(workspace_id, profile_id, \"approved\")\n",
-    "replace": "    doc = await _find(workspace_id, profile_id, \"draft\")\n",
+    "find": "    return _compose(workspace_id, profile_id, rows, \"approved\")\n",
+    "replace": "    return _compose(workspace_id, profile_id, rows, \"draft\")\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]
@@ -1020,8 +1020,8 @@
   {
     "label": "plan: the draft blueprint shapes the plan instead of the approved",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    doc = await _find(workspace_id, profile_id, \"approved\")\n    return _to_domain(doc) if doc is not None else None\n",
-    "replace": "    doc = await _find(workspace_id, profile_id, \"draft\")\n    return _to_domain(doc) if doc is not None else None\n",
+    "find": "    return _compose(workspace_id, profile_id, rows, \"approved\")\n",
+    "replace": "    return _compose(workspace_id, profile_id, rows, \"draft\")\n",
     "tests": [
       "tests/cloud/growth/social/test_roadmap_plan.py"
     ]
