@@ -18,11 +18,13 @@
 # "failed"`` for analysis, written with one atomic ``$set``). Ideas need a
 # completed onboarding. Ideas, the daily X drafts and reply cards read the brand's
 # approved Blueprint once per run (never a draft), hand it to the agent and stamp
-# ``blueprint_version`` on every row made; without one they read the profile.
+# ``blueprint_version`` on every row made. Without one, ideas and reply cards use
+# the owner's typed description (never the website-scan ``analysis``) and the
+# daily X drafts make nothing. ``weekly_post_quota`` stays on the wire, unused.
 #
 # Crons (cross-workspace reads, one failing profile never stops a sweep):
-# ``run_daily_drafts`` drafts X posts within the X budget (the Blueprint's x
-# channel, else ``weekly_post_quota``; 0 skips with a log) and two a day, built on
+# ``run_daily_drafts`` drafts X posts within the X budget (the approved
+# Blueprint's x channel; no Blueprint or 0 skips with a log) and two a day, built on
 # the last 24 h of GitHub changes and checked by ``ideas.check_draft`` with one
 # retry; ``run_reply_drafts`` drafts reply cards a person posts by hand from an
 # intent link; ``run_repo_metrics`` stores one RepoMetric per repo and day
@@ -830,12 +832,11 @@ async def _gather_changes(repos: list[str], since: datetime) -> list[Change]:
         return []
 
 
-def _x_posts_per_week(weekly_post_quota: int, bp: GrowthBlueprint | None) -> int:
-    """The daily drafts' X budget: the approved Blueprint's x channel (0 when the
-    Blueprint plans no X), else the profile's quota."""
+def _x_posts_per_week(bp: GrowthBlueprint | None) -> int:
+    """The daily drafts' X budget: the approved Blueprint's x channel; 0 with no
+    approved Blueprint or one that plans no X."""
     if bp is None:
-        # ponytail: fallback until GX-15 removes the old strategy fields
-        return weekly_post_quota
+        return 0
     return next((c.posts_per_week for c in bp.channels if c.channel == "x"), 0)
 
 
@@ -852,8 +853,11 @@ async def _draft_daily(
     profile_key = str(doc.id)
     # One read per run: the same version drives the quota, the prompt and the stamp.
     bp = await social_blueprint.approved_for(workspace_id, profile_key)
-    budget = _x_posts_per_week(doc.weekly_post_quota, bp)
-    if bp is not None and budget <= 0:
+    if bp is None:
+        logger.info("daily drafts: profile=%s skipped, no approved Blueprint", profile_key)
+        return [], 0
+    budget = _x_posts_per_week(bp)
+    if budget <= 0:
         logger.info(
             "daily drafts: profile=%s skipped, approved Blueprint v%d plans no X posts",
             profile_key,
@@ -882,8 +886,7 @@ async def _draft_daily(
     arm = await _next_arm(exp) if exp is not None else ""
     if exp is not None:
         extra["experiment_arm"] = (exp.variable, arm)
-    if bp is not None:
-        extra["blueprint"] = bp
+    extra["blueprint"] = bp
     kept: list[GeneratedIdea] = []
     reasons: list[str] = []
     dropped = 0
@@ -931,7 +934,7 @@ async def _draft_daily(
             status="new",
             source="daily",
             suggested_at=slot,
-            blueprint_version=bp.version if bp is not None else None,
+            blueprint_version=bp.version,
         )
         if exp is not None:  # stamp the arm the draft was written for
             setattr(idea_doc, exp.variable, arm)

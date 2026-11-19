@@ -228,7 +228,7 @@
   {
     "label": "daily drafts: the weekly quota is ignored",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    budget = _x_posts_per_week(doc.weekly_post_quota, bp)\n",
+    "find": "    budget = _x_posts_per_week(bp)\n",
     "replace": "    budget = 99\n",
     "tests": [
       "tests/cloud/growth/social/test_daily_drafts.py"
@@ -865,10 +865,10 @@
     ]
   },
   {
-    "label": "blueprint: the ideas prompt still reads the analysis when a Blueprint is approved",
+    "label": "blueprint: the ideas prompt reads the website-scan analysis",
     "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
-    "find": "    analysis = profile.analysis if blueprint is None else None\n",
-    "replace": "    analysis = profile.analysis\n",
+    "find": "    lines += owner_lines(profile.description)\n    lines.append(\"</company-profile>\")\n",
+    "replace": "    lines += owner_lines(profile.description)\n    if profile.analysis is not None:\n        lines.append(f\"Summary: {fence(profile.analysis.summary)}\")\n    lines.append(\"</company-profile>\")\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]
@@ -901,10 +901,10 @@
     ]
   },
   {
-    "label": "blueprint: the daily X budget ignores the Blueprint's x channel",
+    "label": "blueprint: the daily X drafts run without an approved Blueprint",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    budget = _x_posts_per_week(doc.weekly_post_quota, bp)\n",
-    "replace": "    budget = doc.weekly_post_quota\n",
+    "find": "    if bp is None:\n        logger.info(\"daily drafts: profile=%s skipped, no approved Blueprint\", profile_key)\n        return [], 0\n",
+    "replace": "",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]
@@ -930,7 +930,7 @@
   {
     "label": "blueprint: a daily draft is not stamped with the Blueprint version",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "            suggested_at=slot,\n            blueprint_version=bp.version if bp is not None else None,\n",
+    "find": "            suggested_at=slot,\n            blueprint_version=bp.version,\n",
     "replace": "            suggested_at=slot,\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
@@ -946,10 +946,10 @@
     ]
   },
   {
-    "label": "blueprint: the reply prompt drops the owner's typed lines when a Blueprint is approved",
+    "label": "blueprint: the reply prompt drops the owner's typed lines",
     "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
-    "find": "        lines += owner_lines(profile.description)\n",
-    "replace": "        pass\n",
+    "find": "    lines += owner_lines(profile.description)\n",
+    "replace": "    pass\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]

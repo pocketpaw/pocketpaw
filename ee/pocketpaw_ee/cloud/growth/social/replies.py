@@ -22,8 +22,8 @@
 # most MAX_REPLY_CHARS, plus ``ideas.check_draft`` (no em or en dash, no number
 # that is not in the target post or the product's recent changes). With the
 # brand's approved Blueprint (``blueprint``), the prompt carries its identity,
-# audience and voice (``analyst.blueprint_lines``, fenced) instead of the profile's
-# inferred analysis; the owner's typed description stays, as in the ideas prompt.
+# audience and voice (``analyst.blueprint_lines``, fenced). The owner's typed
+# description is always there; the website-scan analysis never is.
 
 from __future__ import annotations
 
@@ -220,20 +220,8 @@ def build_replies_prompt(
 ) -> str:
     lines = ["Draft one reply for each post below that you can help with.", "", "<company>"]
     lines.append(f"Company: {fence(profile.company_name) or '(not given)'}")
-    if blueprint is not None:
-        # The owner's own words still win; only the inferred analysis gives way.
-        lines += owner_lines(profile.description)
-    else:
-        # ponytail: fallback until GX-15 removes the old strategy fields
-        analysis, typed = profile.analysis, profile.description
-        for label, value in (
-            ("Product", (analysis.product if analysis else "") or typed.get("product", "")),
-            ("Audience", (analysis.audience if analysis else "") or typed.get("audience", "")),
-            ("Tone", (analysis.tone if analysis else "") or typed.get("tone", "")),
-            ("Avoid", "; ".join(analysis.avoid) if analysis else typed.get("avoid", "")),
-        ):
-            if (value or "").strip():
-                lines.append(f"{label}: {fence(value.strip())}")
+    # The owner's own words; the strategy comes from the approved Blueprint only.
+    lines += owner_lines(profile.description)
     lines.append("</company>")
     if blueprint is not None:
         lines += blueprint_lines(blueprint, ("identity", "audience", "voice"))
