@@ -170,9 +170,20 @@
   {
     "label": "brand: a re-import that names no brand un-brands the row",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
-    "find": "    if body.profile_id:\n        doc.profile_id = body.profile_id\n",
+    "find": "    if body.profile_id and not doc.profile_id:\n        doc.profile_id = body.profile_id\n",
     "replace": "    doc.profile_id = body.profile_id\n",
-    "tests": "tests/cloud/growth/test_outreach_brand.py"
+    "tests": [
+      "tests/cloud/growth/test_outreach_brand.py"
+    ]
+  },
+  {
+    "label": "brand: an upsert naming another brand moves an existing prospect",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "    if body.profile_id and not doc.profile_id:\n",
+    "replace": "    if body.profile_id:\n",
+    "tests": [
+      "tests/cloud/growth/test_outreach_brand.py"
+    ]
   },
   {
     "label": "brand: another workspace's brand id is accepted on create",
