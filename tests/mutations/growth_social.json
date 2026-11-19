@@ -822,8 +822,8 @@
   {
     "label": "blueprint: seed takes another brand's ICPs",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "        *await growth_service.list_icps(ctx, profile_id=\"\", status=\"active\"),",
-    "replace": "        *await growth_service.list_icps(ctx, status=\"active\"),",
+    "find": "    icps = await growth_service.list_icps(ctx, profile_id=profile_id, status=\"active\")\n",
+    "replace": "    icps = await growth_service.list_icps(ctx, status=\"active\")\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint.py"
     ]

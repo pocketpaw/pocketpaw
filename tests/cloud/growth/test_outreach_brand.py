@@ -145,6 +145,7 @@ async def test_facets_count_only_the_brand(w1):
 
 @pytest.mark.asyncio
 async def test_new_rows_store_the_brand(w1):
+    await _brand("w1", "Oldest")  # the default, so inheriting is told apart from it
     brand = await _brand("w1", "Brand A")
     p = (await w1.post(f"{API}/prospects", json=_payload(profile_id=brand))).json()
     assert p["profile_id"] == brand
@@ -308,6 +309,7 @@ async def test_discovery_files_prospects_under_the_hunts_brand(w1):
 
     from tests.cloud.growth.test_discovery import FakeResearch, _company
 
+    await _brand("w1", "Oldest")  # the default, so the hunt's brand is told apart
     brand = await _brand("w1", "A")
     icp = (
         await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": brand})
@@ -327,6 +329,7 @@ async def test_pulse_add_as_prospects_files_under_the_hunts_brand(w1):
 
     from tests.cloud.growth.social.test_hunt_pulse import _theme
 
+    await _brand("w1", "Oldest")  # the default, so the hunt's brand is told apart
     brand = await _brand("w1", "A")
     icp = (
         await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": brand})

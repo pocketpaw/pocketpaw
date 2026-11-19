@@ -156,16 +156,16 @@
   {
     "label": "brand: a list route given profile_id ignores it and returns every brand",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
-    "find": "        filters[\"profile_id\"] = profile_id or None\n",
+    "find": "        filters[\"profile_id\"] = profile_id\n",
     "replace": "        pass\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
     "label": "brand: a draft with no brand of its own does not inherit its prospect's",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
-    "find": "    fields[\"profile_id\"] = body.profile_id or getattr(prospect, \"profile_id\", None)\n",
-    "replace": "    fields[\"profile_id\"] = body.profile_id\n",
-    "tests": "tests/cloud/growth/test_outreach_brand.py"
+    "find": "        body.profile_id or prospect.profile_id or await resolve_brand(workspace_id, None)\n",
+    "replace": "        body.profile_id or await resolve_brand(workspace_id, None)\n",
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_new_rows_store_the_brand"
   },
   {
     "label": "brand: a re-import that names no brand un-brands the row",
