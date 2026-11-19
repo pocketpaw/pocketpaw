@@ -15,8 +15,8 @@
 # the profile, and a play on a branch the brand turned off is left out of
 # ``approved_for`` (empty means the default set; no leak across brands or
 # workspaces) while the UI reads still show it; non-zero cadences no play carries
-# (422 on the whole-page save,
-# ``dropped`` in a migration report); the migration script (dry run writes nothing,
+# (422 on the whole-page save, ``dropped`` in a migration report); the migration
+# script (dry run writes nothing,
 # real run, idempotent, count check over every mapped unit), a migration that dies
 # part way (legacy still read, the next run resumes) and the legacy fallback read
 # plus migrate-on-write.
