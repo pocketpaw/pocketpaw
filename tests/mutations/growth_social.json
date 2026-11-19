@@ -1020,8 +1020,8 @@
   {
     "label": "plan: the draft blueprint shapes the plan instead of the approved",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    return _compose(workspace_id, profile_id, rows, \"approved\")\n",
-    "replace": "    return _compose(workspace_id, profile_id, rows, \"draft\")\n",
+    "find": "        doc = await _legacy_find(workspace_id, profile_id, \"approved\")\n        return _to_domain(doc) if doc is not None else None\n",
+    "replace": "        doc = await _legacy_find(workspace_id, profile_id, \"draft\")\n        return _to_domain(doc) if doc is not None else None\n",
     "tests": [
       "tests/cloud/growth/social/test_roadmap_plan.py"
     ]

@@ -1,0 +1,74 @@
+[
+  {
+    "label": "units: a stale base_version saves anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if body.base_version != (base.version if base else 0):\n        raise _stale()\n",
+    "replace": "    if False:\n        raise _stale()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a strategy approve may drop a goal a plan still names",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        _check_goals_in_use(rows, _goal_ids(draft.body))\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a plan names a goal the strategy lacks",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        unknown = _named_goals(unit, new_body) - _goal_ids(current.body if current else None)\n",
+    "replace": "        unknown = set()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: agents follow a Blueprint without an approved strategy",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    return picked if \"brand\" in picked and \"strategy\" in picked else None\n",
+    "replace": "    return picked if picked else None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a parked play still feeds its channel",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    return body.get(\"status\") in (\"core\", \"testing\")\n",
+    "replace": "    return True\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a play id outside the catalog is accepted",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if unit.startswith(_PLAY) and unit[len(_PLAY) :] in PLAY_IDS:\n",
+    "replace": "    if unit.startswith(_PLAY):\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: a re-run migration writes the brand again",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if await _has_units(workspace_id, profile_id):\n        return {\"status\": \"skipped\", \"units\": []}\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: the dry run writes",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if dry_run:\n        return report\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  }
+]
