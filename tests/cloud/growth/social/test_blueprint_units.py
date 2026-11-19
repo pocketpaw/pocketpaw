@@ -6,7 +6,9 @@
 # Covers: draft, approve and supersede run per unit; a stale ``base_version`` or
 # ``base_rev`` (two tabs on one draft) is a 409; unit ids outside the play catalog
 # and bad bodies are 422 (creator extras need disclosure and usage rights);
-# cross-unit goal checks on save and approve; ``approved_for`` is None until brand
+# cross-unit goal checks on save and approve; discarding a draft (a play leaves the
+# list, a stale ``rev`` is 409, no draft is 404, a never-approved core unit is 422,
+# other tenants, profiles and roles cannot); ``approved_for`` is None until brand
 # AND strategy are approved, derives channels from active acting plays only, and
 # reads a migrated legacy row exactly as the legacy row read; the whole-page routes
 # round-trip through the units; the field-level unit diff; ``growth_branches`` on
@@ -590,3 +592,97 @@ async def test_reads_never_mix_in_another_workspace_rows(w1):
     await UnitDoc(workspace="w2", profile_id=pid, unit="strategy", version=1).insert()
     assert await social_blueprint.approved_for("w2", pid) is None
     assert (await social_blueprint.approved_for("w1", pid)).identity.summary == "Acme"
+
+
+# --- discarding a draft ------------------------------------------------------------------
+
+
+async def _drop(client, pid: str, unit: str, rev: int, status: int = 200) -> dict:
+    resp = await client.delete(f"{UNITS}/{unit}/draft", params={"profile_id": pid, "rev": rev})
+    assert resp.status_code == status, resp.text
+    return resp.json()
+
+
+async def _listed(client, pid: str) -> list[str]:
+    resp = await client.get(UNITS, params={"profile_id": pid})
+    return [u["unit"] for u in resp.json()["units"]]
+
+
+async def test_discarding_a_mis_added_play_removes_it_from_the_list(w1):
+    """Breaks if plays need an approved row too (the 422 guard covering plays)."""
+    pid = await _profile()
+    await _approved_core(w1, pid)
+    await _put(w1, pid, "play:x-organic", {"posts_per_week": 3}, 0)
+    assert "play:x-organic" in await _listed(w1, pid)
+
+    state = await _drop(w1, pid, "play:x-organic", await _rev(pid, "play:x-organic"))
+    assert state == {"unit": "play:x-organic", "approved": None, "draft": None}
+    assert await _listed(w1, pid) == ["brand", "strategy"]
+    assert await _chain(pid, "play:x-organic") == {1: "superseded"}
+    # Adding it again opens the next version; the discarded one stays diffable.
+    again = await _put(w1, pid, "play:x-organic", {"posts_per_week": 2}, 0)
+    assert again["draft"]["version"] == 2
+
+
+async def test_discarding_with_a_stale_rev_is_409(w1):
+    """Breaks if the ``rev`` check is dropped (the discard lands at any rev)."""
+    pid = await _profile()
+    await _put(w1, pid, "play:x-organic", {"posts_per_week": 3}, 0)
+    await _put(w1, pid, "play:x-organic", {"posts_per_week": 4}, 1)  # rev 0 -> 1
+    resp = await w1.delete(f"{UNITS}/play:x-organic/draft", params={"profile_id": pid, "rev": 0})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "social.blueprint_stale"
+    resp = await w1.delete(f"{UNITS}/play:x-organic/draft", params={"profile_id": pid})
+    assert resp.status_code == 422  # rev is required
+    assert await _chain(pid, "play:x-organic") == {1: "draft"}
+
+
+async def test_discarding_with_no_draft_is_404_and_unknown_units_422(w1):
+    pid = await _profile()
+    await _approved_core(w1, pid)
+    await _drop(w1, pid, "brand", 0, status=404)
+    await _drop(w1, pid, "play:x-organic", 0, status=404)
+    await _drop(w1, pid, "play:not-a-play", 0, status=422)
+
+
+async def test_discarding_a_core_draft_keeps_the_approved_and_what_agents_read(w1):
+    pid = await _profile()
+    await _approved_core(w1, pid)
+    before = _fields(await social_blueprint.approved_for("w1", pid))
+    await _put(w1, pid, "brand", {"who_we_are": {"summary": "Other"}}, 1)
+    await _put(w1, pid, "strategy", {"goals": {"objectives": []}}, 1)
+
+    for unit in ("brand", "strategy"):
+        state = await _drop(w1, pid, unit, await _rev(pid, unit))
+        assert state["draft"] is None and state["approved"]["version"] == 1
+        assert await _chain(pid, unit) == {1: "approved", 2: "superseded"}
+    assert _fields(await social_blueprint.approved_for("w1", pid)) == before
+
+
+async def test_a_never_approved_core_draft_cannot_be_discarded(w1):
+    """Breaks if the core-unit guard is dropped: a lone strategy draft is what marks
+    the brand migrated, so discarding it would send reads back to the legacy row."""
+    pid = await _profile()
+    await _put(w1, pid, "brand", {"brand_story": "a"}, 0)
+    await _put(w1, pid, "strategy", _STRATEGY, 0)
+    for unit in ("brand", "strategy"):
+        resp = await w1.delete(
+            f"{UNITS}/{unit}/draft", params={"profile_id": pid, "rev": await _rev(pid, unit)}
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["error"]["code"] == "social.blueprint_draft_unapproved"
+        assert await _chain(pid, unit) == {1: "draft"}
+
+
+async def test_another_workspace_profile_or_role_cannot_discard(w1, mongo_db):
+    pid = await _profile()
+    other = await _profile()
+    await _approved_core(w1, pid)
+    await _put(w1, pid, "play:x-organic", {"posts_per_week": 3}, 0)
+
+    async with await _client("w2") as w2:
+        await _drop(w2, pid, "play:x-organic", 0, status=404)
+    await _drop(w1, other, "play:x-organic", 0, status=404)
+    async with await _client("w1", role="member") as member:
+        await _drop(member, pid, "play:x-organic", 0, status=403)
+    assert await _chain(pid, "play:x-organic") == {1: "draft"}

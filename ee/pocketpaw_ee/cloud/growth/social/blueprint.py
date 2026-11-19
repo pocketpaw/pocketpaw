@@ -10,7 +10,8 @@
 # routes (``units``, ``save_unit_draft``, ``approve_unit``, ``discard_unit_draft``,
 # ``unit_diff``) edit one unit; a save carries the version it started from and a
 # discard the draft's ``rev``, and a stale one is a 409 ``social.blueprint_stale``.
-# A discard supersedes the draft; a core unit needs an approved row first (422). A plan phase or play naming a goal the strategy
+# A discard supersedes the draft; a core unit needs an approved row first (422).
+# A plan phase or play naming a goal the strategy
 # (draft, else approved) lacks is a 422 on save; on approve the check is against
 # the approved strategy, and approving a strategy that drops a goal a plan or play
 # still names is a 422 ``social.blueprint_goal_in_use`` listing those units.
