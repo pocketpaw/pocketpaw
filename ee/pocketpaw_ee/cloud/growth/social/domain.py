@@ -27,10 +27,11 @@
 # ``GrowthBlueprint`` is a profile's Brand Blueprint, stitched from its per-unit
 # versions (``version`` is the strategy unit's); its numbers are never
 # model-written. ``SocialProfile.growth_branches`` are the Growth branches the
-# brand turned on (empty means the default set). Its ``roadmap`` is dated phases, each with a weekly cadence
-# per channel and milestones; ``POST_CHANNELS`` are the channels the weekly Plan
-# gives slots to (email / whatsapp sends stay in the Blueprint). ``SETUP_KEYS``
-# are the "Set up" checklist rows in order.
+# brand turned on (empty means the default set). Its ``roadmap`` is dated
+# phases, each with a weekly cadence per channel and milestones;
+# ``POST_CHANNELS`` are the channels the weekly Plan gives slots to (email /
+# whatsapp sends stay in the Blueprint). ``SETUP_KEYS`` are the "Set up"
+# checklist rows in order.
 
 from __future__ import annotations
 
