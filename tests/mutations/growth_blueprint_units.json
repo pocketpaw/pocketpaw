@@ -151,5 +151,23 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint_units.py"
     ]
+  },
+  {
+    "label": "units: a play on a branch turned off still acts for the agents",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        or q.branch in on\n",
+    "replace": "        or True\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
+  },
+  {
+    "label": "units: empty growth_branches pause every play instead of the default set",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        or play_catalog.DEFAULT_BRANCHES\n",
+    "replace": "        or ()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_units.py"
+    ]
   }
 ]

@@ -20,6 +20,9 @@
 # units back into the legacy ``GrowthBlueprint`` fields (``_to_legacy``): it is None
 # unless brand AND strategy are approved, ``version`` is the strategy unit's, and
 # each channel's cadence is the sum over its active (core / testing) acting plays.
+# A play whose catalog branch the brand turned off (``growth_branches``, empty means
+# ``play_catalog.DEFAULT_BRANCHES``) is paused: ``approved_for`` leaves it out, while
+# the UI reads (``get``, ``units``, ``diff``) still show it.
 # The whole-page routes (``get``, ``seed``, ``save_draft``, ``regenerate``,
 # ``approve``, ``diff``) are wrappers over the units: a save splits the sections
 # sent into drafts of the units they change (``_apply_legacy``), approve approves
@@ -638,12 +641,26 @@ async def get(ctx: RequestContext, profile_id: str | None = None) -> BlueprintSt
 
 async def approved_for(workspace_id: str, profile_id: str) -> GrowthBlueprint | None:
     """The approved Blueprint the drafting agents follow, stitched from the approved
-    units; None unless ``brand`` and ``strategy`` are both approved. A brand not yet
-    migrated reads its legacy approved row. Never falls back to another profile."""
+    units; None unless ``brand`` and ``strategy`` are both approved. A play whose
+    catalog branch the brand turned off is paused: left out here (no cadence, not
+    acting) while the UI reads still show it. A brand not yet migrated reads its
+    legacy approved row. Never falls back to another profile."""
+    from pocketpaw_ee.cloud.growth.social import service as social_service
+
     if not await _has_strategy(workspace_id, profile_id):
         doc = await _legacy_find(workspace_id, profile_id, "approved")
         return _to_domain(doc) if doc is not None else None
-    rows = await _rows(workspace_id, profile_id)
+    on = set(
+        await social_service.growth_branches(workspace_id, profile_id)
+        or play_catalog.DEFAULT_BRANCHES
+    )
+    rows = {
+        unit: r
+        for unit, r in (await _rows(workspace_id, profile_id)).items()
+        if not unit.startswith(_PLAY)
+        or (q := play_catalog.play(unit[len(_PLAY) :])) is None
+        or q.branch in on
+    }
     return _compose(workspace_id, profile_id, rows, "approved")
 
 

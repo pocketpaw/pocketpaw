@@ -10370,7 +10370,9 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 play catalog (`strategy`, `content`, `outbound`, `paid`, `pr`, `partnerships`,
 `growth-loops`, `results`, `settings`). `[]` means the default set (strategy,
 content, outbound, results, settings). `PUT /profile` takes it; an unknown id is a
-422, duplicates are dropped in order, and `null` resets it to `[]`.
+422, duplicates are dropped in order, and `null` resets it to `[]`. A branch that
+is off pauses its plays: the approved Blueprint the drafting agents follow leaves
+them out (no cadence, nothing acts), while the Blueprint pages still show them.
 
 `active`, `weekly_post_quota` and `github_repos` are the product registry the
 daily drafting job reads: a profile drafts only while `active` is `true`

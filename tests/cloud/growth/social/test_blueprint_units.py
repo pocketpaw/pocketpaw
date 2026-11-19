@@ -12,8 +12,11 @@
 # AND strategy are approved, derives channels from active acting plays only, and
 # reads a migrated legacy row exactly as the legacy row read; the whole-page routes
 # round-trip through the units; the field-level unit diff; ``growth_branches`` on
-# the profile; non-zero cadences no play carries (422 on the whole-page save,
-# ``dropped`` in a migration report); the migration script (dry run writes nothing,
+# the profile, and a play on a branch the brand turned off is left out of
+# ``approved_for`` (empty means the default set; no leak across brands or
+# workspaces) while the UI reads still show it; non-zero cadences no play carries
+# (422 on the whole-page save, ``dropped`` in a migration report); the migration
+# script (dry run writes nothing,
 # real run, idempotent, count check over every mapped unit), a migration that dies
 # part way (legacy still read, the next run resumes) and the legacy fallback read
 # plus migrate-on-write.
@@ -686,3 +689,79 @@ async def test_another_workspace_profile_or_role_cannot_discard(w1, mongo_db):
     async with await _client("w1", role="member") as member:
         await _drop(member, pid, "play:x-organic", 0, status=403)
     assert await _chain(pid, "play:x-organic") == {1: "draft"}
+
+
+# --- a branch that is off pauses its plays -------------------------------------------------
+
+
+async def _branches(client, pid: str, branches: list[str]) -> None:
+    resp = await client.put(PROFILE, params={"profile_id": pid}, json={"growth_branches": branches})
+    assert resp.status_code == 200, resp.text
+
+
+def _cadence(bp) -> list[tuple[str, int, int]]:
+    return [(c.channel, c.posts_per_week, c.sends_per_week) for c in bp.channels]
+
+
+async def _x_and_email(client, pid: str) -> None:
+    await _approved_core(client, pid)
+    for unit, body in (
+        ("play:x-organic", {"status": "core", "posts_per_week": 3}),  # content
+        ("play:cold-email", {"status": "core", "sends_per_week": 40}),  # outbound
+    ):
+        await _put(client, pid, unit, body, 0)
+        await _ok(client, pid, unit)
+
+
+async def test_a_branch_turned_off_pauses_its_plays_for_the_agents(w1):
+    """Mutation: drop the branch filter in ``approved_for`` and email cadence comes back."""
+    pid = await _profile()
+    await _x_and_email(w1, pid)
+    both = [("x", 3, 0), ("email", 0, 40)]
+    assert _cadence(await social_blueprint.approved_for("w1", pid)) == both
+
+    await _branches(w1, pid, ["strategy", "content"])
+    bp = await social_blueprint.approved_for("w1", pid)
+    assert _cadence(bp) == [("x", 3, 0)]
+    assert "cold-email" not in bp.plays and "play:cold-email" not in bp.unit_versions
+    # The UI's reads still show the paused play as approved.
+    units = (await w1.get(UNITS, params={"profile_id": pid})).json()["units"]
+    assert any(u["unit"] == "play:cold-email" and u["approved"] for u in units)
+    page = (await w1.get(BP, params={"profile_id": pid})).json()["approved"]
+    assert {c["channel"] for c in page["channels"]} == {"x", "email"}
+
+    await _branches(w1, pid, ["content", "outbound"])  # back on: acts again
+    assert _cadence(await social_blueprint.approved_for("w1", pid)) == both
+
+
+async def test_empty_branches_mean_the_default_set(w1):
+    """Mutation: swap the empty-list default for no branches and every play pauses."""
+    pid = await _profile()
+    await _x_and_email(w1, pid)
+    await _branches(w1, pid, ["content"])
+    await _branches(w1, pid, [])
+    assert _cadence(await social_blueprint.approved_for("w1", pid)) == [
+        ("x", 3, 0),
+        ("email", 0, 40),
+    ]
+
+
+async def test_another_brand_branches_do_not_leak(w1):
+    a = await _profile()
+    b = await _profile()
+    await _x_and_email(w1, a)
+    await _x_and_email(w1, b)
+    await _branches(w1, b, ["content"])
+    assert _cadence(await social_blueprint.approved_for("w1", a)) == [("x", 3, 0), ("email", 0, 40)]
+    assert _cadence(await social_blueprint.approved_for("w1", b)) == [("x", 3, 0)]
+    # Rows forged under b's id in another workspace never read b's branches: the
+    # profile lookup is tenant-filtered, so w2 falls back to the default set.
+    for unit, body in (
+        ("brand", {}),
+        ("strategy", {}),
+        ("play:cold-email", {"status": "core", "sends_per_week": 9}),
+    ):
+        await UnitDoc(
+            workspace="w2", profile_id=b, unit=unit, version=1, status="approved", body=body
+        ).insert()
+    assert _cadence(await social_blueprint.approved_for("w2", b)) == [("email", 0, 9)]
