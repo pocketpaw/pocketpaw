@@ -8,8 +8,8 @@
 # ``name`` and ``company`` default to ``""`` (NOT YET KNOWN: a prospect may be
 # just a domain until research fills the rest in). ``project_id`` is the client
 # container (``cloud/projects``) and ``profile_id`` the brand (a Growth › Social
-# ``SocialProfile``) the row belongs to; both nullable, both indexed with the
-# workspace in front. Provenance for a row nobody typed: ``icp_id`` (the
+# ``SocialProfile``) the row belongs to (null only on legacy rows); both are
+# indexed with the workspace in front. Provenance for a row nobody typed: ``icp_id`` (the
 # standing profile that found it) and ``source_urls`` (the pages the research
 # read). ``research`` holds the structured profile from the last research run
 # (validated by ``growth.dto.ProspectResearch``) and ``researched_at`` when it
@@ -45,8 +45,9 @@ class Prospect(TimestampedDocument):
     # the service before it is written.
     project_id: str | None = None
     # The brand (Growth › Social ``SocialProfile`` id) this prospect is worked
-    # under, or None on a row from before brands. Validated against the
-    # workspace by the service before it is written.
+    # under.
+    # Writes always set it (``growth.service.resolve_brand``); the type stays
+    # optional so legacy null rows still load. The backfill script fixes those.
     profile_id: str | None = None
     tier: str = "unqualified"  # a | b | c | unqualified
     research_brief: str = ""

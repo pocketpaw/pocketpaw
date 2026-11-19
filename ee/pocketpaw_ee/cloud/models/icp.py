@@ -13,7 +13,7 @@
 # identity), two ICPs in one workspace may legitimately share a name: an agency
 # running "dental clinics" for two different clients holds two of them, scoped
 # by ``project_id``. ``profile_id`` is the brand (a Growth › Social
-# ``SocialProfile``) the hunt runs for, nullable for rows from before brands.
+# ``SocialProfile``) the hunt runs for, null only on legacy rows.
 # The (workspace, status, cadence) index is what the
 # discovery cron actually queries — the due-ICP scan — so that is the one that
 # earns its keep.
@@ -40,7 +40,9 @@ class Icp(TimestampedDocument):
     # workspace that doesn't use projects. Validated against the workspace by
     # the service before it is written.
     project_id: str | None = None
-    # The brand (``SocialProfile`` id) this hunt belongs to, or None.
+    # The brand (``SocialProfile`` id) this hunt belongs to.
+    # Writes always set it (``growth.service.resolve_brand``); the type stays
+    # optional so legacy null rows still load. The backfill script fixes those.
     profile_id: str | None = None
     # Hard constraints the research applies rather than weighs.
     geography: str = ""

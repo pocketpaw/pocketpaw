@@ -430,6 +430,36 @@ async def list_profiles(ctx: RequestContext) -> SocialProfileListResponse:
     )
 
 
+async def oldest_profile_id(workspace_id: str) -> str | None:
+    """System seam: the workspace's default brand for outreach rows, its OLDEST
+    unarchived profile (``createdAt``, ties on ``_id``), or None when it has none."""
+    docs = (
+        await _ProfileDoc.find({"workspace": workspace_id, "archived_at": None})
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(1)
+        .to_list()
+    )
+    return str(docs[0].id) if docs else None
+
+
+async def create_default_profile(workspace_id: str) -> str:
+    """System seam: a new brand named after the workspace (``active`` stays off, so
+    nothing starts drafting posts). Used only when the workspace has no brand."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — a non-ObjectId workspace key has no doc
+        ws = None
+    doc = _ProfileDoc(
+        workspace=workspace_id,
+        company_name=ws.name if ws is not None and ws.name else workspace_id,
+    )
+    await doc.insert()
+    # no-event: Growth › Social has no realtime subscriber; the profile list re-fetches.
+    return str(doc.id)
+
+
 async def create_profile(ctx: RequestContext) -> SocialProfileResponse:
     """Start a new, empty profile; the setup wizard fills it in."""
     doc = _ProfileDoc(workspace=_require_workspace(ctx))

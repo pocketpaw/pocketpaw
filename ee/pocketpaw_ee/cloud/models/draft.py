@@ -1,7 +1,7 @@
 # ee/pocketpaw_ee/cloud/models/draft.py — per-channel outreach draft for the
 # /growth surface. Workspace-scoped, attached to a ``growth_prospects`` row by
 # ``prospect_id``, and to a brand (Growth › Social ``SocialProfile``) by the
-# nullable ``profile_id`` (inherited from the prospect when not given). Status
+# ``profile_id`` (inherited from the prospect when not given). Status
 # lifecycle (draft→proposed→approved→sent, sent→replied, non-terminal→rejected)
 # is enforced in ``ee.cloud.growth.service`` — the only module allowed to
 # import this doc class (import-linter "Growth" contract). Instinct-gated
@@ -23,7 +23,9 @@ class Draft(TimestampedDocument):
     workspace: Indexed(str)  # type: ignore[valid-type]
     # The growth_prospects row this copy targets (stringified ObjectId).
     prospect_id: str
-    # The brand this copy is written under, or None on a pre-brand row.
+    # The brand this copy is written under.
+    # Writes always set it (``growth.service.resolve_brand``); the type stays
+    # optional so legacy null rows still load. The backfill script fixes those.
     profile_id: str | None = None
     channel: str  # email | linkedin | whatsapp (validated at the DTO boundary)
     subject: str | None = None  # email only
