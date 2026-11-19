@@ -887,8 +887,8 @@
   {
     "label": "blueprint: a Blueprint pillar name reaches the prompt unfenced",
     "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
-    "find": "f\"- {fence(p.name)} ({p.weight})\"",
-    "replace": "f\"- {p.name} ({p.weight})\"",
+    "find": "f\"- {fence(p.name)} ({weight})\"",
+    "replace": "f\"- {p.name} ({weight})\"",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]

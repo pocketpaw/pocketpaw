@@ -42,9 +42,11 @@
 #
 # Numbers are never model-written: pillar weights are owner-entered or an equal
 # split computed here, cadences come from the profile or the owner, goals are
-# owner-entered only. ``seed`` and ``regenerate`` text must pass
-# ``ideas.check_texts`` (no em or en dash, no number the owner did not type); a
-# first two-phase roadmap is seeded when there is none. Writes to an existing row
+# owner-entered only. A pillar's ``kind`` (audience or product) is owner-set too;
+# regenerate keeps it, like the weight, for a pillar whose name survives. ``seed``
+# and ``regenerate`` text must pass ``ideas.check_texts`` (no em or en dash, no
+# number the owner did not type); a first two-phase roadmap is seeded when there
+# is none. Writes to an existing row
 # are conditional on its status; approve marks a draft approved before superseding
 # the rest, so a crash leaves two approved (the highest version wins on read),
 # never zero; the unique version index stops two writers forking a version.
@@ -59,7 +61,7 @@ import inspect
 import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, get_args
 
 from pydantic import ValidationError as PydanticValidationError
 from pymongo.errors import DuplicateKeyError
@@ -97,6 +99,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     BlueprintRoadmap,
     BlueprintVoice,
     GrowthBlueprint,
+    PillarKind,
     RoadmapCadence,
     RoadmapMilestone,
     RoadmapPhase,
@@ -146,6 +149,10 @@ def _strs(value: Any) -> tuple[str, ...]:
 
 def _int(value: Any) -> int:
     return int(value) if isinstance(value, int | float) else 0
+
+
+def _pillar_kind(value: Any) -> PillarKind | None:
+    return value if value in get_args(PillarKind) else None
 
 
 def _dicts(value: Any) -> list[dict]:
@@ -205,7 +212,10 @@ def _domain(sections: dict[str, Any], **meta: Any) -> GrowthBlueprint:
         voice=BlueprintVoice(tone=_str(voice.get("tone")), avoid=_strs(voice.get("avoid"))),
         pillars=tuple(
             BlueprintPillar(
-                name=_str(p.get("name")), weight=_int(p.get("weight")), hooks=_strs(p.get("hooks"))
+                name=_str(p.get("name")),
+                weight=_int(p.get("weight")),
+                hooks=_strs(p.get("hooks")),
+                kind=_pillar_kind(p.get("kind")),
             )
             for p in _dicts(sections.get("pillars"))
         ),
@@ -264,7 +274,7 @@ def _to_response(bp: GrowthBlueprint) -> GrowthBlueprintResponse:
         ),
         voice=BlueprintVoiceModel(tone=bp.voice.tone, avoid=list(bp.voice.avoid)),
         pillars=[
-            BlueprintPillarModel(name=p.name, weight=p.weight, hooks=list(p.hooks))
+            BlueprintPillarModel(name=p.name, weight=p.weight, hooks=list(p.hooks), kind=p.kind)
             for p in bp.pillars
         ],
         channels=[
@@ -900,7 +910,11 @@ def _regenerated(base: dict[str, Any], a: SocialAnalysis, source: str) -> dict[s
     if names:
         old = _dicts(base.get("pillars"))
         weights = {_str(p.get("name")).lower(): _int(p.get("weight")) for p in old} if old else None
+        kinds = {_str(p.get("name")).lower(): _pillar_kind(p.get("kind")) for p in old}
         pillars = _pillars(names, items(a.hooks), weights)
+        for p in pillars:
+            if kind := kinds.get(p["name"].lower()):
+                p["kind"] = kind
         if not any(p["hooks"] for p in pillars):
             old_hooks = {_str(p.get("name")).lower(): list(_strs(p.get("hooks"))) for p in old}
             for p in pillars:

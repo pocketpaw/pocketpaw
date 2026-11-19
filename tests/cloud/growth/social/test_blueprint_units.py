@@ -19,7 +19,8 @@
 # script (dry run writes nothing,
 # real run, idempotent, count check over every mapped unit), a migration that dies
 # part way (legacy still read, the next run resumes) and the legacy fallback read
-# plus migrate-on-write.
+# plus migrate-on-write; a pillar kind round-trips through the units and
+# ``approved_for`` (an unset kind stays absent, an unknown one is 422).
 
 from __future__ import annotations
 
@@ -293,6 +294,33 @@ async def test_approved_for_needs_brand_and_strategy_and_sums_active_acting_play
         "cold-email",
         "seo-articles",
     }
+
+
+async def test_a_pillar_kind_round_trips_through_the_units_and_approved_for(w1):
+    pid = await _profile()
+    pillars = [
+        {"name": "Founder stories", "weight": 60, "hooks": [], "kind": "audience"},
+        {"name": "Feature tour", "weight": 30, "hooks": [], "kind": "product"},
+        {"name": "Misc", "weight": 10, "hooks": []},
+    ]
+    await _put(w1, pid, "brand", {"who_we_are": {"summary": "Acme"}}, 0)
+    await _put(w1, pid, "strategy", {**_STRATEGY, "content_pillars": pillars}, 0)
+    await _ok(w1, pid, "brand")
+    await _ok(w1, pid, "strategy")
+    bad = [{"name": "x", "kind": "meme"}]
+    err = await _put(w1, pid, "strategy", {"content_pillars": bad}, 1, status=422)
+    locs = [e["loc"] for e in err["error"]["details"]["errors"]]
+    assert locs == [["content_pillars", "0", "kind"]]
+
+    units = (await w1.get(UNITS, params={"profile_id": pid})).json()["units"]
+    strategy = next(u for u in units if u["unit"] == "strategy")
+    assert strategy["approved"]["body"]["content_pillars"] == pillars  # no kind stays absent
+    bp = await social_blueprint.approved_for("w1", pid)
+    assert [(p.name, p.kind) for p in bp.pillars] == [
+        ("Founder stories", "audience"),
+        ("Feature tour", "product"),
+        ("Misc", None),
+    ]
 
 
 _LEGACY = {

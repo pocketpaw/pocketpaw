@@ -10813,7 +10813,7 @@ dropped.
   "identity": {"summary": "…", "product": "…", "problem": "…"},
   "audience": {"segments": ["…"], "icp_sentences": ["…"]},
   "voice": {"tone": "…", "avoid": ["…"]},
-  "pillars": [{"name": "Speed", "weight": 34, "hooks": ["…"]}],
+  "pillars": [{"name": "Speed", "weight": 34, "hooks": ["…"], "kind": "audience"}],
   "channels": [{"channel": "x", "posts_per_week": 5, "sends_per_week": 0}],
   "goals": [{"id": "a1b2…", "metric": "signups", "target": 40, "channel": "x"}],
   "roadmap": {"phases": [{
@@ -10835,6 +10835,10 @@ dropped.
 - `channel` is one of `x`, `reddit`, `email`, `whatsapp`, `linkedin`. A pillar
   `weight` is 0..100, `posts_per_week` 0..50, `sends_per_week` 0..5000, a goal
   `target` at least 0. Pillar names, channels and goal ids are unique in a version.
+- A pillar's optional `kind` is `audience` (a topic the audience already watches or
+  reads for its own sake) or `product`. It is left out when unset, and anything else
+  is a 422. The drafting agents see each pillar's kind, and when any pillar has
+  one they are told to lean on the audience pillars and use product pillars sparingly.
 - A roadmap phase runs `start` to `end` (inclusive days, `start` <= `end`); each
   milestone `date` falls inside its phase, `status` is `planned`, `doing` or
   `done`, and `link` is an http(s) URL or null. A phase `cadence` names each
@@ -10868,7 +10872,8 @@ dropped.
   built on the current drafts (or the approved), superseding their old drafts.
   Numbers are never generated: channels, goals, the roadmap and learning ids are
   copied over (when the base roadmap is empty, the first roadmap is seeded as in
-  `seed`), a pillar keeps its weight by name, and a newly named pillar gets 0.
+  `seed`), a pillar keeps its weight and kind by name, and a newly named pillar gets 0
+  and no kind.
   Text with an em or en dash, or a number the owner never typed, is dropped (a
   field keeps its previous value). `503 social.analyzer_unavailable` with no
   analyser, `404` before seeding, `422` with neither website nor description,
@@ -10930,7 +10935,7 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   not_for, triggers, icp_sentences}, pricing_notes, launch_plan}`, `goals
   {business_goal, objectives [{id, metric, baseline, target, deadline, channel}]}`,
   `choices {guiding_policy, growth_engine, core_play, tests, not_doing}`,
-  `content_pillars [{name, weight, hooks}]`, `learning_ids`.
+  `content_pillars [{name, weight, hooks, kind?}]`, `learning_ids`.
   `plan`: `roadmap` (as above), `budget {money_per_month, hours_per_week}`.
   `play:<id>`: `status` (`core`, `testing` default, `parked`), `role`, `goal_id`,
   `audience`, `formats`, `pillar_mix [{pillar, weight}]`, `posts_per_week` 0..50,

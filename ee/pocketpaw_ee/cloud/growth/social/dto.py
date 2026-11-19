@@ -34,7 +34,8 @@
 # (``RenameProfileRequest``) needs a trimmed, non-empty name of at most 120
 # characters, the same cap as ``company_name``. A blueprint draft save replaces
 # only the sections sent and refuses status, version and approval keys; pillar
-# names, channels and goal ids are unique within the draft. A roadmap phase runs
+# names, channels and goal ids are unique within the draft, and a pillar's
+# optional ``kind`` is left out of a dump when unset. A roadmap phase runs
 # ``start`` <= ``end`` (inclusive days), its milestones fall inside it, its cadence
 # names each channel once at 0..21 posts a week, and a milestone link is http(s).
 # Phase and milestone ids are unique across the roadmap (the service mints a
@@ -88,6 +89,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     LearningStatus,
     MilestoneStatus,
     MonthlyRevenue,
+    PillarKind,
     Platform,
     ReplyStatus,
     SetupKey,
@@ -983,6 +985,9 @@ class BlueprintPillarModel(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     weight: int = Field(default=0, ge=0, le=100)
     hooks: _BlueprintItems = Field(default_factory=list)
+    # Left out of a dump when unset, so a pillar without a kind stores and
+    # diffs exactly as it did before kinds existed.
+    kind: PillarKind | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class BlueprintChannelModel(BaseModel):
