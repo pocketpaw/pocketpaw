@@ -2,9 +2,12 @@
 # drafts) belonging to a brand (a Growth › Social ``SocialProfile``).
 #
 # Covers: the optional ``profile_id`` filter on every outreach list / queue
-# route, with the absent param returning every row as before; creates storing
-# the brand (drafts inheriting their prospect's); a foreign brand refused on
-# create; the set-only upsert; the mapper round-trip; and the
+# route, an absent or blank param returning every row (legacy null-brand rows
+# included, and they still load); every create stamping a brand (named and
+# validated, else inherited by a draft from its prospect, else the workspace's
+# oldest brand, else a new one named after the workspace), on the router and
+# the system seams (discovery, follow-ups); a foreign brand refused on create;
+# the set-only upsert; the mapper round-trip; and the
 # ``scripts/backfill_growth_profile_id.py`` backfill (dry-run writes nothing,
 # oldest brand wins, a brand is created when none exists, idempotent, never
 # crosses workspaces, never touches a branded row). Reuses the
@@ -50,25 +53,23 @@ async def _brand(workspace: str, name: str, created_at: datetime | None = None) 
 
 
 async def _seed_branded(client: AsyncClient) -> dict[str, Any]:
-    """Two brands in w1 plus a pre-brand row of every kind; drafts are moved to
-    ``proposed`` so they show in the queues."""
+    """Two brands in w1, a row of every kind under each, plus a legacy row of
+    every kind with no ``profile_id`` key (the API can no longer write one);
+    drafts are moved to ``proposed`` so they show in the queues."""
     a = await _brand("w1", "Brand A")
     b = await _brand("w1", "Brand B")
     ids: dict[str, Any] = {"a": a, "b": b}
-    for key, profile in (("a", a), ("b", b), ("none", None)):
+    for key, profile in (("a", a), ("b", b)):
         body = _payload(
             domain=f"{key}.io",
             emails=[f"x@{key}.io"],
             linkedin_url=f"https://linkedin.com/in/{key}",
+            profile_id=profile,
         )
-        if profile:
-            body["profile_id"] = profile
         resp = await client.post(f"{API}/prospects", json=body)
         assert resp.status_code == 200, resp.text
         pid = resp.json()["id"]
-        icp = {"name": f"icp {key}", "criteria": "dentists"}
-        if profile:
-            icp["profile_id"] = profile
+        icp = {"name": f"icp {key}", "criteria": "dentists", "profile_id": profile}
         assert (await client.post(f"{API}/icps", json=icp)).status_code == 200
         for channel in ("email", "linkedin"):
             draft = {"channel": channel, "body": f"hi {key}"}
@@ -76,6 +77,7 @@ async def _seed_branded(client: AsyncClient) -> dict[str, Any]:
                 draft["subject"] = "hello"
             resp = await client.post(f"{API}/prospects/{pid}/drafts", json=draft)
             assert resp.status_code == 200, resp.text
+    await _legacy_rows("w1", domain="none.io")
     await DraftDoc.get_pymongo_collection().update_many({}, {"$set": {"status": "proposed"}})
     return ids
 
@@ -109,21 +111,13 @@ async def test_profile_filter_scopes_every_list_route(w1, route):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", LIST_ROUTES)
-async def test_absent_profile_param_returns_every_row(w1, route):
+@pytest.mark.parametrize("param", [{}, {"profile_id": ""}], ids=["absent", "blank"])
+async def test_absent_or_blank_profile_param_returns_every_row(w1, route, param):
     ids = await _seed_branded(w1)
-    resp = await w1.get(f"{API}{route}")
+    resp = await w1.get(f"{API}{route}", params=param)
     assert resp.status_code == 200, resp.text
+    # The legacy null-brand rows load and list alongside the branded ones.
     assert set(_brands_of(route, resp.json())) == {ids["a"], ids["b"], None}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("route", LIST_ROUTES)
-async def test_empty_profile_param_selects_unbranded_rows(w1, route):
-    await _seed_branded(w1)
-    resp = await w1.get(f"{API}{route}", params={"profile_id": ""})
-    assert resp.status_code == 200, resp.text
-    brands = _brands_of(route, resp.json())
-    assert brands and set(brands) == {None}
 
 
 @pytest.mark.asyncio
@@ -220,15 +214,80 @@ async def test_another_workspaces_brand_is_refused_on_create(w1):
 
 
 @pytest.mark.asyncio
-async def test_a_blank_brand_is_stored_as_no_brand(w1):
-    p = (await w1.post(f"{API}/prospects", json=_payload(profile_id=""))).json()
-    icp = (
-        await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": " "})
+async def test_a_blank_brand_gets_the_default_brand(w1):
+    brand = await _brand("w1", "Only")
+    p = await w1.post(f"{API}/prospects", json=_payload(profile_id=""))
+    icp = await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c", "profile_id": " "})
+    assert p.status_code == icp.status_code == 200, (p.text, icp.text)
+    assert (await ProspectDoc.get(PydanticObjectId(p.json()["id"]))).profile_id == brand
+    assert (await IcpDoc.get(PydanticObjectId(icp.json()["id"]))).profile_id == brand
+
+
+@pytest.mark.asyncio
+async def test_a_create_with_no_brand_takes_the_oldest_brand(w1):
+    now = datetime.now(UTC)
+    await _brand("w2", "Theirs", now - timedelta(days=30))  # never another workspace's
+    await _brand("w1", "Newer", now - timedelta(days=1))
+    oldest = await _brand("w1", "Older", now - timedelta(days=10))  # inserted last
+    archived = SocialProfile(workspace="w1", company_name="Archived")
+    archived.createdAt = now - timedelta(days=99)
+    archived.archived_at = now
+    await archived.insert()
+
+    p = (await w1.post(f"{API}/prospects", json=_payload())).json()
+    icp = (await w1.post(f"{API}/icps", json={"name": "n", "criteria": "c"})).json()
+    d = (
+        await w1.post(
+            f"{API}/prospects/{p['id']}/drafts", json={"channel": "linkedin", "body": "x"}
+        )
     ).json()
-    assert (await ProspectDoc.get(PydanticObjectId(p["id"]))).profile_id is None
-    assert (await IcpDoc.get(PydanticObjectId(icp["id"]))).profile_id is None
-    listed = (await w1.get(f"{API}/prospects", params={"profile_id": ""})).json()["items"]
-    assert [r["id"] for r in listed] == [p["id"]]
+
+    assert p["profile_id"] == icp["profile_id"] == d["profile_id"] == oldest
+    for doc_cls, row_id in ((ProspectDoc, p["id"]), (IcpDoc, icp["id"]), (DraftDoc, d["id"])):
+        assert (await doc_cls.get(PydanticObjectId(row_id))).profile_id == oldest
+
+
+@pytest.mark.asyncio
+async def test_a_create_in_a_workspace_with_no_brand_creates_one(mongo_db):
+    ws = Workspace(name="Acme Labs", slug="acme-labs", owner="u1")
+    await ws.insert()
+    wid = str(ws.id)
+    async with AsyncClient(
+        transport=ASGITransport(app=_build_app(workspace_id=wid)), base_url="http://t"
+    ) as client:
+        p = (await client.post(f"{API}/prospects", json=_payload())).json()
+        icp = (await client.post(f"{API}/icps", json={"name": "n", "criteria": "c"})).json()
+
+    (profile,) = await SocialProfile.find({"workspace": wid}).to_list()
+    assert profile.company_name == "Acme Labs" and profile.active is False
+    assert p["profile_id"] == icp["profile_id"] == str(profile.id)
+
+
+@pytest.mark.asyncio
+async def test_legacy_rows_get_the_default_brand_on_the_system_seams(w1):
+    """Discovery under a legacy (null-brand) hunt and a follow-up for a legacy
+    prospect both write their new rows under the workspace's default brand."""
+    from pocketpaw_ee.cloud.growth import service as growth_service
+    from pocketpaw_ee.cloud.growth.discovery import run_discovery
+    from pocketpaw_ee.cloud.growth.dto import CreateDraftRequest
+
+    from tests.cloud.growth.test_discovery import FakeResearch, _company
+
+    brand = await _brand("w1", "Default")
+    await _legacy_rows("w1")
+    icp = await IcpDoc.get_pymongo_collection().find_one({"workspace": "w1"})
+    prospect = await ProspectDoc.get_pymongo_collection().find_one({"workspace": "w1"})
+
+    await run_discovery("w1", str(icp["_id"]), FakeResearch(_company("found.io")))
+    found = await ProspectDoc.find_one({"workspace": "w1", "domain": "found.io"})
+    assert found is not None and found.profile_id == brand
+
+    draft = await growth_service.create_followup_draft(
+        "w1",
+        str(prospect["_id"]),
+        CreateDraftRequest(channel="linkedin", body="Following up", variant="follow_up"),
+    )
+    assert draft.profile_id == brand
 
 
 @pytest.mark.asyncio
@@ -326,17 +385,39 @@ def _script():
     return module
 
 
-async def _legacy_rows(workspace: str) -> None:
-    """Pre-brand rows as they really sit in Mongo: no ``profile_id`` key."""
-    await ProspectDoc.get_pymongo_collection().insert_one(
-        {"workspace": workspace, "domain": f"{workspace}.io", "source": "manual"}
-    )
+async def _legacy_rows(workspace: str, domain: str | None = None) -> None:
+    """Pre-brand rows as they really sit in Mongo: no ``profile_id`` key. With a
+    ``domain``, the prospect is reachable on email and LinkedIn and owns one draft
+    per channel (so it shows in the queues); without, the draft's prospect is a
+    dangling ref, as the backfill tests want."""
+    prospect: dict[str, Any] = {
+        "workspace": workspace,
+        "domain": domain or f"{workspace}.io",
+        "source": "manual",
+        "tier": "unqualified",
+        "status": "new",
+    }
+    if domain:
+        prospect["emails"] = [f"x@{domain}"]
+        prospect["linkedin_url"] = f"https://linkedin.com/in/{domain.split('.')[0]}"
+    pid = (await ProspectDoc.get_pymongo_collection().insert_one(prospect)).inserted_id
     await IcpDoc.get_pymongo_collection().insert_one(
         {"workspace": workspace, "name": "n", "criteria": "c"}
     )
-    await DraftDoc.get_pymongo_collection().insert_one(
-        {"workspace": workspace, "prospect_id": "p", "channel": "email", "body": "b"}
+    drafts = (
+        [{"channel": "email", "subject": "hello"}, {"channel": "linkedin"}]
+        if domain
+        else [{"channel": "email"}]
     )
+    for extra in drafts:
+        await DraftDoc.get_pymongo_collection().insert_one(
+            {
+                "workspace": workspace,
+                "prospect_id": str(pid) if domain else "p",
+                "body": "b",
+                **extra,
+            }
+        )
 
 
 async def _brands_in(workspace: str) -> set[Any]:

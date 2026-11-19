@@ -29,7 +29,7 @@
 # Seeded and regenerated text must pass ``ideas.check_texts`` (no em or en dash,
 # no number the owner did not type): a failing item is dropped; a failing field
 # seeds empty, or on regenerate keeps its previous value. Seed's ICP sentences are
-# the active ICPs of this brand plus the unbranded ones.
+# the active ICPs of this brand.
 #
 # Tenancy: every query and write filters on ``workspace`` and ``profile_id``; the
 # profile comes from ``social.service.require_profile`` (same NotFound as
@@ -377,13 +377,10 @@ def _pillars(
 
 
 async def _icp_sentences(ctx: RequestContext, profile_id: str) -> list[str]:
-    """Active ICPs of this brand, then the unbranded ones (``""`` selects profile_id None)."""
+    """Active ICPs of this brand (legacy unbranded ones get a brand from the backfill)."""
     from pocketpaw_ee.cloud.growth import service as growth_service
 
-    icps = [
-        *await growth_service.list_icps(ctx, profile_id=profile_id, status="active"),
-        *await growth_service.list_icps(ctx, profile_id="", status="active"),
-    ]
+    icps = await growth_service.list_icps(ctx, profile_id=profile_id, status="active")
     return _items([icp.criteria for icp in icps], MAX_ICP_SENTENCES)
 
 

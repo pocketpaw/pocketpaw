@@ -5,9 +5,10 @@
 #
 # Covers: a branded prospect's writer prompt carries the approved Blueprint
 # (fenced, never the newer draft) and every draft it makes carries
-# ``blueprint_version``; an unbranded prospect's prompt and drafts carry none; a
-# branded hunt's research request carries the brand's Blueprint and an unbranded
-# hunt gets none even when another brand in the workspace has one.
+# ``blueprint_version``; a legacy prospect with no brand drafts under the
+# workspace's default brand and its Blueprint; a branded hunt's research request
+# carries the brand's Blueprint, and a hunt whose brand has no approved Blueprint
+# gets none even when another brand in the workspace has one.
 
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from pocketpaw_ee.cloud.growth.writer import (
 )
 from pocketpaw_ee.cloud.models.draft import Draft as DraftDoc
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
+from pocketpaw_ee.cloud.models.prospect import Prospect as ProspectDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile
 
 from tests.cloud.growth.test_discovery import FakeResearch
@@ -112,15 +114,24 @@ async def test_branded_draft_follows_the_approved_blueprint_and_carries_its_vers
 
 
 @pytest.mark.asyncio
-async def test_unbranded_draft_has_no_blueprint(w1, writer):
-    await _blueprint(await _brand(), 2, "approved", "Other brand tone")
-    pid = await _prospect(w1)
+async def test_a_legacy_prospect_drafts_under_the_default_brands_blueprint(w1, writer):
+    brand = await _brand()
+    await _blueprint(brand, 2, "approved", "Default brand tone")
+    # A pre-brand row as it sits in Mongo: no profile_id key.
+    pid = str(
+        (
+            await ProspectDoc.get_pymongo_collection().insert_one(
+                {"workspace": "w1", "domain": "old.io", "source": "manual", "emails": ["a@old.io"]}
+            )
+        ).inserted_id
+    )
 
     resp = await w1.post(f"{API}/prospects/{pid}/draft", json={"channels": ["email"]})
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["drafts"][0]["blueprint_version"] is None
-    assert "<blueprint>" not in writer.prompts[-1]
+    (draft,) = resp.json()["drafts"]
+    assert (draft["profile_id"], draft["blueprint_version"]) == (brand, 2)
+    assert "Tone: Default brand tone" in writer.prompts[-1]
 
 
 @pytest.mark.asyncio
@@ -163,8 +174,9 @@ async def test_branded_hunt_research_carries_the_brand_blueprint(w1):
 
 
 @pytest.mark.asyncio
-async def test_unbranded_hunt_gets_no_blueprint(w1):
-    await _blueprint(await _brand(), 4, "approved", "Calm")
+async def test_a_hunt_whose_brand_has_no_approved_blueprint_gets_none(w1):
+    await _brand("Oldest, no Blueprint")  # the default brand for a brandless hunt
+    await _blueprint(await _brand("Brand B"), 4, "approved", "Calm")
 
     request = await _hunt(w1)
 

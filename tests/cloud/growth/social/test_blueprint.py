@@ -114,7 +114,10 @@ async def _statuses(pid: str) -> dict[int, str]:
 
 async def test_seed_maps_every_section_and_is_idempotent(w1):
     pid = await _profile()
-    await IcpDoc(workspace="w1", name="a", criteria="  Studios   with 2 to 10 people ").insert()
+    await IcpDoc(
+        workspace="w1", name="a", criteria="  Studios   with 2 to 10 people ", profile_id=pid
+    ).insert()
+    await IcpDoc(workspace="w1", name="f", criteria="Legacy unbranded").insert()
     await IcpDoc(workspace="w1", name="d", criteria="This brand", profile_id=pid).insert()
     await IcpDoc(workspace="w1", name="e", criteria="Another brand", profile_id="other").insert()
     await IcpDoc(workspace="w1", name="b", criteria="Paused one", status="paused").insert()
