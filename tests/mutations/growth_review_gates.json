@@ -156,29 +156,40 @@
   {
     "label": "brand: a list route given profile_id ignores it and returns every brand",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
-    "find": "        filters[\"profile_id\"] = profile_id or None\n",
+    "find": "        filters[\"profile_id\"] = profile_id\n",
     "replace": "        pass\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
     "label": "brand: a draft with no brand of its own does not inherit its prospect's",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
-    "find": "    fields[\"profile_id\"] = body.profile_id or getattr(prospect, \"profile_id\", None)\n",
-    "replace": "    fields[\"profile_id\"] = body.profile_id\n",
-    "tests": "tests/cloud/growth/test_outreach_brand.py"
+    "find": "        body.profile_id or prospect.profile_id or await resolve_brand(workspace_id, None)\n",
+    "replace": "        body.profile_id or await resolve_brand(workspace_id, None)\n",
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_new_rows_store_the_brand"
   },
   {
     "label": "brand: a re-import that names no brand un-brands the row",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
-    "find": "    if body.profile_id:\n        doc.profile_id = body.profile_id\n",
+    "find": "    if body.profile_id and not doc.profile_id:\n        doc.profile_id = body.profile_id\n",
     "replace": "    doc.profile_id = body.profile_id\n",
-    "tests": "tests/cloud/growth/test_outreach_brand.py"
+    "tests": [
+      "tests/cloud/growth/test_outreach_brand.py"
+    ]
+  },
+  {
+    "label": "brand: an upsert naming another brand moves an existing prospect",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "    if body.profile_id and not doc.profile_id:\n",
+    "replace": "    if body.profile_id:\n",
+    "tests": [
+      "tests/cloud/growth/test_outreach_brand.py"
+    ]
   },
   {
     "label": "brand: another workspace's brand id is accepted on create",
     "file": "ee/pocketpaw_ee/cloud/growth/service.py",
     "find": "    await social_service.get_profile(ctx, profile_id)\n",
-    "replace": "    return\n",
+    "replace": "    pass\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
@@ -189,10 +200,10 @@
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
-    "label": "backfill: picks the first-inserted brand instead of the oldest-created one",
-    "file": "scripts/backfill_growth_profile_id.py",
-    "find": ".sort([(\"createdAt\", 1), (\"_id\", 1)])",
-    "replace": ".sort([(\"_id\", 1)])",
+    "label": "brand: the default brand is the first-inserted profile instead of the oldest-created one",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": ".sort([(\"createdAt\", 1), (\"_id\", 1)])\n        .limit(1)\n",
+    "replace": ".sort([(\"_id\", 1)])\n        .limit(1)\n",
     "tests": "tests/cloud/growth/test_outreach_brand.py::test_backfill_assigns_the_oldest_brand_per_workspace"
   },
   {
@@ -203,11 +214,11 @@
     "tests": "tests/cloud/growth/test_outreach_brand.py"
   },
   {
-    "label": "brand: a blank profile_id is stored as \"\" and escapes the unbranded filter and the backfill",
+    "label": "brand: a blank profile_id reaches the service as \"\" and 404s instead of taking the default brand",
     "file": "ee/pocketpaw_ee/cloud/growth/dto.py",
     "find": "    return v or None\n",
     "replace": "    return v\n",
-    "tests": "tests/cloud/growth/test_outreach_brand.py::test_a_blank_brand_is_stored_as_no_brand"
+    "tests": "tests/cloud/growth/test_outreach_brand.py::test_a_blank_brand_gets_the_default_brand"
   },
   {
     "label": "brand: discovery files prospects without the hunt's brand",

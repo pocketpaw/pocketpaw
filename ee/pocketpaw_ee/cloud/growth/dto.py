@@ -10,9 +10,10 @@
 # ``subject`` is email-only; ``UpdateDraftRequest`` has no ``status`` — the
 # lifecycle moves only through the status route and the Instinct gate.
 # ``project_id`` is three-valued on updates (None leave, id set, "" clear).
-# ``profile_id`` (the brand) is optional on prospect, ICP and draft creates
-# and echoed on their responses; the service checks it names a brand in the
-# caller's workspace.
+# ``profile_id`` (the brand) may be omitted on prospect, ICP and draft creates
+# (the live frontend omits it while no brand is loaded) and is echoed on their
+# responses; the service checks a named one against the caller's workspace and
+# fills an omitted one, so every new row has a brand.
 # ``ProspectResearch`` coerces loose agent output rather than rejecting it.
 # What the DTO cannot check (an observed vs guessed email, a project in the
 # caller's workspace) is enforced one layer up.
@@ -61,8 +62,8 @@ def _normalise_domain(v: str) -> str:
 
 
 def _brand_or_none(v: str | None) -> str | None:
-    """A blank brand id means "no brand", stored as None so the unbranded
-    filter and the backfill both find the row."""
+    """A blank brand id means "not named": None, so the service gives the row
+    its default brand instead of refusing ``""`` as an unknown id."""
     v = v.strip() if v is not None else None
     return v or None
 
@@ -92,7 +93,7 @@ class CreateProspectRequest(BaseModel):
     # DTO can only check the shape, since it has no tenancy context.
     project_id: str | None = None
     # The brand this prospect is worked under (a Growth › Social profile id).
-    # Shape only here; the service validates it against the workspace.
+    # Shape only here; the service validates it, or fills the default if omitted.
     profile_id: str | None = Field(default=None, max_length=64)
     tier: ProspectTier = "unqualified"
     research_brief: str = ""
@@ -451,7 +452,8 @@ class CreateIcpRequest(BaseModel):
     # caller's workspace (a project from another tenant is a 404) — the DTO has
     # no tenancy context, exactly like ``CreateProspectRequest``.
     project_id: str | None = None
-    # The brand this hunt runs for; validated by the service like project_id.
+    # The brand this hunt runs for; validated by the service like project_id,
+    # and the workspace default brand when omitted.
     profile_id: str | None = Field(default=None, max_length=64)
     geography: str = Field(default="", max_length=500)
     exclusions: str = Field(default="", max_length=2000)

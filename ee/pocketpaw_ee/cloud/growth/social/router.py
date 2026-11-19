@@ -229,10 +229,11 @@ async def generate_ideas(
 async def draft_daily(
     profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
 ) -> SocialIdeaListResponse:
-    """Draft today's X posts for this product now, within its weekly quota and two a day.
-    Drafts are stored as ``new`` with ``source="daily"``; nothing is posted. 503 with no
-    ideas writer, 409 before onboarding or while the product is inactive, 502 when the run
-    fails; an empty list once the quota is used."""
+    """Draft today's X posts for this product now, within the approved Blueprint's x
+    budget and two a day. Drafts are stored as ``new`` with ``source="daily"``; nothing is
+    posted. 503 with no ideas writer, 409 before onboarding or while the product is
+    inactive, 502 when the run fails; an empty list with no approved Blueprint or once the
+    budget is used."""
     return await social_service.draft_daily(ctx, profile_id)
 
 

@@ -39,10 +39,10 @@
 # hook type). Both default to None, which leaves the prompt as it was.
 #
 # ``blueprint`` is the brand's approved Blueprint (``analyst.blueprint_lines``,
-# fenced). When given, it replaces the strategy the prompt otherwise reads from
-# ``profile.analysis`` (summary through pillars, hooks and things to avoid); the
-# owner's typed description and the company facts stay. The service passes only an
-# approved one, never a draft.
+# fenced), the prompt's only source of strategy; the service passes only an
+# approved one, never a draft. The company facts and the owner's typed
+# description are always in; the website-scan ``profile.analysis`` never is
+# (only the media prompt below still reads it).
 
 from __future__ import annotations
 
@@ -175,28 +175,8 @@ def build_ideas_prompt(
     ):
         if value:
             lines.append(f"{label}: {fence(value)}")
-    # ponytail: fallback until GX-15 removes the old strategy fields
-    analysis = profile.analysis if blueprint is None else None
+    # The strategy comes from the approved Blueprint, never the website scan.
     lines += owner_lines(profile.description)
-    if analysis is not None:
-        for label, text in (
-            ("Summary", analysis.summary),
-            ("Product", analysis.product),
-            ("Audience", analysis.audience),
-            ("Problem", analysis.problem),
-            ("Tone", analysis.tone),
-        ):
-            if text:
-                lines.append(f"{label}: {fence(text)}")
-        for label, items in (
-            ("Benefits", analysis.benefits),
-            ("Differentiators", analysis.differentiators),
-            ("Content pillars", analysis.content_pillars),
-            ("Sample hooks", analysis.hooks),
-            ("Things to avoid", analysis.avoid),
-        ):
-            if items:
-                lines.append(f"{label}: " + "; ".join(fence(i) for i in items))
     lines.append("</company-profile>")
     if blueprint is not None:
         lines += blueprint_lines(blueprint)

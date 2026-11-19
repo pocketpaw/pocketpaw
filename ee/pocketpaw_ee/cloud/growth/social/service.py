@@ -18,11 +18,13 @@
 # "failed"`` for analysis, written with one atomic ``$set``). Ideas need a
 # completed onboarding. Ideas, the daily X drafts and reply cards read the brand's
 # approved Blueprint once per run (never a draft), hand it to the agent and stamp
-# ``blueprint_version`` on every row made; without one they read the profile.
+# ``blueprint_version`` on every row made. Without one, ideas and reply cards use
+# the owner's typed description (never the website-scan ``analysis``) and the
+# daily X drafts make nothing. ``weekly_post_quota`` stays on the wire, unused.
 #
 # Crons (cross-workspace reads, one failing profile never stops a sweep):
-# ``run_daily_drafts`` drafts X posts within the X budget (the Blueprint's x
-# channel, else ``weekly_post_quota``; 0 skips with a log) and two a day, built on
+# ``run_daily_drafts`` drafts X posts within the X budget (the approved
+# Blueprint's x channel; no Blueprint or 0 skips with a log) and two a day, built on
 # the last 24 h of GitHub changes and checked by ``ideas.check_draft`` with one
 # retry; ``run_reply_drafts`` drafts reply cards a person posts by hand from an
 # intent link; ``run_repo_metrics`` stores one RepoMetric per repo and day
@@ -430,6 +432,36 @@ async def list_profiles(ctx: RequestContext) -> SocialProfileListResponse:
     )
 
 
+async def oldest_profile_id(workspace_id: str) -> str | None:
+    """System seam: the workspace's default brand for outreach rows, its OLDEST
+    unarchived profile (``createdAt``, ties on ``_id``), or None when it has none."""
+    docs = (
+        await _ProfileDoc.find({"workspace": workspace_id, "archived_at": None})
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(1)
+        .to_list()
+    )
+    return str(docs[0].id) if docs else None
+
+
+async def create_default_profile(workspace_id: str) -> str:
+    """System seam: a new brand named after the workspace (``active`` stays off, so
+    nothing starts drafting posts). Used only when the workspace has no brand."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — a non-ObjectId workspace key has no doc
+        ws = None
+    doc = _ProfileDoc(
+        workspace=workspace_id,
+        company_name=ws.name if ws is not None and ws.name else workspace_id,
+    )
+    await doc.insert()
+    # no-event: Growth › Social has no realtime subscriber; the profile list re-fetches.
+    return str(doc.id)
+
+
 async def create_profile(ctx: RequestContext) -> SocialProfileResponse:
     """Start a new, empty profile; the setup wizard fills it in."""
     doc = _ProfileDoc(workspace=_require_workspace(ctx))
@@ -800,12 +832,11 @@ async def _gather_changes(repos: list[str], since: datetime) -> list[Change]:
         return []
 
 
-def _x_posts_per_week(weekly_post_quota: int, bp: GrowthBlueprint | None) -> int:
-    """The daily drafts' X budget: the approved Blueprint's x channel (0 when the
-    Blueprint plans no X), else the profile's quota."""
+def _x_posts_per_week(bp: GrowthBlueprint | None) -> int:
+    """The daily drafts' X budget: the approved Blueprint's x channel; 0 with no
+    approved Blueprint or one that plans no X."""
     if bp is None:
-        # ponytail: fallback until GX-15 removes the old strategy fields
-        return weekly_post_quota
+        return 0
     return next((c.posts_per_week for c in bp.channels if c.channel == "x"), 0)
 
 
@@ -820,10 +851,13 @@ async def _draft_daily(
     if ideas_fn is None or not doc.active or doc.onboarding_completed_at is None:
         return [], 0
     profile_key = str(doc.id)
-    # One read per run: the same version drives the quota, the prompt and the stamp.
+    # One read per run: the same version drives the budget, the prompt and the stamp.
     bp = await social_blueprint.approved_for(workspace_id, profile_key)
-    budget = _x_posts_per_week(doc.weekly_post_quota, bp)
-    if bp is not None and budget <= 0:
+    if bp is None:
+        logger.info("daily drafts: profile=%s skipped, no approved Blueprint", profile_key)
+        return [], 0
+    budget = _x_posts_per_week(bp)
+    if budget <= 0:
         logger.info(
             "daily drafts: profile=%s skipped, approved Blueprint v%d plans no X posts",
             profile_key,
@@ -852,8 +886,7 @@ async def _draft_daily(
     arm = await _next_arm(exp) if exp is not None else ""
     if exp is not None:
         extra["experiment_arm"] = (exp.variable, arm)
-    if bp is not None:
-        extra["blueprint"] = bp
+    extra["blueprint"] = bp
     kept: list[GeneratedIdea] = []
     reasons: list[str] = []
     dropped = 0
@@ -901,7 +934,7 @@ async def _draft_daily(
             status="new",
             source="daily",
             suggested_at=slot,
-            blueprint_version=bp.version if bp is not None else None,
+            blueprint_version=bp.version,
         )
         if exp is not None:  # stamp the arm the draft was written for
             setattr(idea_doc, exp.variable, arm)
@@ -914,9 +947,11 @@ async def _draft_daily(
 async def draft_daily_for_profile(
     workspace_id: str, profile_id: str, *, now: datetime | None = None
 ) -> list[SocialIdea]:
-    """Draft this profile's X posts for today, within its weekly quota and two a day.
+    """Draft this profile's X posts for today, within its approved Blueprint's weekly x
+    budget and two a day.
 
-    Skips (returns []) an inactive or not-yet-onboarded profile and one whose quota is used.
+    Skips (returns []) an inactive or not-yet-onboarded profile, one with no approved
+    Blueprint, and one whose budget is used.
     Drafts that break ``check_draft`` are dropped; one retry is asked for with the reasons.
     Every draft is stored as ``new``: nothing here posts."""
     docs, _ = await _draft_daily(workspace_id, profile_id, now or datetime.now(UTC))
@@ -1123,8 +1158,8 @@ async def metrics_summary(
 
 async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> SocialIdeaListResponse:
     """Run today's X drafting for one profile now. 503 with no ideas writer, 409 before
-    onboarding or while the profile is inactive, 502 when the run fails; an empty list when
-    the quota is used up."""
+    onboarding or while the profile is inactive, 502 when the run fails; an empty list with
+    no approved Blueprint or once its x budget is used up."""
     from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
     from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
 

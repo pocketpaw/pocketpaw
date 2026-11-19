@@ -17,8 +17,8 @@
 #
 # Brands: every outreach list / queue read (prospects, facets, ICPs, drafts,
 # the LinkedIn queue, ``/queue/{channel}``) takes an optional ``profile_id``
-# query param. Given, it filters to that brand (``""`` = rows with no brand);
-# omitted, the route returns every row exactly as before brands existed.
+# query param. Given, it filters to that brand; omitted or blank, the route
+# returns every row (legacy unbranded ones included).
 #
 # Invariants: the status route refuses the gate-owned targets ``approved`` /
 # ``sent`` (403 ``draft.gate_required``) — approval happens only in the
@@ -156,7 +156,7 @@ async def list_prospects(
     ``project_id`` scopes to one client's pipeline. Omitted means every
     project, which is the whole view for a workspace not using them; an empty
     string means the rows with no client assigned. ``profile_id`` scopes to
-    one brand the same way; omitted means every brand."""
+    one brand; omitted or blank means every brand."""
     return await growth_service.list_prospects(
         ctx,
         tier=tier,

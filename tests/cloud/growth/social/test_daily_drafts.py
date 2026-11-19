@@ -5,7 +5,8 @@
 # ``ChangesFn`` that record every call. No network, no model.
 #
 # Covers: X only, stored ``new`` / ``daily`` with a ``suggested_at`` slot; the
-# two-a-day and weekly quotas (manual ideas, old drafts and another workspace's
+# two-a-day and weekly budgets, the weekly one from the approved Blueprint's x
+# channel (manual ideas, old drafts and another workspace's
 # rows never count); inactive and not-onboarded profiles skipped by the sweep and
 # refused by the route; dash and invented-number drafts dropped with exactly one
 # retry carrying the reasons, a release version number kept; a failing profile or
@@ -92,6 +93,7 @@ class _FakeIdeas:
         pulse: list | None = None,
         changes: list[Change] | None = None,
         retry_note: str | None = None,
+        **_extra: Any,  # blueprint, learnings, experiment_arm
     ) -> tuple[GeneratedIdea, ...]:
         self.calls.append(
             {
@@ -148,9 +150,17 @@ async def _product(
     }
     resp = await client.put(PROFILE, params=params, json=body)
     assert resp.status_code == 200, resp.text
+    pid = resp.json()["id"]
     if complete:
         assert (await client.post(f"{PROFILE}/complete", params=params)).status_code == 200
-    return resp.json()["id"]
+        # Daily X drafts run only under an approved Blueprint; its x channel is the budget.
+        bp = {"profile_id": pid}
+        assert (await client.post(f"{BASE}/blueprint/seed", params=bp)).status_code == 200
+        x = [{"channel": "x", "posts_per_week": quota, "sends_per_week": 0}]
+        draft = await client.put(f"{BASE}/blueprint/draft", params=bp, json={"channels": x})
+        assert draft.status_code == 200, draft.text
+        assert (await client.post(f"{BASE}/blueprint/approve", params=bp)).status_code == 200
+    return pid
 
 
 async def _seed_daily(workspace: str, profile: str, created: datetime, source: str = "daily"):

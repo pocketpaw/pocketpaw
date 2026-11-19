@@ -16,10 +16,13 @@
 # machine. ``transition`` is the public enforcer and refuses the gate-owned
 # targets; ``gate_transition`` is the only way onto ``approved`` / ``sent``,
 # used by the executor, the delivery paths and LinkedIn mark-sent.
-# Brands: prospects, ICPs and drafts carry an optional ``profile_id`` (a
-# Growth › Social profile). Creates validate it against the workspace; a draft
-# without one inherits its prospect's. Every list / queue read takes an
-# optional ``profile_id`` filter (``_with_profile``); absent means every row.
+# Brands: every new prospect, ICP and draft is written under a brand
+# (``profile_id``, a Growth › Social profile) by ``resolve_brand``: a named one
+# must be in the workspace (404 otherwise); an unnamed draft inherits its
+# prospect's; anything else gets the workspace's oldest brand, created on first
+# use. Legacy rows may still hold null (the backfill script fixes them). Every
+# list / queue read takes an optional ``profile_id`` filter (``_with_profile``);
+# absent or blank means every row.
 # ``draft_prospect`` hands the writer the brand's approved Blueprint and stamps
 # its version on each draft (``blueprint_version``, server-set, never sent in).
 # ``propose_send`` / ``propose_send_batch`` file one gated Instinct proposal
@@ -248,21 +251,31 @@ async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> No
         raise NotFound("project", project_id)
 
 
-async def _ensure_profile_in_workspace(workspace_id: str, profile_id: str | None) -> None:
-    """404 unless ``profile_id`` (when given) names a brand in this workspace.
+async def resolve_brand(workspace_id: str, profile_id: str | None) -> str:
+    """The brand (a Growth › Social profile id) a new outreach row is written under.
 
-    Goes through the PUBLIC ``growth.social.service.get_profile`` seam (lazy
-    import, like the projects check) rather than the SocialProfile doc, which
-    only the social service may import. That seam takes a RequestContext, so a
-    workspace-only one is minted here: the check is tenancy, not RBAC, and the
-    system seams (``upsert_by_domain``) have no caller to borrow one from. Never
-    called with ``None``: ``get_profile(ctx, None)`` means "the latest
-    profile", not "no brand"."""
-    if not profile_id:
-        return
+    Named (``profile_id`` given): it must be a brand in this workspace, else the
+    same 404 a foreign id gets everywhere; it is returned as is. Not named: the
+    workspace's oldest brand, or a new one named after the workspace when it has
+    none. Every Prospect / Icp / Draft insert goes through here (drafts first
+    inherit their prospect's brand), and ``scripts/backfill_growth_profile_id.py``
+    uses the same rule for legacy rows. Only ``None`` means "not named": a blank
+    string is a bad id (the DTOs turn blanks into ``None`` first).
+
+    Profiles are reached through the PUBLIC ``growth.social.service`` seams (lazy
+    import) rather than the SocialProfile doc, which only the social service may
+    import. ``get_profile`` takes a RequestContext, so a workspace-only one is
+    minted here: the check is tenancy, not RBAC, and the system seams
+    (``upsert_by_domain``) have no caller to borrow one from."""
     from pocketpaw_ee.cloud._core.context import ScopeKind
     from pocketpaw_ee.cloud.growth.social import service as social_service
 
+    if profile_id is None:
+        # ponytail: two concurrent brandless creates in an empty workspace can each
+        # create a brand; a unique "default brand" marker would close it if it matters.
+        return await social_service.oldest_profile_id(
+            workspace_id
+        ) or await social_service.create_default_profile(workspace_id)
     ctx = RequestContext(
         user_id="",
         workspace_id=workspace_id,
@@ -271,14 +284,14 @@ async def _ensure_profile_in_workspace(workspace_id: str, profile_id: str | None
         started_at=datetime.now(UTC),
     )
     await social_service.get_profile(ctx, profile_id)
+    return profile_id
 
 
 def _with_profile(filters: dict[str, Any], profile_id: str | None) -> dict[str, Any]:
-    """Scope a list / queue filter to one brand. ``None`` leaves it alone (the
-    pre-brand view of every row); an id filters to that brand; ``""`` selects
-    the rows with no brand yet, the same three values ``project_id`` takes."""
-    if profile_id is not None:
-        filters["profile_id"] = profile_id or None
+    """Scope a list / queue filter to one brand. No id (``None`` or blank) leaves
+    it alone: every row, legacy unbranded ones included."""
+    if profile_id:
+        filters["profile_id"] = profile_id
     return filters
 
 
@@ -326,16 +339,15 @@ async def create(ctx: RequestContext, body: CreateProspectRequest) -> ProspectRe
     workspace_id = _require_workspace(ctx)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
-    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
-
     existing = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if existing is not None:
         raise ConflictError(
             "prospect.domain_taken",
             f"A prospect for domain '{body.domain}' already exists in this workspace",
         )
+    profile_id = await resolve_brand(workspace_id, body.profile_id)
 
-    doc = _ProspectDoc(workspace=workspace_id, **body.model_dump())
+    doc = _ProspectDoc(workspace=workspace_id, **{**body.model_dump(), "profile_id": profile_id})
     await doc.insert()
     # no-event: growth has no realtime subscriber in v1; the prospects view polls.
     return _to_response(_to_domain(doc))
@@ -812,11 +824,15 @@ async def upsert_by_domain(
     body = CreateProspectRequest.model_validate(prospect_data)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
-    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
+    if body.profile_id is not None:
+        await resolve_brand(workspace_id, body.profile_id)  # 404 before any write
 
     doc = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if doc is None:
-        doc = _ProspectDoc(workspace=workspace_id, **body.model_dump())
+        # The default brand only on insert: an update below is set-only for it.
+        fields = body.model_dump()
+        fields["profile_id"] = body.profile_id or await resolve_brand(workspace_id, None)
+        doc = _ProspectDoc(workspace=workspace_id, **fields)
         await doc.insert()
         # no-event: growth has no realtime subscriber in v1.
         return _to_response(_to_domain(doc))
@@ -872,9 +888,11 @@ async def upsert_by_domain(
     # client's prospect. Un-assigning is an explicit act: PATCH with ``""``.
     if body.project_id:
         doc.project_id = body.project_id
-    # The brand is set-only for the same reason: a re-import that names no
-    # brand must not un-brand a row.
-    if body.profile_id:
+    # The brand is set-once: an upsert fills a missing brand (a legacy row) but
+    # never moves a row to another brand. Pulse add and hunt discovery pass the
+    # hunt's brand, and a prospect found by a second brand's hunt stays where it
+    # is, with its drafts. Moving a prospect is an explicit act, not an upsert.
+    if body.profile_id and not doc.profile_id:
         doc.profile_id = body.profile_id
     # Discovery provenance follows the same set-only rule, for the same reason
     # doubled: an enrichment call that carries no ICP and no source URLs must
@@ -1027,9 +1045,9 @@ async def create_icp(ctx: RequestContext, body: CreateIcpRequest) -> IcpResponse
     workspace_id = _require_workspace(ctx)
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
-    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
+    profile_id = await resolve_brand(workspace_id, body.profile_id)
 
-    doc = _IcpDoc(workspace=workspace_id, **body.model_dump())
+    doc = _IcpDoc(workspace=workspace_id, **{**body.model_dump(), "profile_id": profile_id})
     await doc.insert()
     # no-event: growth has no realtime subscriber in v1; the ICP view polls.
     return _icp_to_response(_icp_to_domain(doc))
@@ -1458,7 +1476,8 @@ async def draft_prospect(
 
     body = DraftProspectRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
+    if body.profile_id is not None:
+        await resolve_brand(workspace_id, body.profile_id)  # 404 before the writer runs
     writer_fn = growth_writer.resolve_writer_fn()
     if writer_fn is None:
         raise CloudError(
@@ -1496,7 +1515,7 @@ async def draft_prospect(
     icp = await _icp_for(workspace_id, doc)
     # The brand, resolved once: it is stored on each draft row, and its approved
     # Blueprint (read once) is the writer's context and each draft's stamp.
-    brand = body.profile_id or getattr(doc, "profile_id", None)
+    brand = body.profile_id or doc.profile_id or await resolve_brand(workspace_id, None)
     bp = await approved_blueprint(workspace_id, brand)
     extra: dict[str, Any] = {"blueprint": bp} if bp is not None else {}
     try:
@@ -1583,7 +1602,8 @@ async def create_draft(
     """
     workspace_id = _require_workspace(ctx)
     body = CreateDraftRequest.model_validate(body)
-    await _ensure_profile_in_workspace(workspace_id, body.profile_id)
+    if body.profile_id is not None:
+        await resolve_brand(workspace_id, body.profile_id)
     return await _insert_draft(workspace_id, prospect_id, body)
 
 
@@ -1605,8 +1625,11 @@ async def _insert_draft(
     prospect = await _fetch_in_workspace(workspace_id, prospect_id)
 
     fields = body.model_dump()
-    # A draft is written under its prospect's brand unless the caller named one.
-    fields["profile_id"] = body.profile_id or getattr(prospect, "profile_id", None)
+    # A draft is written under the brand the caller named (validated by the
+    # caller), else its prospect's, else the workspace default (legacy prospect).
+    fields["profile_id"] = (
+        body.profile_id or prospect.profile_id or await resolve_brand(workspace_id, None)
+    )
     # Server-set only (never on the request): the writer's approved Blueprint version.
     fields["blueprint_version"] = blueprint_version
     doc = _DraftDoc(workspace=workspace_id, prospect_id=str(prospect.id), **fields)
@@ -2887,6 +2910,7 @@ __all__ = [
     "record_whatsapp_attempt",
     "record_whatsapp_inbound_reply",
     "research_prospect",
+    "resolve_brand",
     "transition",
     "update",
     "update_growth_settings",

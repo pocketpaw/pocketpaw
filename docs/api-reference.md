@@ -9195,29 +9195,34 @@ role at dispatch time, so a member-filed proposal would always fail closed at
 approve. A caller below the required tier gets
 `403 workspace.insufficient_role`.
 
-**Brands (`profile_id`).** Prospects, ICPs (hunts) and outreach drafts can
-belong to a brand: a Growth › Social profile, the same id the Social routes
-take. Every row carries a nullable `profile_id` in its response
-(`ProspectResponse`, `IcpResponse`, `DraftResponse`, and the `draft` inside
-the queue rows); rows made before brands carry `null`.
+**Brands (`profile_id`).** Every prospect, ICP (hunt) and outreach draft
+belongs to a brand: a Growth › Social profile, the same id the Social routes
+take. Every row carries `profile_id` in its response (`ProspectResponse`,
+`IcpResponse`, `DraftResponse`, and the `draft` inside the queue rows); only
+legacy rows written before brands, and not yet backfilled, carry `null`.
 
 - *Writes.* `POST /growth/prospects`, each row of `POST /growth/prospects/bulk`,
   `POST /growth/icps`, `POST /growth/prospects/{id}/drafts` and
   `POST /growth/prospects/{id}/draft` accept an optional `profile_id` (max 64
-  chars) and store it. It must name a brand in the caller's workspace: a
-  foreign or unknown id is `404 social_profile.not_found` (in bulk, an indexed
-  error entry for that row). A draft created without one takes its prospect's
-  brand, so writer drafts and follow-ups land under the prospect's brand. A
-  bulk re-import that names no brand leaves the stored brand alone.
+  chars). A named one must be a brand in the caller's workspace: a foreign or
+  unknown id is `404 social_profile.not_found` (in bulk, an indexed error entry
+  for that row). When it is omitted or blank, the server picks it: a draft takes
+  its prospect's brand; anything else (and a draft of a legacy unbranded
+  prospect) takes the workspace's oldest unarchived Social profile, or a new
+  one named after the workspace when it has none. The same rule covers the
+  system writers (hunt discovery, Pulse "Add as prospects", follow-ups, the
+  agent tools). A bulk re-import that names no brand leaves the stored brand
+  alone.
 - *Reads.* `GET /growth/prospects`, `GET /growth/prospects/facets`,
   `GET /growth/icps`, `GET /growth/drafts`, `GET /growth/linkedin/queue` (JSON
   and `?format=md`) and `GET /growth/queue/{channel}` accept an optional
   `profile_id` query param. With an id, only that brand's rows are returned
-  (facet counts included). With `profile_id=` (empty), only rows with no
-  brand. Without the param, every row is returned, the same as before brands.
-- *Backfill.* `scripts/backfill_growth_profile_id.py` gives unbranded rows
-  their workspace's oldest Social profile, or creates one named after the
-  workspace when it has none. `--dry-run` prints per-workspace counts and the
+  (facet counts included). Without it, or with `profile_id=` (empty), every
+  row is returned, legacy unbranded ones included.
+- *Backfill.* `scripts/backfill_growth_profile_id.py` gives legacy unbranded
+  rows a brand: a draft takes its prospect's, everything else the same default
+  brand a new row gets (the oldest unarchived Social profile, or one created
+  and named after the workspace). `--dry-run` prints per-workspace counts and the
   brand each would get, and writes nothing. Re-runs are no-ops, and rows that
   already have a brand are never touched.
 
@@ -10357,8 +10362,9 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 
 `active`, `weekly_post_quota` and `github_repos` are the product registry the
 daily drafting job reads: a profile drafts only while `active` is `true`
-(default `false`, so an existing profile never starts drafting on its own),
-up to `weekly_post_quota` posts a week (default `5`), with `github_repos`
+(default `false`, so an existing profile never starts drafting on its own)
+and has an approved Brand Blueprint, up to its `x` channel's `posts_per_week`
+(`weekly_post_quota` is kept on the wire but no longer budgets), with `github_repos`
 (`owner/name`) as source material. `reply_watch_handles`, `reply_queries` and
 `reply_cards_per_day` drive the reply cards (below): whose X posts and which X
 searches to draft replies for, and at most how many cards a UTC day.
@@ -10506,8 +10512,10 @@ X posts for one product the same way the morning sweep does, and returns only
 the ideas it just created as `{items}` (an empty list once the quota is used).
 
 - The product must be onboarded and `active`.
-- At most `weekly_post_quota` daily drafts per rolling 7 days and two per UTC
-  day. Manual ideas never count against either.
+- The product needs an approved Brand Blueprint; without one the run makes no
+  drafts (logged as skipped).
+- At most the approved Blueprint's `x` channel `posts_per_week` daily drafts per
+  rolling 7 days and two per UTC day. Manual ideas never count against either.
 - The drafts are built on what changed in the product's `github_repos` in the
   last 24 hours (merged pull requests and published releases, read from the
   public GitHub API; set `POCKETPAW_GROWTH_GITHUB_TOKEN` for private repos or a
@@ -10812,7 +10820,7 @@ its siblings. Reads need `growth.read`; every write needs `growth.manage`
   when there is none): summary, product, problem, audience segments, tone, avoid,
   the content pillars at equal weights summing to 100 with the hooks dealt across
   them, the weekly post quota as the `x` channel's `posts_per_week`, and the
-  criteria of the active ICPs for this brand, then the unbranded ones (at most 5),
+  criteria of the active ICPs for this brand (at most 5),
   as `icp_sentences`. No goals. A first roadmap: "This week" (today to +6 days)
   and "Next 4 weeks" (+7 to +34), each with every channel's `posts_per_week` as
   its cadence (capped at 21) and no milestones. Seeded text goes through the same dash and number
@@ -10880,12 +10888,14 @@ week (`2026-W46`) is a 422.
 **Agents follow the approved Blueprint.** The ideas agent (generate and the
 daily X drafts), the reply drafter, the outreach writer and hunt research read
 the brand's approved Blueprint, never a draft, and take it as fenced data in
-their prompt. While one is approved it replaces the profile's `analysis`
-(summary, pillars, tone, things to avoid) for strategy; without one they read
-the profile as before. The daily X drafts' weekly budget is the Blueprint's `x`
-channel `posts_per_week` (0 when it plans no X), else `weekly_post_quota`. A
-hunt for a branded ICP gets its brand's audience, voice and pillars as context;
-an unbranded ICP gets none. Every idea, reply card and outreach draft made with
+their prompt. The Blueprint is the only source of strategy: the ideas and reply
+prompts never read the profile's website-scan `analysis` (it stays as the
+Blueprint seed's input); without an approved Blueprint they carry the company
+facts and the owner's typed description only. The daily X drafts' weekly budget
+is the Blueprint's `x` channel `posts_per_week`; with no approved Blueprint, or
+one that plans no X, the run skips with a log line. A hunt gets its brand's
+audience, voice and pillars as context; a hunt whose brand has no approved
+Blueprint gets none. Every idea, reply card and outreach draft made with
 an approved Blueprint carries its `blueprint_version`; `null` otherwise.
 
 ### Accounts — `/api/v1/growth/social/accounts`
