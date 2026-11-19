@@ -2,10 +2,11 @@
 # profile. A workspace may hold several (one per brand it posts for), each
 # holding what the
 # setup wizard typed (owner, company, website, the six description fields, the
-# business-shape enums) and the latest website analysis. ``active``,
-# ``weekly_post_quota`` and ``github_repos`` are the product registry the daily
-# drafting job reads: which profiles draft, how many posts a week, and which
-# repos feed them. ``active`` defaults off so no profile starts drafting unasked.
+# business-shape enums) and the latest website analysis. ``active`` and
+# ``github_repos`` are the product registry the daily drafting job reads: which
+# profiles draft and which repos feed them (the weekly budget is the approved
+# Blueprint's x channel). ``weekly_post_quota`` stays as the Blueprint seed's x
+# budget. ``active`` defaults off so no profile starts drafting unasked.
 # ``reply_watch_handles`` / ``reply_queries`` / ``reply_cards_per_day`` feed the
 # reply-cards sweep: whose X posts and which searches to draft replies for.
 # ``archived_at`` set means the brand is archived: it leaves the profile list,

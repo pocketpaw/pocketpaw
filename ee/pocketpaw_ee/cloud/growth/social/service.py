@@ -851,7 +851,7 @@ async def _draft_daily(
     if ideas_fn is None or not doc.active or doc.onboarding_completed_at is None:
         return [], 0
     profile_key = str(doc.id)
-    # One read per run: the same version drives the quota, the prompt and the stamp.
+    # One read per run: the same version drives the budget, the prompt and the stamp.
     bp = await social_blueprint.approved_for(workspace_id, profile_key)
     if bp is None:
         logger.info("daily drafts: profile=%s skipped, no approved Blueprint", profile_key)
@@ -947,9 +947,11 @@ async def _draft_daily(
 async def draft_daily_for_profile(
     workspace_id: str, profile_id: str, *, now: datetime | None = None
 ) -> list[SocialIdea]:
-    """Draft this profile's X posts for today, within its weekly quota and two a day.
+    """Draft this profile's X posts for today, within its approved Blueprint's weekly x
+    budget and two a day.
 
-    Skips (returns []) an inactive or not-yet-onboarded profile and one whose quota is used.
+    Skips (returns []) an inactive or not-yet-onboarded profile, one with no approved
+    Blueprint, and one whose budget is used.
     Drafts that break ``check_draft`` are dropped; one retry is asked for with the reasons.
     Every draft is stored as ``new``: nothing here posts."""
     docs, _ = await _draft_daily(workspace_id, profile_id, now or datetime.now(UTC))
@@ -1156,8 +1158,8 @@ async def metrics_summary(
 
 async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> SocialIdeaListResponse:
     """Run today's X drafting for one profile now. 503 with no ideas writer, 409 before
-    onboarding or while the profile is inactive, 502 when the run fails; an empty list when
-    the quota is used up."""
+    onboarding or while the profile is inactive, 502 when the run fails; an empty list with
+    no approved Blueprint or once its x budget is used up."""
     from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
     from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
 
