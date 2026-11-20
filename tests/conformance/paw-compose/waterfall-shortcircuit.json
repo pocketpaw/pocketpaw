@@ -1,0 +1,76 @@
+{
+  "id": "waterfall-shortcircuit",
+  "asserts": "A waterfall listener returning without next() stops the chain; downstream listeners never run.",
+  "semantics": "\u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "wf",
+          "mode": "waterfall",
+          "id": "L1",
+          "action": "wrap",
+          "wrap": "A"
+        }
+      ]
+    },
+    "b": {
+      "listeners": [
+        {
+          "event": "wf",
+          "mode": "waterfall",
+          "id": "L2",
+          "action": "shortcircuit",
+          "value": "STOP"
+        }
+      ]
+    },
+    "c": {
+      "listeners": [
+        {
+          "event": "wf",
+          "mode": "waterfall",
+          "id": "L3",
+          "action": "wrap",
+          "wrap": "C"
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "mount",
+      "plugin": "c"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "wf",
+      "mode": "waterfall",
+      "value": "base",
+      "expect_result": "A(STOP)"
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE",
+    "c:LOADING",
+    "c:ACTIVE",
+    "a:listener:L1:enter",
+    "b:listener:L2:enter",
+    "b:listener:L2:exit",
+    "a:listener:L1:exit"
+  ]
+}

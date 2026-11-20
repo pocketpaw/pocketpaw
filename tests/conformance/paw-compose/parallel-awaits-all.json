@@ -1,0 +1,58 @@
+{
+  "id": "parallel-awaits-all",
+  "asserts": "parallel fans out to every listener CONCURRENTLY and does not resolve until all have settled. The 4x delay margin (20ms vs 5ms) makes the concurrent interleaving deterministic: a sequential runtime finishes L1 before starting L2 and fails on order.",
+  "semantics": "\u00a75",
+  "plugins": {
+    "a": {
+      "listeners": [
+        {
+          "event": "pev",
+          "mode": "parallel",
+          "id": "L1",
+          "action": "observe",
+          "delay_ms": 20
+        }
+      ]
+    },
+    "b": {
+      "listeners": [
+        {
+          "event": "pev",
+          "mode": "parallel",
+          "id": "L2",
+          "action": "observe",
+          "delay_ms": 5
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispatch",
+      "event": "pev",
+      "mode": "parallel"
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE",
+    "a:listener:L1:enter",
+    "b:listener:L2:enter",
+    "b:listener:L2:exit",
+    "a:listener:L1:exit"
+  ],
+  "regression_note": "Amended 2026-08-24 (second pass): the multiset compare could not distinguish concurrent fan-out from strictly sequential await \u2014 a sequential runtime passed. Now an ordered trace. This is the one fixture with a timing dependency; the 4x margin is the safety factor."
+}

@@ -1,0 +1,48 @@
+{
+  "id": "dispose-failed-fiber",
+  "asserts": "dispose() is total. A FAILED fiber has nothing to unwind, but the caller asked for disposal and disposal completed, so the handle retires to DISPOSED. Without this, FAILED has no outgoing edge and runtimes disagree.",
+  "semantics": "\u00a74",
+  "plugins": {
+    "a": {
+      "effects": [
+        "e1"
+      ],
+      "apply_throws": true
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "FAILED"
+      }
+    },
+    {
+      "op": "dispose",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:effect:e1:setup",
+    "a:apply:throw",
+    "a:effect:e1:dispose",
+    "a:FAILED",
+    "a:DISPOSED"
+  ],
+  "regression_note": "Added 2026-08-25 from review, not from mutation testing. TypeScript moved FAILED to DISPOSED; Python left the fiber FAILED forever. \u00a74's FSM gave FAILED no outgoing edge, so neither was wrong. Found by reading both runtimes side by side."
+}
