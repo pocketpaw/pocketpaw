@@ -1,0 +1,38 @@
+---
+title: "Connect your tools"
+description: "A way to link an outside account — Google Drive, Stripe, a database, and others — to a pocket so your assistant can read and act on that data."
+---
+
+# Connect your tools
+
+**What it is.** A way to link an outside account — Google Drive, Stripe, a database, and others — to a pocket so your assistant can read and act on that data. Each linked account shows a live status: Connected, Not connected, or Reauthorise.
+
+**When you'd use it.** When you want your assistant to work with files, payments, or records that live in another app instead of pasting them in by hand.
+
+## Connect an account to a pocket
+1. Open the pocket you want to give access to.
+2. Open its data panel and select the **Capabilities** tab.
+3. Select the **Data Sources** sub-tab.
+4. Find the account you want (Google Drive shows at the top) and select **Connect**.
+5. A new browser tab opens for the provider's sign-in. Approve the access it asks for.
+6. Return to the Paw OS by PocketPaw tab. The status flips to **Connected** on its own.
+
+## Browse and add other sources
+1. On the same **Data Sources** sub-tab, use the search box to find a connector by name.
+2. Use the type chips (such as `payment`, `database`, `file`) to narrow the list.
+3. For a connector that needs keys, select **Connect**, fill in the fields it asks for, and select **Connect** again to save.
+4. Connected sources move into the **Connected** group; select one to see its actions and run them.
+
+## Disconnect an account
+1. Open the connected account from the **Data Sources** list.
+2. Select **Disconnect** (the unplug icon).
+
+## Tips
+- A connection lives with one pocket. Connect the same account in each pocket that needs it.
+- The status reads **Reauthorise** when access has expired. Select it to sign in again — your assistant can't reach the account until you do.
+- During first-time setup you may be asked to **Connect your Gmail & calendar**. That connection is private to you; teammates and admins never see it, and you can remove it later in **Settings**.
+
+## If something's off
+- Only **Google Drive** is wired to a live sign-in today. Other sources in the list may be sample entries or may need keys before they do anything, so treat a clean "Connected" badge on those with caution until you've tested it.
+- If the list looks like a fixed demo set (Stripe, Airtable, Slack, Shopify, PostgreSQL) with no real data behind it, your workspace hasn't reached the live connector service yet — that's the built-in sample list, not your accounts.
+- API keys for shared services (web search, image generation, Google sign-in, Spotify) live separately under **Settings → Workspace → Integrations**, not here.

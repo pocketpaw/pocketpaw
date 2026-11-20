@@ -38,6 +38,10 @@
           "href": "/introduction"
         },
         {
+          "label": "Manual",
+          "href": "/manual"
+        },
+        {
           "label": "Guides",
           "type": "dropdown",
           "items": [
@@ -122,6 +126,13 @@
         "icon": "lucide:code",
         "color": "#3b82f6",
         "groups": ["API Reference"]
+      },
+      {
+        "label": "Paw OS manual",
+        "href": "/manual",
+        "icon": "lucide:book-open-check",
+        "color": "#d49a5c",
+        "groups": ["Start here", "First steps", "Your workspace", "Chat & collaboration", "Pockets", "Agents", "Connectors & your data", "Approvals & governance", "Sites", "Studio", "Foresight", "Mission Control", "Code & automation (advanced)", "Admin, security & billing"]
       },
       {
         "label": "llms.txt",
@@ -830,6 +841,256 @@
             "label": "Systemd Service",
             "href": "/deployment/systemd",
             "icon": "lucide:cog"
+          }
+        ]
+      },
+      {
+        "label": "Start here",
+        "items": [
+          {
+            "label": "Welcome",
+            "href": "/manual",
+            "icon": "lucide:home"
+          }
+        ]
+      },
+      {
+        "label": "First steps",
+        "items": [
+          {
+            "label": "Create your account",
+            "href": "/manual/getting-started/create-your-account",
+            "icon": "lucide:user-plus"
+          },
+          {
+            "label": "Join a workspace",
+            "href": "/manual/getting-started/join-a-workspace",
+            "icon": "lucide:door-open"
+          },
+          {
+            "label": "Let Paw OS set up your business",
+            "href": "/manual/getting-started/let-paw-os-set-up-your-business",
+            "icon": "lucide:rocket"
+          }
+        ]
+      },
+      {
+        "label": "Your workspace",
+        "items": [
+          {
+            "label": "Your workspace",
+            "href": "/manual/workspace-tour/the-tour",
+            "icon": "lucide:layout-dashboard"
+          },
+          {
+            "label": "Quick Ask",
+            "href": "/manual/workspace-tour/quick-ask",
+            "icon": "lucide:message-circle-question"
+          },
+          {
+            "label": "Files",
+            "href": "/manual/workspace-tour/files",
+            "icon": "lucide:folder"
+          }
+        ]
+      },
+      {
+        "label": "Chat & collaboration",
+        "items": [
+          {
+            "label": "Chat with your agents and team",
+            "href": "/manual/chat/chat-with-your-agents",
+            "icon": "lucide:message-square"
+          },
+          {
+            "label": "Rooms, DMs, groups, and channels",
+            "href": "/manual/chat/rooms-dms-groups-channels",
+            "icon": "lucide:hash"
+          },
+          {
+            "label": "Meetings",
+            "href": "/manual/chat/meetings",
+            "icon": "lucide:video"
+          },
+          {
+            "label": "Calendar",
+            "href": "/manual/chat/calendar",
+            "icon": "lucide:calendar"
+          }
+        ]
+      },
+      {
+        "label": "Pockets",
+        "items": [
+          {
+            "label": "What is a Pocket",
+            "href": "/manual/pockets/what-is-a-pocket",
+            "icon": "lucide:layers"
+          },
+          {
+            "label": "Create a Pocket",
+            "href": "/manual/pockets/create-a-pocket",
+            "icon": "lucide:plus-square"
+          },
+          {
+            "label": "Edit a Pocket",
+            "href": "/manual/pockets/edit-a-pocket",
+            "icon": "lucide:edit"
+          }
+        ]
+      },
+      {
+        "label": "Agents",
+        "items": [
+          {
+            "label": "What is an agent",
+            "href": "/manual/agents/what-is-an-agent",
+            "icon": "lucide:bot"
+          },
+          {
+            "label": "Create an agent",
+            "href": "/manual/agents/create-an-agent",
+            "icon": "lucide:cpu"
+          },
+          {
+            "label": "Configure an agent",
+            "href": "/manual/agents/configure-an-agent",
+            "icon": "lucide:settings-2"
+          }
+        ]
+      },
+      {
+        "label": "Connectors & your data",
+        "items": [
+          {
+            "label": "Connect your tools",
+            "href": "/manual/connectors-data/connect-your-tools",
+            "icon": "lucide:plug"
+          },
+          {
+            "label": "Your knowledge base",
+            "href": "/manual/connectors-data/your-knowledge-base",
+            "icon": "lucide:book-open"
+          },
+          {
+            "label": "Your data: objects and links",
+            "href": "/manual/connectors-data/your-data",
+            "icon": "lucide:database"
+          }
+        ]
+      },
+      {
+        "label": "Approvals & governance",
+        "items": [
+          {
+            "label": "Approve or reject actions",
+            "href": "/manual/approvals/approve-or-reject-actions",
+            "icon": "lucide:check-circle"
+          },
+          {
+            "label": "Activity and the audit log",
+            "href": "/manual/approvals/activity-and-audit",
+            "icon": "lucide:activity"
+          },
+          {
+            "label": "The Decision Graph",
+            "href": "/manual/approvals/the-decision-graph",
+            "icon": "lucide:git-branch"
+          }
+        ]
+      },
+      {
+        "label": "Sites",
+        "items": [
+          {
+            "label": "Publish a Site",
+            "href": "/manual/sites/publish-a-site",
+            "icon": "lucide:globe"
+          },
+          {
+            "label": "Edit a Published Site",
+            "href": "/manual/sites/edit-a-published-site",
+            "icon": "lucide:pencil"
+          }
+        ]
+      },
+      {
+        "label": "Studio",
+        "items": [
+          {
+            "label": "Generate images and video",
+            "href": "/manual/studio/generate-images-and-video",
+            "icon": "lucide:image"
+          }
+        ]
+      },
+      {
+        "label": "Foresight",
+        "items": [
+          {
+            "label": "Rehearse a Decision",
+            "href": "/manual/foresight/rehearse-a-decision",
+            "icon": "lucide:eye"
+          }
+        ]
+      },
+      {
+        "label": "Mission Control",
+        "items": [
+          {
+            "label": "Track work and tasks",
+            "href": "/manual/mission-control/track-work-and-tasks",
+            "icon": "lucide:list-checks"
+          },
+          {
+            "label": "Plan and organize work",
+            "href": "/manual/mission-control/plan-and-organize-work",
+            "icon": "lucide:clipboard-list"
+          }
+        ]
+      },
+      {
+        "label": "Code & automation (advanced)",
+        "items": [
+          {
+            "label": "The Code surface",
+            "href": "/manual/code-automation/the-code-surface",
+            "icon": "lucide:code"
+          },
+          {
+            "label": "Belt — hand off coding work",
+            "href": "/manual/code-automation/belt-automation",
+            "icon": "lucide:workflow"
+          }
+        ]
+      },
+      {
+        "label": "Admin, security & billing",
+        "items": [
+          {
+            "label": "Members and roles",
+            "href": "/manual/admin-billing/members-and-roles",
+            "icon": "lucide:users"
+          },
+          {
+            "label": "Account security and SSO",
+            "href": "/manual/admin-billing/security-and-sso",
+            "icon": "lucide:shield"
+          },
+          {
+            "label": "Workspace policy and memory",
+            "href": "/manual/admin-billing/workspace-policy-and-memory",
+            "icon": "lucide:sliders"
+          },
+          {
+            "label": "Notifications and API keys",
+            "href": "/manual/admin-billing/notifications-and-api-keys",
+            "icon": "lucide:key"
+          },
+          {
+            "label": "Plans and billing",
+            "href": "/manual/admin-billing/plans-and-billing",
+            "icon": "lucide:credit-card"
           }
         ]
       }

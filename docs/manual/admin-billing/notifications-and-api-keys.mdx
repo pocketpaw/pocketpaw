@@ -1,0 +1,43 @@
+---
+title: "Notifications and API keys"
+description: "Two account pages: Notifications controls desktop alerts and sounds, API keys creates long-lived tokens so other tools can connect to your workspace."
+---
+
+# Notifications and API keys
+
+**What it is.** Two account pages. **Notifications** controls which events pop a desktop alert and which play a sound. **API keys** creates long-lived tokens so other tools and scripts can connect to your workspace.
+
+**When you'd use it.** Tune Notifications so you only get pinged for what matters. Create an API key when you want to connect Paw OS by PocketPaw to an outside tool like Zapier or your own script.
+
+## Turn on desktop notifications
+1. Open Settings, then **Notifications**.
+2. Under **Browser notifications**, switch on **Enable browser notifications**.
+3. If your browser asks for permission, allow it. (If it was already denied, you'll need to reset it in your browser's site permissions.)
+
+## Choose which events alert you
+1. With browser notifications on, scroll to **Notification types**.
+2. Toggle each type you care about — messages and mentions, workspace invites, group invitations, shared pockets, and meeting updates.
+3. Under **Sound**, toggle the **Notification chime** and **Incoming message sound**. The play button next to each previews it.
+
+## Create an API key
+1. Open Settings, then **API keys**.
+2. Click **New API key**.
+3. **Name & expiry** — give it a clear name (for example, `zapier-integration`) and pick an expiry: Never, 30 days, 90 days, or 1 year.
+4. **Scopes** — tick only the permissions the key needs. Click **Read-only defaults** for the safest starting set.
+5. **Review** the summary, then click **Generate key**.
+6. **Copy the key now.** This is the only time the full key is shown. Use **Copy** or download it as a `.txt`. Tick the confirmation box, then click **Done**.
+
+## Revoke an API key
+1. On the **API keys** page, find the key in the table.
+2. Click **Revoke** at the end of its row and confirm.
+3. The key stops working immediately — any tool using it gets rejected on its next request.
+
+## Tips
+- Keys follow least-privilege: pick the smallest scope set that gets the job done.
+- There's no "rotate" button. To roll a key, revoke the old one and create a new one.
+- The notification settings are per-browser. If you switch computers, set them again there.
+
+## If something's off
+- If you can't see the **New API key** button, you may not have access to API keys for this workspace, or no workspace is selected.
+- If you lose a key after closing the reveal screen, it can't be recovered — revoke it and make a new one.
+- Notifications only fire when the window isn't focused. If you never see them, check that your browser hasn't blocked permission.

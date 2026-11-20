@@ -1,0 +1,42 @@
+---
+title: "Activity and the audit log"
+description: "Two records of what happened in your workspace."
+---
+
+# Activity and the audit log
+
+**What it is.** Two records of what happened in your workspace. **Activity** is the running feed of every agent decision, tool run, and human action. The **Audit log** is the formal record of member, invite, and workspace changes, with who did it, when, and from where.
+
+**When you'd use it.** Activity is for "what's going on right now." The audit log is for "who changed this and when" — security reviews, member changes, and compliance checks.
+
+## Read the activity feed
+1. Open **Activity** from the top bar.
+2. The feed lists every agent decision, tool run, and human action across the workspace, newest first.
+3. Use the search box to filter by text or agent name.
+4. Use the category buttons — All, Decision, Tool, Data, System, Human — to narrow the feed.
+5. Click **Refresh** to pull the latest entries. The feed also updates on its own roughly every 30 seconds.
+
+## Read the audit log
+1. Open **Audit** from the top bar.
+2. Each row shows who acted, what they did, and how long ago — for example "added a member" or "changed a member role."
+3. Click a row to expand it. You'll see the exact action, the target, the full timestamp, the IP address, and the browser (User-Agent), plus the raw metadata.
+
+## Filter the audit log
+1. Click **Filters**.
+2. Tick one or more **Action** types (workspace created, member added, role changed, invite revoked, and so on).
+3. Optionally type an **Actor** (a user id or `email:address`) and set a **Since** / **Until** date range.
+4. Click **Apply**. Click **Clear** to reset.
+
+## Export the audit log
+1. Set the **Since** / **Until** date range you want.
+2. Click **Export CSV**. The current date range downloads as a CSV file.
+
+## Tips
+- The audit log is admin and owner only. If you're a member, you won't be able to open it.
+- The activity feed and the home summary share the same source, so what you see here matches the home view.
+- Use the audit filters to answer a specific question fast — for example, filter to "Member role changed" over the last 30 days before a security review.
+
+## If something's off
+- "You don't have permission to view the audit log" means your role is **member**. Ask an owner or admin to either pull the record or change your role.
+- If the audit log won't load, click **Retry**. A persistent failure usually means the workspace backend is unreachable.
+- Actor names in the audit log may show as raw user ids rather than display names — this is expected today. Invite-related rows show the email address.

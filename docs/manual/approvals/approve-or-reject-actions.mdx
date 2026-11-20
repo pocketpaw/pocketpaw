@@ -1,0 +1,41 @@
+---
+title: "Approve or reject actions"
+description: "The Approvals tray is where every action an agent wants to take waits for your sign-off."
+---
+
+# Approve or reject actions
+
+**What it is.** The **Approvals** tray is where every action an agent wants to take waits for your sign-off. Each card shows what the agent proposed, why it was triggered, and its recommendation. Nothing runs until you approve it.
+
+**When you'd use it.** Any time the agent proposes something that needs a human to say yes — reordering stock, sending an email campaign, changing a setting, blocking an IP.
+
+## Review a pending action
+1. Open the **Approvals** tray. It opens as a panel on the right, headed **Approvals** with a count of how many actions are waiting.
+2. Read the card. Each one shows a priority tag (Low, Medium, High, Critical), what triggered it, a one-line description, and the agent's recommendation.
+3. Click the card (or **Details**) to expand the full view — description, what triggered it, the AI recommendation, any data context, agent notes, and the action parameters.
+
+## Approve an action
+1. On the card or in the detail view, click **Approve**.
+2. The action moves out of the pending list and into **Recent Decisions** with an "Approved" status.
+
+## Edit before approving
+1. Open the action's detail view.
+2. Click **Edit**.
+3. Change the title, description, recommendation, priority, or parameters as needed.
+4. Click **Save & Approve**.
+5. If your edits changed anything, a "Learning captured" note appears briefly — your correction is recorded so the agent gets it right next time.
+
+## Reject an action
+1. Click **Reject** on the card or in the detail view.
+2. Type a reason (optional) in the box that appears.
+3. Click **Confirm** (or **Confirm Reject** in the detail view).
+
+## Tips
+- The pending count is shown in the tray header and in the footer ("X awaiting approval"). When the list is empty you'll see "All caught up."
+- Use **Edit before approving** instead of rejecting when the idea is right but the details are off. Your edit teaches the agent, a flat reject doesn't carry the same correction.
+- Critical-priority items are flagged in red — scan for those first.
+
+## If something's off
+- If the tray is empty but you expected pending actions, the agent may simply have nothing waiting, or the workspace runtime may not be connected. Approved items still appear under **Recent Decisions**.
+- Approving sends the decision to the runtime in the background. If the runtime is briefly unreachable, the card still shows as approved on your screen and reconciles on the next refresh.
+- We could not confirm a single fixed entry point that opens the Approvals tray in the live app — verify how you reach it (a pocket's **Actions** tab carries the same pending badge). See notes for human reconciliation.

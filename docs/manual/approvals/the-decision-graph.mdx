@@ -1,0 +1,40 @@
+---
+title: "The Decision Graph"
+description: "The Decision Graph is a visual record of decisions your agents and team have made — what led to each one, who acted, and what it touched."
+---
+
+# The Decision Graph
+
+**What it is.** The **Decision Graph** is a visual record of decisions your agents and team have made — what led to each one, who acted, and what it touched. It's a read-only view for tracing how a result came to be.
+
+**When you'd use it.** When you need to answer "why did this happen?" — trace a single decision back through its precedents, scan decisions over time, or group them by policy.
+
+## Trace a single decision
+1. Open **Decision Graph** from the workspace navigation.
+2. Pick the **One decision** view.
+3. The graph shows the chosen decision with the inputs, actors, and earlier decisions that led to it.
+4. Click any node to drill in. The graph re-centers on that decision and the address bar updates so you can share the exact view.
+
+## Scan decisions over time
+1. Open the Decision Graph.
+2. Pick the **Time-series** view. This is the default when no single decision is selected.
+3. Decisions are laid out in lanes by actor, so you can see who decided what and when.
+
+## Group by policy
+1. Pick the **Policy** view.
+2. Decisions are grouped into columns by policy. Each card is tagged "landed" or "policy failed" so you can spot where a policy blocked an action.
+
+## Inspect a decision
+1. Click a node or card to open the side inspector.
+2. It shows the intent, action, actor, time, policy result (passed or failed), outcome, pocket, and counts of inputs and precedents.
+3. Use the **Explain** box to ask a plain-language question like "Why did this decision land? What changed since last week?" and get an answer in context.
+
+## Tips
+- You can filter by actor, policy, pocket, or a start date. Active filters show as chips across the top of the graph.
+- Deep-link to a specific view by sharing the page URL — the decision, depth, view mode, and filters are all carried in the address bar.
+- For a simpler before/after view of what a reviewer changed on an agent's proposal, see the **Paw Print** decision trail (a separate feed of original proposals versus reviewer edits).
+
+## If something's off
+- "No decision selected" in the One-decision view means you need to pick a decision first — switch to Time-series, find one, and click into it.
+- "No graph data" or "No decisions in range" usually means there's nothing recorded yet for the current filters, or the date range is too narrow. Clear the filters and try again.
+- The graph reads from a periodically updated record, not a live stream, so a brand-new decision may take a moment to appear.
