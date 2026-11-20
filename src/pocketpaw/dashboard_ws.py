@@ -699,6 +699,7 @@ async def websocket_handler(
                     "tavily": "tavily_api_key",
                     "brave": "brave_api_key",
                     "parallel": "parallel_api_key",
+                    "youcom": "youcom_api_key",
                     "elevenlabs": "elevenlabs_api_key",
                     "openai_compatible": "openai_compatible_api_key",
                 }
@@ -756,6 +757,12 @@ async def websocket_handler(
                         settings.save()
                         await websocket.send_json(
                             _api_key_response("\u2705 Parallel AI API key saved!")
+                        )
+                    elif provider == "youcom" and key:
+                        settings.youcom_api_key = key
+                        settings.save()
+                        await websocket.send_json(
+                            _api_key_response("\u2705 You.com API key saved!")
                         )
                     elif provider == "elevenlabs" and key:
                         settings.elevenlabs_api_key = key
@@ -851,6 +858,7 @@ async def websocket_handler(
                             "hasTavilyKey": bool(settings.tavily_api_key),
                             "hasBraveKey": bool(settings.brave_search_api_key),
                             "hasParallelKey": bool(settings.parallel_api_key),
+                            "hasYoucomKey": bool(settings.youcom_api_key),
                             "injectionScanEnabled": settings.injection_scan_enabled,
                             "injectionScanLlm": settings.injection_scan_llm,
                             "piiScanEnabled": settings.pii_scan_enabled,

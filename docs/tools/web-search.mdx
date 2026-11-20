@@ -13,7 +13,7 @@ The web search tool enables PocketPaw to search the internet for real-time infor
 
 ## Providers
 
-Four search providers are supported.
+Five search providers are supported.
 
 ### Tavily (Recommended)
 
@@ -41,6 +41,22 @@ export POCKETPAW_BRAVE_SEARCH_API_KEY="your-key"
 export POCKETPAW_WEB_SEARCH_PROVIDER="parallel"
 export POCKETPAW_PARALLEL_API_KEY="your-key"
 ```
+
+### You.com
+
+[You.com](https://you.com/platform?utm_source=pocketpaw-pocketpaw&utm_medium=oss_integration&utm_campaign=2026-11-oss-integrations&utm_content=docs) works with no key and no
+account on its free keyless tier (about 100 searches a day), so it is the
+quickest way to try web search.
+
+```bash
+export POCKETPAW_WEB_SEARCH_PROVIDER="youcom"
+# Optional: higher limits through the keyed Web Search API
+export POCKETPAW_YOUCOM_API_KEY="your-key"
+```
+
+`YDC_API_KEY` is also read if `POCKETPAW_YOUCOM_API_KEY` is unset. Without a
+key, requests go to `GET https://api.you.com/v1/agents/search`; with one, to
+`POST https://ydc-index.io/v1/search`.
 
 ### LiteLLM gateway
 
