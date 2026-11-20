@@ -2,7 +2,7 @@
 name = "pocketpaw-client"
 version = "0.1.0"
 description = "PocketPaw Desktop Client"
-authors = ["you"]
+authors = ["PocketPaw Team <hello@pocketpaw.ai>"]
 edition = "2021"
 
 [lib]
