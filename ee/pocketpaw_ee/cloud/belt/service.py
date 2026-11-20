@@ -685,6 +685,7 @@ _STATUS_MAP: dict[str, tuple[str, str]] = {
     "rejected": ("rejected", "done"),
     "executed": ("landed", "done"),
     "failed": ("failed", "done"),
+    "expired": ("expired", "done"),
 }
 
 
