@@ -1,11 +1,14 @@
 # tests/cloud/test_belt_github_issues_patrol.py — the ``issues`` patrol on GitHub.
 #
 # A mandate whose bound repo has a GitHub origin reads its open issues through
-# ``gh issue list`` and files one sighting per issue that carries a label from
-# the charter's ``issue_labels``. ``gh`` (and the ``git remote get-url`` that
+# one ``gh issue list --label`` per charter ``issue_labels`` label and files one
+# sighting per issue carrying one of them. ``gh`` (and the ``git remote get-url`` that
 # finds the slug) is a fake executor here; nothing touches the network.
 #
-# Pinned: label matching (case-insensitive, objects from ``--json labels``),
+# Pinned: label matching (case-insensitive, objects from ``--json labels``), an
+# old labelled issue past a busy repo's unfiltered list limit is still sighted
+# with no ``gh issue view`` (``LimitedGh``), one failed label list files and
+# resolves nothing, the label lists warm the dependency check's cache,
 # severity (p1 and bug 4, p2 3), an empty ``issue_labels`` takes nothing, a
 # GitLab-bound repo keeps the connector path, an unsafe slug never reaches gh, a
 # gh failure files nothing; through mongomock, ``run_patrols`` dedupes on
@@ -108,6 +111,28 @@ class FakeGh:
         raise AssertionError(f"unexpected argv {argv}")
 
 
+class LimitedGh(FakeGh):
+    """``FakeGh`` whose unfiltered open issue list stops short of ``hidden`` (an
+    old issue past ``--limit`` on a busy repo), while a ``--label`` list returns
+    every issue carrying that label (exit 1 for a label in ``failing``)."""
+
+    hidden: set[int] = set()
+    failing: set[str] = set()
+
+    async def __call__(self, argv: list[str]) -> tuple[int, str, str]:
+        if argv[:3] == ["gh", "issue", "list"] and "all" not in argv:
+            self.calls.append(list(argv))
+            if "--label" in argv:
+                want = argv[argv.index("--label") + 1]
+                if want in self.failing:
+                    return 1, "", "HTTP 502"
+                rows = [i for i in self.issues if want in {lb["name"] for lb in i["labels"]}]
+            else:
+                rows = [i for i in self.issues if i["number"] not in self.hidden]
+            return 0, json.dumps(rows), ""
+        return await super().__call__(argv)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_gh_caches(monkeypatch) -> None:
     """The gh reads are cached per repo for a scheduler tick, across tests too."""
@@ -148,15 +173,20 @@ async def test_labelled_open_issues_become_sightings(tmp_path):
     assert d["evidence"]["labels"] == ["suite", "p2"]
     assert d["evidence"]["url"] == f"https://github.com/{SLUG}/issues/115"
     assert d["summary"].startswith("GitHub issue #115: Issue 115")
-    (argv,) = _issue_lists(gh)
-    assert argv[:5] == ["gh", "issue", "list", "-R", SLUG]
-    assert "open" in argv and "--label" not in argv
+    lists = _issue_lists(gh)
+    assert [a[a.index("--label") + 1] for a in lists] == ["suite", "needs-core"]
+    assert all(a[:5] == ["gh", "issue", "list", "-R", SLUG] and "open" in a for a in lists)
 
 
 async def test_no_issue_labels_takes_nothing(tmp_path):
-    gh = FakeGh([_issue(115, "suite")])
-    assert await _patrol(gh, [], tmp_path) == []
-    assert _issue_lists(gh) == []
+    """No labels lists nothing and resolves nothing: a cleared charter must not
+    read every sighted issue as gone from the line."""
+    gh = FakeGh([_issue(115, "suite")], views={115: {"state": "OPEN", "labels": []}})
+    drafts = await issues_patrol(
+        str(tmp_path), workspace_id="w1", issue_labels=[], gh=gh, sighted=[f"github:{SLUG}#115"]
+    )
+    assert drafts == []
+    assert [a for a in gh.calls if a[:2] == ["gh", "issue"]] == []
 
 
 async def test_gitlab_bound_repo_keeps_the_connector_path(tmp_path):
@@ -424,3 +454,74 @@ async def test_the_foreman_does_not_plan_an_issue_an_open_pr_closes(
     # The morning digest agrees with what the foreman saw.
     (row,) = (await mandate_service.digest("w1", "u1"))["mandates"]
     assert [b["in_flight"] for b in row["backlog"]["top"]] == [True]
+
+
+# A busy repo (hundreds of open issues) cuts the unfiltered open list short:
+# the patrol lists each charter label on its own so an old labelled issue is
+# still sighted, and the line's sighted issues need no ``gh issue view``.
+
+
+def _busy_repo() -> LimitedGh:
+    gh = LimitedGh(
+        [_issue(5, "suite", "p1"), _issue(6, "suite", "needs-core"), _issue(7, "other")]
+        + [_issue(n, "noise") for n in range(200, 210)]
+    )
+    gh.hidden = {5, 6, 7}
+    return gh
+
+
+async def test_a_labelled_issue_past_the_open_list_limit_is_sighted(tmp_path):
+    """Mutation: reading only the unfiltered list never sights #5 or #6."""
+    gh = _busy_repo()
+    drafts = await _patrol(gh, ["suite", "needs-core"], tmp_path)
+
+    assert [d["evidence"]["number"] for d in drafts] == [5, 6], "#6 carries both labels once"
+    assert all("--label" in a for a in _issue_lists(gh)), "no unfiltered list"
+
+
+async def test_a_sighted_issue_past_the_limit_keeps_its_line_without_a_view(tmp_path):
+    """Mutation: departures read off the unfiltered list view #5 every pass."""
+    gh = _busy_repo()
+    drafts = await issues_patrol(
+        str(tmp_path),
+        workspace_id="w1",
+        issue_labels=["suite"],
+        gh=gh,
+        sighted=[f"github:{SLUG}#5", f"github:{SLUG}#6"],
+    )
+
+    assert [d.get("resolve") for d in drafts] == [None, None]
+    assert [a for a in gh.calls if a[:3] == ["gh", "issue", "view"]] == []
+
+
+async def test_one_failed_label_list_files_and_resolves_nothing(tmp_path):
+    """A label list that fails would make its issues look like they left the
+    line: the pass files nothing, resolves nothing and views nothing."""
+    gh = _busy_repo()
+    gh.failing = {"needs-core"}
+    gh.views = {5: {"state": "CLOSED", "labels": [], "body": ""}}
+    drafts = await issues_patrol(
+        str(tmp_path),
+        workspace_id="w1",
+        issue_labels=["suite", "needs-core"],
+        gh=gh,
+        sighted=[f"github:{SLUG}#5", f"github:{SLUG}#6"],
+    )
+
+    assert drafts == []
+    assert [a for a in gh.calls if a[:3] == ["gh", "issue", "view"]] == []
+
+
+async def test_the_patrol_label_lists_serve_the_dependency_check(tmp_path):
+    """The patrol and the backlog's dependency check run in one tick: each
+    charter label is listed once between them (GraphQL budget). Mutation: the
+    patrol not warming the cache lists ``suite`` twice."""
+    gh = _busy_repo()
+    await _patrol(gh, ["suite"], tmp_path)
+    blocked = await patrols.open_dependencies(
+        str(tmp_path), [f"github:{SLUG}#5"], gh=gh, labels=("suite",)
+    )
+
+    assert blocked == {}
+    labelled = [a for a in _issue_lists(gh) if "--label" in a]
+    assert len(labelled) == 1 and _issue_lists(gh)[0] == labelled[0], "the patrol's list"

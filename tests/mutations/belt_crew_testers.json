@@ -551,5 +551,33 @@
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
     ]
+  },
+  {
+    "label": "the GitHub patrol reads one unfiltered open list",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "argv = [\"gh\", \"issue\", \"list\", \"-R\", slug, \"--state\", \"open\", \"--label\", label]",
+    "replace": "argv = [\"gh\", \"issue\", \"list\", \"-R\", slug, \"--state\", \"open\"]",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_a_labelled_issue_past_the_open_list_limit_is_sighted",
+      "tests/cloud/test_belt_github_issues_patrol.py::test_a_sighted_issue_past_the_limit_keeps_its_line_without_a_view"
+    ]
+  },
+  {
+    "label": "an issue on two charter labels is sighted twice",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        if issue[\"number\"] in open_labels:\n            continue  # on two charter labels' lists\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_a_labelled_issue_past_the_open_list_limit_is_sighted"
+    ]
+  },
+  {
+    "label": "the patrol's label lists do not warm the dependency check",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        _LABELLED_BODIES.setdefault(label, {})[slug] = (time.monotonic(), rows)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_patrol_label_lists_serve_the_dependency_check"
+    ]
   }
 ]

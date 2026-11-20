@@ -11,8 +11,8 @@
 #                    against ``KNOWN_STALE``, a hardcoded demo table (the parse
 #                    and sighting plumbing are real; the advisory data is not).
 #   * ``issues``   — OPEN issues on the bound repo's tracker, one sighting per
-#                    issue. A GitHub ``origin`` reads ``gh issue list`` and takes
-#                    issues carrying a charter ``issue_labels`` label (none =
+#                    issue. A GitHub ``origin`` reads one ``gh issue list
+#                    --label`` per charter ``issue_labels`` label (none =
 #                    nothing), keyed ``github:<owner>/<repo>#<n>`` (also the
 #                    source key hand-filed feedback sightings use, so the
 #                    service dedupes across both). Each ``sighted`` issue that
@@ -356,11 +356,12 @@ async def _default_execute(
     )
 
 
-# The GitHub half of ``issues``: open issues through ``gh issue list`` (argv,
-# scrubbed env), taken when they carry a charter ``issue_labels`` label. The
-# source key ``github:<owner>/<repo>#<n>`` is also the dedup key, so an issue a
-# human already filed through the feedback intake is not sighted twice.
-_GH_ISSUE_LIMIT = "100"
+# The GitHub half of ``issues``: open issues through one ``gh issue list
+# --label`` per charter ``issue_labels`` label (argv, scrubbed env), so an old
+# labelled issue past an unfiltered list's limit on a busy repo is still read.
+# The source key ``github:<owner>/<repo>#<n>`` is also the dedup key, so an
+# issue a human already filed through the feedback intake is not sighted twice.
+_GH_ISSUE_FIELDS = "number,title,body,labels,url"
 
 
 async def _github_slug(repo_id: str, gh: GhFn) -> str | None:
@@ -389,44 +390,42 @@ async def _github_issues(
     slug: str, labels: list[str], gh: GhFn, sighted: list[str] | None = None
 ) -> list[SightingDraft]:
     """One draft per OPEN issue on ``slug`` carrying a label in ``labels``
-    (case-insensitive), plus a resolve marker per ``sighted`` issue that left
-    the line (``_departures``). No labels = nothing (the charter opts in). A gh
-    failure or a malformed payload is zero drafts and resolves nothing."""
+    (case-insensitive), read off one ``--label`` list per label, plus a resolve
+    marker per ``sighted`` issue that left the line (``_departures``). No labels
+    = nothing (the charter opts in). Any list failing or malformed is zero
+    drafts and resolves nothing: its issues would look as if they left."""
     wanted = {label.strip().lower() for label in labels if label.strip()}
     if not slug or not wanted:
         return []
-    argv = [
-        "gh",
-        "issue",
-        "list",
-        "-R",
-        slug,
-        "--state",
-        "open",
-        "--limit",
-        _GH_ISSUE_LIMIT,
-        "--json",
-        "number,title,body,labels,url",
-    ]
-    try:
-        code, out, err = await gh(argv)
-        issues = json.loads(out) if code == 0 else None
-    except Exception:  # noqa: BLE001 — a gh failure must not wedge the shift
-        logger.warning("issues patrol: gh issue list failed for %s", slug, exc_info=True)
-        return []
-    if not isinstance(issues, list):
-        logger.info(
-            "issues patrol: gh issue list %s gave nothing (exit %s): %s",
-            slug,
-            code,
-            (err or "")[-200:],
-        )
-        return []
+    issues: list[Any] = []
+    for label in dict.fromkeys(lb.strip() for lb in labels if lb.strip()):
+        argv = ["gh", "issue", "list", "-R", slug, "--state", "open", "--label", label]
+        argv += ["--limit", _GH_STATE_LIMIT, "--json", _GH_ISSUE_FIELDS]
+        try:
+            code, out, err = await gh(argv)
+            rows = json.loads(out) if code == 0 else None
+        except Exception:  # noqa: BLE001 — a gh failure must not wedge the shift
+            logger.warning("issues patrol: gh issue list failed for %s", slug, exc_info=True)
+            return []
+        if not isinstance(rows, list):
+            logger.info(
+                "issues patrol: gh issue list %s gave nothing (exit %s): %s",
+                slug,
+                code,
+                (err or "")[-200:],
+            )
+            return []
+        # Warms the dependency check's read of this label in the same tick.
+        rows = [r for r in rows if isinstance(r, dict)]
+        _LABELLED_BODIES.setdefault(label, {})[slug] = (time.monotonic(), rows)
+        issues += rows
     drafts: list[SightingDraft] = []
     open_labels: dict[int, set[str]] = {}
     for issue in issues:
         if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
             continue
+        if issue["number"] in open_labels:
+            continue  # on two charter labels' lists
         names = [
             str(lb.get("name") or "") for lb in issue.get("labels") or [] if isinstance(lb, dict)
         ]
@@ -492,9 +491,9 @@ async def _departures(
     """A resolve marker ``{"patrol": "issues", "resolve": <source>, "reason":
     ...}`` per ``sighted`` ``github:<slug>#<n>`` no longer open on this line:
     ``issue-closed``, or ``issue-left-line`` when it is open without a line
-    label. ``open_labels`` is the open list; a number missing from it costs one
-    ``gh issue view``. Open and still labelled (past the list's limit), or a
-    failed view, moves nothing."""
+    label. ``open_labels`` is the line's label lists; a number missing from them
+    (closed, relabelled, or past a list's limit) costs one ``gh issue view``.
+    Open and still labelled, or a failed view, moves nothing."""
     out: list[SightingDraft] = []
     budget = [_MAX_ISSUE_VIEWS]
     for source in dict.fromkeys(sighted):
@@ -675,7 +674,7 @@ async def open_dependencies(
     rows = await open_issues(repo_id, runner)
     for label in dict.fromkeys(lb.strip() for lb in labels if lb.strip()):
         argv = ["gh", "issue", "list", "--state", "open", "--label", label]
-        argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,body"]
+        argv += ["--limit", _GH_STATE_LIMIT, "--json", _GH_ISSUE_FIELDS]
         rows += (await _gh_rows(_LABELLED_BODIES.setdefault(label, {}), repo_id, argv, runner))[1]
     bodies = {
         r["number"]: str(r.get("body") or "") for r in rows if isinstance(r.get("number"), int)
