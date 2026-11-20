@@ -71,6 +71,7 @@ def test_tool_ids_are_namespaced_for_the_allowlist() -> None:
         EDIT_TIMELINE_TOOL_ID,
         EXPORT_TIMELINE_TOOL_ID,
         ADD_MOTION_GRAPHIC_TOOL_ID,
+        "mcp__pocketpaw_timeline__add_media",
     }
 
 

@@ -1193,7 +1193,13 @@ def _first_json_object(text: str) -> Any:
 
 # Studio editor tool envelopes promoted to their own SSE frame (event name =
 # marker): /studio/editor's timeline tools and the craft studios' edit_<app>.
-_EDITOR_ENVELOPE_MARKERS = ("timeline_edit", "timeline_export", "motion_graphic", "craft_edit")
+_EDITOR_ENVELOPE_MARKERS = (
+    "timeline_edit",
+    "timeline_export",
+    "motion_graphic",
+    "media_import",
+    "craft_edit",
+)
 
 
 def _timeline_payload(output: Any, marker: str) -> dict[str, Any] | None:
