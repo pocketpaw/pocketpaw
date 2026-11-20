@@ -56,7 +56,7 @@ Paper, ink, a marker colour and a texture colour: `--mg-bg` is the paper, `--mg-
 - **Step in**: a strip or sheet arrives from off its edge, `xPercent:-105` to 0 or `yPercent:100` to 0, in 0.4 to 0.5 s.
 - **Drop**: a card falls from `yPercent:-30` with `autoAlpha:0` in four steps, already at its angle.
 - **Highlighter**: an `<i>` behind the phrase scales `scaleX` 0 to 1 from the left in six steps.
-- **Marker circle**: an SVG ellipse drawn on with `strokeDashoffset`, using a dash length a little longer than its real perimeter. Do not use `pathLength` for this: dash animation against `pathLength` came out blank or wrong through the renderer in both engines.
+- **Marker circle**: an SVG ellipse drawn on with `strokeDashoffset`, using a dash length a little longer than its real perimeter. Do not use `pathLength` on the ellipse: there it came out blank or wrong through the renderer in both engines. On a `<path>`, `pathLength="1"` with dash tweens renders fine (see `studio-motion-effects`).
 - **Stepped count**: the counter helper with `ease:"steps(12)"`, so the number ticks, not spins.
 - **One `from` per element**: two `tl.from()` tweens that both reach the same element (a shared class such as `.ht` used in two shots) leave it invisible, because the second records the first one's hidden start as its end. Scope each selector to its shot (`.a .ht`).
 
