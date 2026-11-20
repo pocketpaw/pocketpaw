@@ -297,8 +297,12 @@ async def test_attach_does_not_add_an_op_to_the_closed_vocabulary() -> None:
     naming an import op here would advertise a tool the validator rejects."""
     preamble = await _render(_timeline(attached=[ASSET_BEACH]))
 
-    for invented in ("import_media", "attach_media", "import_asset", "add_media"):
+    from pocketpaw_ee.agent.mcp_servers.timeline import ADD_MEDIA_TOOL_ID
+
+    for invented in ("import_media", "attach_media", "import_asset"):
         assert invented not in preamble
+    # add_media is a separate timeline TOOL for files the agent made, never an op.
+    assert preamble.count("add_media") == preamble.count(ADD_MEDIA_TOOL_ID)
     assert "this list is closed" in preamble
     assert "place_clip" in preamble
 
@@ -456,3 +460,16 @@ async def test_the_procedure_says_scene_lines_are_heuristics_and_names_the_sheet
     assert "not from watching it" in flat
     assert "SOURCE time inside that asset" in flat
     assert "<asset>-scenes.jpg" in flat
+
+
+async def test_media_the_agent_makes_has_a_way_onto_the_rail() -> None:
+    """An agent that synthesised a voiceover had no way to put it on the timeline.
+
+    The preamble must name the tool that does it, by the exact id the surface
+    allows, and must not send the user off to download and re-upload."""
+    from pocketpaw_ee.agent.mcp_servers.timeline import ADD_MEDIA_TOOL_ID
+
+    preamble = await _render(_timeline())
+
+    assert f"`{ADD_MEDIA_TOOL_ID}`" in preamble
+    assert "never tell the user to download and re-upload" in preamble.lower()

@@ -1,0 +1,47 @@
+[
+  {
+    "label": "add_media skips the jail check",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "        resolved = deliver._resolve_in_jail(path_arg, workspace_id)\n",
+    "replace": "        resolved = __import__(\"pathlib\").Path(path_arg).resolve()\n",
+    "tests": [
+      "tests/ee/agent/test_timeline_add_media.py"
+    ]
+  },
+  {
+    "label": "add_media accepts any file type",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    if kind not in (\"audio\", \"video\", \"image\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/agent/test_timeline_add_media.py"
+    ]
+  },
+  {
+    "label": "run_core stops promoting the media_import envelope",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    \"media_import\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_timeline_add_media.py"
+    ]
+  },
+  {
+    "label": "the editor surface stops offering add_media",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline.py",
+    "find": "    ADD_MOTION_GRAPHIC_TOOL_ID,\n    ADD_MEDIA_TOOL_ID,\n)",
+    "replace": "    ADD_MOTION_GRAPHIC_TOOL_ID,\n)",
+    "tests": [
+      "tests/ee/agent/test_timeline_add_media.py"
+    ]
+  },
+  {
+    "label": "the preamble stops naming add_media",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "`mcp__pocketpaw_timeline__add_media`",
+    "replace": "the timeline tools",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
+  }
+]
