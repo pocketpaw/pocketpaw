@@ -41,7 +41,7 @@ def _world_examples() -> list[tuple[str, str]]:
 
 
 def _effect_examples() -> list[str]:
-    return _examples(EFFECTS / "references" / "recipes.md")
+    return _examples(EFFECTS / "references" / "examples.md")
 
 
 def _root(html: str) -> str:
@@ -135,8 +135,8 @@ def test_the_examples_do_not_share_one_look() -> None:
     looks = [_root(html) for _, html in _world_examples()] + [_root(h) for h in _effect_examples()]
     backgrounds = [re.search(r"--mg-bg:\s*([^;\"]+)", r).group(1).strip().lower() for r in looks]
     fonts = [re.search(r"--mg-font-display:\s*([^;\"]+)", r).group(1).strip() for r in looks]
-    assert len(set(backgrounds)) >= len(looks) - 1, backgrounds
-    assert len(set(fonts)) >= len(looks) - 2, fonts
+    assert len(set(backgrounds)) == len(looks), backgrounds
+    assert len(set(fonts)) == len(looks), fonts
 
 
 def test_the_house_palettes_stay_with_the_presets() -> None:

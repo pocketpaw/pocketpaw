@@ -18,9 +18,12 @@ another object (a button into a player, bars into a line, a pill into a card),
 driven by one clock, and drawn with plain DOM, SVG and GSAP so the editor's
 renderer paints it the same in every browser.
 
-Recipes, snippets and three full compositions:
-[references/recipes.md](references/recipes.md). Read the recipe you picked
-before writing; it lists the markup and the tweens.
+Recipes live in four files; read only the one you need, before writing:
+[references/setup.md](references/setup.md) (the clock helpers every recipe
+uses), [references/recipes-interfaces.md](references/recipes-interfaces.md)
+(01-04, 17-20), [references/recipes-data.md](references/recipes-data.md)
+(05-08, 13-16) and [references/recipes-type.md](references/recipes-type.md)
+(09-12). Three full compositions: [references/examples.md](references/examples.md).
 
 ## The clock
 
@@ -198,7 +201,7 @@ Tested through the editor's capture path in Chromium and WebKit:
 
 ## Recipes
 
-Full recipes in [references/recipes.md](references/recipes.md).
+Full recipes in the four reference files named at the top; the number tells you which.
 
 | # | recipe | what happens | use it to |
 | --- | --- | --- | --- |
