@@ -651,11 +651,20 @@ def _studio_editor_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     # this surface arranges what exists, and generating here would answer
     # "arrange these clips" with a new clip. The one thing it creates is a
     # HyperFrames motion graphic (add_motion_graphic): hyperframes-core is the
-    # composition contract, studio-motion the house styles and presets.
+    # composition contract, studio-motion the house styles and presets,
+    # studio-motion-direction picks the look and studio-motion-effects the moves.
     return SurfaceProfile(
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().timeline_allow,
-        skill_names=frozenset({"studio-editor", "hyperframes-core", "studio-motion"}),
+        skill_names=frozenset(
+            {
+                "studio-editor",
+                "hyperframes-core",
+                "studio-motion",
+                "studio-motion-direction",
+                "studio-motion-effects",
+            }
+        ),
     )
 
 

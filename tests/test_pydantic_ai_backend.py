@@ -1010,6 +1010,51 @@ async def test_skills_capability_engages_and_excludes_script_execution(monkeypat
     assert "read_skill_resource" not in seen["tools"], seen["tools"]
 
 
+async def test_a_skills_reference_files_are_readable(monkeypatch, tmp_path):
+    """A SKILL.md that links ``references/x.md`` must be able to open it.
+
+    Breaks if the resources are dropped (the tool disappears again) or attached
+    under a name that is not the link's own relative path.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+    from pydantic_ai.messages import ToolReturnPart
+
+    from pocketpaw.skills.loader import Skill as PawSkill
+
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "presets.md").write_text("PRESET-BODY-7781", encoding="utf-8")
+    skill = PawSkill(
+        name="demo", description="demo skill.", content="# demo", path=tmp_path / "SKILL.md"
+    )
+    monkeypatch.setattr(PydanticAIBackend, "_load_bundled_skills", staticmethod(lambda: [skill]))
+
+    seen: dict = {}
+
+    async def stream_fn(messages, info: AgentInfo):
+        seen["tools"] = {t.name for t in info.function_tools}
+        returns = [
+            p for m in messages for p in getattr(m, "parts", []) if isinstance(p, ToolReturnPart)
+        ]
+        if returns:
+            seen["read"] = str(returns[-1].content)
+            yield "ok"
+            return
+        yield {
+            0: DeltaToolCall(
+                name="read_skill_resource",
+                json_args='{"skill_name": "demo", "resource_name": "references/presets.md"}',
+            )
+        }
+
+    backend = _backend_with_model(
+        FunctionModel(stream_function=stream_fn), pydantic_ai_skills_enabled=True
+    )
+    await _collect(backend, "read the presets")
+
+    assert "read_skill_resource" in seen["tools"], seen["tools"]
+    assert "PRESET-BODY-7781" in seen.get("read", ""), seen
+
+
 def test_skills_are_passed_programmatically_not_discovered(monkeypatch):
     """No directory / git / S3 discovery — PocketPaw's loader is the one source."""
     pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")

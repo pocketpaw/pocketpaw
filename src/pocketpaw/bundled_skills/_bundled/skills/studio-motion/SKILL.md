@@ -179,8 +179,10 @@ one tween at 0.3s; swap the tween to swap the effect.
 
 ## Presets
 
-`data-preset` names what the graphic is. Start from its example in
-[references/presets.md](references/presets.md) rather than a blank page.
+`data-preset` names what the graphic is. For a plain house card, start from
+its example in [references/presets.md](references/presets.md) rather than a
+blank page. Anything more (an intro, explainer, teaser, demo) is not a preset:
+pick a world with `studio-motion-direction` first.
 
 | preset | markup inside `.mg-stage` | default length |
 | --- | --- | --- |

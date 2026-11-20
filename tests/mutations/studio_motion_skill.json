@@ -2,8 +2,8 @@
   {
     "label": "the /studio/editor profile stops loading studio-motion",
     "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
-    "find": "skill_names=frozenset({\"studio-editor\", \"hyperframes-core\", \"studio-motion\"}),",
-    "replace": "skill_names=frozenset({\"studio-editor\", \"hyperframes-core\"}),",
+    "find": "                \"studio-motion\",\n                \"studio-motion-direction\",",
+    "replace": "                \"studio-motion-direction\",",
     "tests": [
       "tests/ee/agent/test_studio_motion_skill.py"
     ]
@@ -11,8 +11,8 @@
   {
     "label": "the procedure stops naming studio-motion",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
-    "find": "load the `hyperframes-core` and `studio-motion` skills and",
-    "replace": "load the `hyperframes-core` skill and",
+    "find": "then the `hyperframes-core` and\n`studio-motion` skills for the render contract",
+    "replace": "then the `hyperframes-core` skill for the render contract",
     "tests": [
       "tests/cloud/surface/test_studio_editor_preamble.py"
     ]
@@ -168,6 +168,88 @@
     "replace": "  clip under that time on the main video track.",
     "tests": [
       "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
+  },
+  {
+    "label": "the editor profile stops loading studio-motion-direction",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "                \"studio-motion-direction\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
+    ]
+  },
+  {
+    "label": "the editor profile stops loading studio-motion-effects",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "                \"studio-motion-effects\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
+    ]
+  },
+  {
+    "label": "pydantic_ai stops serving references",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "for ref in sorted(Path(s.path).parent.glob(\"references/*.md\"))",
+    "replace": "for ref in sorted(Path(s.path).parent.glob(\"references/*.none\"))",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py",
+      "tests/test_pydantic_ai_backend.py"
+    ]
+  },
+  {
+    "label": "the procedure stops sending new graphics through direction",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/studio_editor.py",
+    "find": "  `studio-motion-direction` skill: weigh two",
+    "replace": "  house preset skill: weigh two",
+    "tests": [
+      "tests/cloud/surface/test_studio_editor_preamble.py"
+    ]
+  },
+  {
+    "label": "a world example drops its data-world",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion-direction/references/world-calm-demo.md",
+    "find": "data-world=\"calm-demo\"",
+    "replace": "data-world=\"x\"",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
+    ]
+  },
+  {
+    "label": "a world example gains a canvas",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion-direction/references/world-beat-cut.md",
+    "find": "<section class=\"clip\"",
+    "replace": "<canvas></canvas><section class=\"clip\"",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
+    ]
+  },
+  {
+    "label": "a world example takes a house palette background",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion-direction/references/world-data-morph.md",
+    "find": "--mg-bg:#0e1a16",
+    "replace": "--mg-bg:#05060f",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
+    ]
+  },
+  {
+    "label": "two examples share a display face",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion-effects/references/examples.md",
+    "find": "--mg-font-display:'Outfit',sans-serif",
+    "replace": "--mg-font-display:'Newsreader',serif",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
+    ]
+  },
+  {
+    "label": "the effects skill links a reference it no longer ships",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/studio-motion-effects/SKILL.md",
+    "find": "[references/recipes-type.md](references/recipes-type.md)",
+    "replace": "[references/recipes-typo.md](references/recipes-typo.md)",
+    "tests": [
+      "tests/ee/agent/test_studio_motion_direction_skill.py"
     ]
   }
 ]

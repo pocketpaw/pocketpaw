@@ -449,8 +449,16 @@ Rules that matter:
   stat card" is replace_range {from_ms: 10000, to_ms: 14000}, with data-duration
   set to exactly that span (4 seconds): the span is cut from the main video and
   the graphic takes its place. "Put a title here" is start_ms = the Playhead.
-  The Playhead is what "here" and "from here" mean. Use the Graphic style for new
-  graphics unless the user names another.
+  The Playhead is what "here" and "from here" mean. Use the Graphic style for a
+  plain house card (title, statement, logo, stat, chart) unless the user names
+  another.
+- PICK A WORLD BEFORE ANYTHING MORE THAN A PLAIN CARD. An intro, explainer,
+  launch teaser, reel opener, demo or milestone starts with the
+  `studio-motion-direction` skill: weigh two of its six worlds (calm-demo,
+  one-take, beat-cut, editorial-collage, launch-beats, data-morph), pick one,
+  tell the user which in one line, and set data-world on the root. Prefer a
+  world this timeline has not used yet unless they want a matching series.
+  Never reuse a world example's layout or copy.
 - EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
   edit its source from that block and call add_motion_graphic with
   replace_asset_id set to its id — never add a second one alongside it.
@@ -561,7 +569,9 @@ you cut, an image), put it on the editor with
 `mcp__pocketpaw_timeline__add_media` and its path in your working directory;
 pass at_ms to place it too. Never tell the user to download and re-upload it.
 
-For a motion graphic, load the `hyperframes-core` and `studio-motion` skills and
+For a motion graphic, load `studio-motion-direction` first (it picks the look),
+`studio-motion-effects` for what moves on screen, then the `hyperframes-core` and
+`studio-motion` skills for the render contract, and
 call `mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
 composition (plus `replace_asset_id` when editing one that exists). Graphics the
 user makes with the editor's Graphics button are listed under MOTION GRAPHICS
