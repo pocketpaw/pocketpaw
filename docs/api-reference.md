@@ -10503,8 +10503,9 @@ stored with `status: "new"` and returned as `{items}`:
 ```
 
 `format` is `hook_demo | slideshow | wall_of_text | meme | talking_head`.
-`play_id` is the `play:<id>` unit the idea was made for, stamped at creation by
-`generate_ideas` and the daily X drafts from the approved Blueprint: the idea's
+`play_id` is the `play:<id>` unit the idea was made for, stamped at creation on
+every new idea (`generate_ideas`, the daily X drafts, memes and pulse picks) from
+the approved Blueprint: the idea's
 platform's one active (`core` / `testing`) acting post play; with two or more,
 the one with the most posts left this ISO week (`posts_per_week` minus the brand's
 ideas already stamped with it since Monday UTC), a tie going to the `core` play,
@@ -11031,9 +11032,10 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
   engagement per post (the `engagement_per_post` rule above, whatever the play's
   KPI key, since it is the only per-post key), `null` with none measured. The play
   average is the same number over all the play's counted posts. Under 5 posts
-  `suggestion` is null and `reason` says how many more are needed; from 5, a
-  format at 1.3x the play average or more is `double_down`, at 0.7x or less is
-  `drop`, anything between is null, and `reason` gives the ratio. A play average
+  `suggestion` is null and `reason` reads `"3 posts, needs 5 for a call"`; from 5,
+  the ratio to the play average is rounded to 2 places, a format at 1.3x or more
+  is `double_down`, at 0.7x or less is `drop`, anything between is null, and
+  `reason` gives that same rounded ratio (`"6 posts, 2.1x the play average"`). A play average
   of 0 or null gives no suggestion and a null `reason`.
 
 ### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`

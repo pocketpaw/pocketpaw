@@ -578,5 +578,14 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
+  },
+  {
+    "label": "formats: the call uses the unrounded ratio, not the printed one",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    ratio = round(avg / play_avg, 2)\n",
+    "replace": "    ratio = avg / play_avg\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
   }
 ]
