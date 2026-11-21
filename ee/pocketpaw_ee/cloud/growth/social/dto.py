@@ -46,6 +46,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -101,6 +102,8 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     clean_tag,
 )
 from pocketpaw_ee.cloud.growth.social.play_catalog import BRANCH_IDS
+
+logger = logging.getLogger(__name__)
 
 MAX_SCRIPT_BEATS = 12
 MAX_HASHTAGS = 15
@@ -983,31 +986,71 @@ def _clean_items(raw: Any) -> list[str]:
     )
 
 
+def _joined(target: str, part: str) -> str:
+    """``part`` after ``target`` with "; " (trailing ". ;," of the target dropped first)."""
+    base = target.rstrip(" .;,\n\t")
+    return f"{base}; {part}" if base else part
+
+
 def append_parts(target: str, text: str) -> str:
-    """``target`` with each "; "-separated part of ``text`` appended unless the target
-    already holds it as a part, cut at the text cap."""
-    parts = [p.strip() for p in target.split(";") if p.strip()]
-    for part in (p.strip() for p in text.split(";")):
-        if part and part not in parts:
-            parts.append(part)
-    # ponytail: a fold past the text cap is cut there; the migration dump keeps the full text.
-    return "; ".join(parts)[:BLUEPRINT_TEXT_MAX]
+    """``target`` with the "; "-separated parts of ``text`` it does not already hold
+    appended. The owner's text is never rewritten; past the text cap the target is
+    kept as it is (logged), never cut."""
+    have = {p.strip().casefold() for p in target.split(";")}
+    missing = [p.strip() for p in text.split(";") if p.strip() and p.strip().casefold() not in have]
+    if not missing:
+        return target
+    out = _joined(target, "; ".join(missing))
+    if len(out) > BLUEPRINT_TEXT_MAX:
+        logger.warning("growth blueprint: audience edit would pass the target cap; kept as is")
+        return target
+    return out
 
 
-def fold_icp(icp: Any) -> Any:
+def _fold_items(target: str, label: str, items: list[str]) -> str:
+    """``target`` with the ``items`` it does not already list under ``label`` (ignoring
+    case) added: onto its last "label: ..." part, else as a new one."""
+    found = list(re.finditer(rf"(?:^|;)\s*{re.escape(label)}: ([^;]*)", target))
+    listed = [f", {m.group(1).strip()}, ".casefold() for m in found]
+    new: list[str] = []
+    for item in items:
+        key = f", {item}, ".casefold()
+        if not any(key in text for text in listed) and item.casefold() not in map(
+            str.casefold, new
+        ):
+            new.append(item)
+    if not new:
+        return target
+    if found:
+        end = found[-1].end(1)
+        return f"{target[:end].rstrip()}, {', '.join(new)}{target[end:]}"
+    return _joined(target, f"{label}: " + ", ".join(new))
+
+
+def fold_icp(icp: Any, *, truncate: bool = False, overflow: list | None = None) -> Any:
     """A copy of ``icp`` with the retired ``segments`` / ``icp_sentences`` folded into
-    ``target`` as "Segments: a, b" / "In their words: x, y", appended after any
-    target text with "; ". Only non-empty lists fold, and a part already in the
-    target is not added again (``append_parts``), so a repeat fold changes nothing. Kept one release
-    (old clients and old rows still send them)."""
+    ``target`` as "Segments: a, b" / "In their words: x, y" after any target text.
+    Only non-empty lists fold, and only the items the target does not already list,
+    so a repeat fold changes nothing and a resend with one new item adds just it.
+    A fold past the text cap is recorded in ``overflow`` (field, length, cap); then
+    the icp is returned unfolded (old keys kept, so nothing is lost and validation
+    refuses it) unless ``truncate`` (the migration's ``--allow-truncate``) cuts it.
+    The input is not touched. Kept one release (old clients and rows send them)."""
     if not isinstance(icp, dict) or not any(k in icp for k, _ in _ICP_FOLDS):
         return icp
     out = dict(icp)
     target = out.get("target") if isinstance(out.get("target"), str) else ""
     for key, label in _ICP_FOLDS:
-        items = _clean_items(out.pop(key, None))
-        if items:
-            target = append_parts(target, f"{label}: " + ", ".join(items))
+        target = _fold_items(target, label, _clean_items(out.get(key)))
+    if len(target) > BLUEPRINT_TEXT_MAX:
+        if overflow is not None:
+            overflow.append(("gtm.icp.target", len(target), BLUEPRINT_TEXT_MAX))
+        if not truncate:
+            logger.warning("growth blueprint: ICP fold would pass the target cap; left unfolded")
+            return out
+        target = target[:BLUEPRINT_TEXT_MAX]
+    for key, _ in _ICP_FOLDS:
+        out.pop(key, None)
     out["target"] = target
     return out
 

@@ -195,7 +195,8 @@ def _roadmap(value: Any) -> BlueprintRoadmap:
 def _domain(sections: dict[str, Any], **meta: Any) -> GrowthBlueprint:
     """A domain Blueprint from legacy-shaped ``sections`` plus row metadata."""
     identity = sections.get("identity") or {}
-    audience = fold_icp(sections.get("audience") or {})
+    # A read for the agents: a fold past the cap is cut here, never stored.
+    audience = fold_icp(sections.get("audience") or {}, truncate=True)
     voice = sections.get("voice") or {}
     return GrowthBlueprint(
         identity=BlueprintIdentity(
@@ -870,11 +871,13 @@ async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[st
 
     sections = {
         "identity": {name: text(getattr(a, name)) for name in ("summary", "product", "problem")},
+        # Generated text, not the owner's: past the cap it is cut.
         "audience": fold_icp(
             {
                 "segments": _checked(_segments(a.audience), source),
                 "icp_sentences": await _icp_sentences(ctx, profile.id),
-            }
+            },
+            truncate=True,
         ),
         "voice": {"tone": text(a.tone), "avoid": _checked(a.avoid, source)},
         "pillars": _pillars(
@@ -921,7 +924,7 @@ def _regenerated(base: dict[str, Any], a: SocialAnalysis, source: str) -> dict[s
     # so a repeat regenerate never grows it.
     out["audience"] = {
         "target": _str(audience.get("target"))
-        or fold_icp({"segments": items(_segments(a.audience))})["target"],
+        or fold_icp({"segments": items(_segments(a.audience))}, truncate=True)["target"],
         "not_for": list(_strs(audience.get("not_for"))),
     }
     out["voice"] = {
@@ -1150,11 +1153,15 @@ def _carry_alternatives(raw: dict[str, Any], new_body: dict[str, Any], base: _Un
         return
     kept = _normal("strategy", base.body).get("positioning", {}).get("alternatives") or []
     folded = new_body["positioning"]["alternatives"]
-    seen = {a.lower() for a in kept}
-    new_body["positioning"]["alternatives"] = [
-        *kept,
-        *(a for a in folded if a.lower() not in seen),
-    ][:MAX_BLUEPRINT_ITEMS]
+    seen = {a.casefold() for a in kept}
+    merged = [*kept, *(a for a in folded if a.casefold() not in seen)]
+    if len(merged) > MAX_BLUEPRINT_ITEMS:  # refuse rather than drop what either side holds
+        raise ValidationError(
+            "social.blueprint_invalid_body",
+            "This Blueprint section has a field that is missing or not allowed",
+            {"errors": [{"loc": ["positioning", "alternatives"], "msg": "too many items"}]},
+        )
+    new_body["positioning"]["alternatives"] = merged
 
 
 async def _unit_result(workspace_id: str, profile_id: str, unit: str):

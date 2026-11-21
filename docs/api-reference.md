@@ -10979,9 +10979,13 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   `gtm.icp.icp_sentences` append to `target` as "Segments: a, b" and "In their
   words: x, y" (a part already in the target is not added again), and non-empty
   `market_research.alternatives` append to `positioning.alternatives` (an item
-  already there, ignoring case, is skipped). A strategy save with no
-  `positioning.alternatives` key keeps the base row's; an explicit `[]` clears it.
-  `scripts/migrate_growth_strategy_one_audience.py` rewrites stored rows.
+  already there, ignoring case, is skipped). A fold that would pass the 2000-char
+  target or the 20-item list is not done and the save is a 422, never a cut. A
+  strategy save with no `positioning.alternatives` key keeps the base row's (a 422
+  if that passes 20 items); an explicit `[]` clears it.
+  `scripts/migrate_growth_strategy_one_audience.py` rewrites stored rows (dry run
+  by default; `--dump <new file>` always; `--allow-truncate`, `--workspace`,
+  `--profile`).
   `plan`: `roadmap` (as above), `budget {money_per_month, hours_per_week}`.
   `play:<id>`: `status` (`core`, `testing` default, `parked`), `role`, `goal_id`,
   `audience`, `formats [{name, status}]`, `pillar_mix [{pillar, weight}]`,

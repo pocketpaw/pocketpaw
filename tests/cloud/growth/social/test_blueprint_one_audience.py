@@ -25,11 +25,13 @@ from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social.analyst import blueprint_lines
 from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import StrategyBody, fold_strategy
 from pocketpaw_ee.cloud.growth.social.domain import SocialAnalysis
+from pocketpaw_ee.cloud.growth.social.dto import fold_icp
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
 from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
+from pydantic import ValidationError
 
 from tests.cloud.growth.social.test_blueprint import _profile
-from tests.cloud.growth.social.test_blueprint_units import UNITS, _ok, _put
+from tests.cloud.growth.social.test_blueprint_units import UNITS, _ok, _put, _rev
 from tests.cloud.growth.social.test_router import _client
 
 _SCRIPT = (
@@ -113,6 +115,45 @@ def test_regenerate_seeds_only_an_empty_target_so_a_repeat_never_grows_it():
     assert once["audience"] == twice["audience"] == owned["audience"]
 
 
+def test_a_resend_with_one_new_item_adds_just_that_item():
+    once = fold_strategy(_OLD)["gtm"]["icp"]
+    again = fold_icp({**once, "segments": ["Studios", "agencies", "solo founders"]})
+    assert again["target"] == (
+        "Indie devs; Segments: studios, agencies, solo founders; In their words: I hate invoicing"
+    )
+    # Items with commas inside still match themselves.
+    said = {"target": "x", "icp_sentences": ["Teams of 2, 3 people"]}
+    assert fold_icp(fold_icp(said)) == fold_icp(said)
+
+
+def test_trailing_punctuation_does_not_meet_the_separator():
+    assert fold_icp({"target": "Founders.", "segments": ["a"]})["target"] == "Founders; Segments: a"
+
+
+def test_a_fold_past_a_cap_is_left_undone_so_nothing_is_lost():
+    overflow: list = []
+    out = fold_strategy(_LONG, overflow=overflow)
+    assert out["gtm"]["icp"] == _LONG["gtm"]["icp"]
+    assert overflow == [("gtm.icp.target", 2021, 2000)]
+    with pytest.raises(ValidationError):  # the save is refused rather than cut
+        StrategyBody.model_validate(_LONG)
+    many = {
+        "market_research": {"alternatives": [f"new {i}" for i in range(5)]},
+        "positioning": {"alternatives": [f"old {i}" for i in range(20)]},
+    }
+    assert fold_strategy(many) == many
+    cut = fold_strategy(many, truncate=True)["positioning"]["alternatives"]
+    assert len(cut) == 20
+
+
+@pytest.mark.parametrize("positioning", [None, "garbage", "missing"])
+def test_alternatives_move_creates_a_missing_positioning(positioning):
+    body = {"market_research": {"alternatives": ["Excel"]}}
+    if positioning != "missing":
+        body["positioning"] = positioning
+    assert fold_strategy(body)["positioning"] == {"alternatives": ["Excel"]}
+
+
 # --- reads fold a stored old-shape row ------------------------------------------------------
 
 
@@ -192,6 +233,21 @@ async def test_an_old_client_save_over_a_migrated_row_loses_nothing_and_never_fo
     draft = (await _put(w1, pid, "strategy", old_client, 2))["draft"]["body"]
     assert draft["positioning"]["alternatives"] == ["Notion", "Excel", "Sheets"]
 
+    # Over the item cap the save is refused, never cut.
+    full = {**old_client, "market_research": {"alternatives": ["One more"]}}
+    stored = {
+        **draft,
+        "positioning": {**draft["positioning"], "alternatives": [f"a{i}" for i in range(20)]},
+    }
+    await _put(w1, pid, "strategy", stored, 2)
+    resp = await w1.put(
+        f"{UNITS}/strategy/draft",
+        params={"profile_id": pid},
+        json={"body": full, "base_version": 2, "base_rev": await _rev(pid, "strategy")},
+    )
+    assert resp.status_code == 422, resp.text
+    draft = stored
+
     # A new client's explicit [] clears it: only a missing key is carried.
     cleared = {**draft, "positioning": {**draft["positioning"], "alternatives": []}}
     draft = (await _put(w1, pid, "strategy", cleared, 2))["draft"]["body"]
@@ -201,21 +257,21 @@ async def test_an_old_client_save_over_a_migrated_row_loses_nothing_and_never_fo
 # --- the migration script -------------------------------------------------------------------
 
 
-def _db(rows: list[dict]):
+def _db(rows: list[tuple], *, rev: bool = True):
     db = mongomock.MongoClient()["paw-cloud"]
     coll = db["growth_blueprint_units"]
     for i, (status, body) in enumerate(rows):
-        coll.insert_one(
-            {
-                "workspace": "w1",
-                "profile_id": f"p{i}",
-                "unit": "strategy",
-                "version": 1,
-                "status": status,
-                "rev": 3,
-                "body": copy.deepcopy(body),
-            }
-        )
+        doc = {
+            "workspace": "w1",
+            "profile_id": f"p{i}",
+            "unit": "strategy",
+            "version": 1,
+            "status": status,
+            "body": copy.deepcopy(body),
+        }
+        if rev:
+            doc["rev"] = 3
+        coll.insert_one(doc)
     return db
 
 
@@ -225,6 +281,7 @@ _ROWS = [
     ("superseded", _OLD),
     ("approved", fold_strategy(_OLD)),
 ]
+_LONG = {"gtm": {"icp": {"target": "t" * 1990, "segments": ["more than ten chars"]}}}
 
 
 def test_the_dry_run_writes_nothing_but_the_dump(tmp_path, capsys):
@@ -237,14 +294,26 @@ def test_the_dry_run_writes_nothing_but_the_dump(tmp_path, capsys):
     assert [d["status"] for d in dumped] == ["approved", "draft", "approved"]
     assert dumped[0]["body"] == _OLD and {"_id", "profile_id", "version", "rev"} <= set(dumped[0])
     out = capsys.readouterr().out
-    assert "3 strategy row(s) approved or draft, 3 processed, 2 to change" in out
+    assert "3 matched, 2 would write, 1 already new shape, 0 raced" in out
     assert "before" in out and "after" in out
 
 
-def test_the_real_run_rewrites_approved_and_draft_rows_and_bumps_rev(capsys):
+def test_an_existing_dump_is_never_overwritten(tmp_path, monkeypatch):
+    dump = tmp_path / "strategy.json"
+    dump.write_text("the restore copy")
+    with pytest.raises(FileExistsError):
+        _script().run(_db(_ROWS), apply=True, dump=str(dump))
+    assert dump.read_text() == "the restore copy"
+    monkeypatch.setenv("CLOUD_MONGODB_URI", "mongodb://localhost:1/paw-cloud")
+    with pytest.raises(SystemExit) as exc:
+        _script().main(["--apply", "--dump", str(dump)])
+    assert exc.value.code == 2 and dump.read_text() == "the restore copy"
+
+
+def test_the_real_run_rewrites_approved_and_draft_rows_and_bumps_rev(tmp_path, capsys):
     db = _db(_ROWS)
     script = _script()
-    assert script.run(db, apply=True, dump=None) == 0
+    assert script.run(db, apply=True, dump=str(tmp_path / "a.json")) == 0
     rows = {r["status"]: r for r in db["growth_blueprint_units"].find({"profile_id": "p0"})}
     assert rows["approved"]["body"] == fold_strategy(_OLD) and rows["approved"]["rev"] == 4
     draft = db["growth_blueprint_units"].find_one({"profile_id": "p1"})
@@ -253,13 +322,46 @@ def test_the_real_run_rewrites_approved_and_draft_rows_and_bumps_rev(capsys):
     assert superseded["body"] == _OLD and superseded["rev"] == 3
     untouched = db["growth_blueprint_units"].find_one({"profile_id": "p3"})
     assert untouched["rev"] == 3
-    assert "0 still old-shape -> OK" in capsys.readouterr().out
-    # A re-run processes every row again and changes none.
-    assert script.run(db, apply=True, dump=None) == 0
-    assert "3 processed, 0 changed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "3 matched, 2 written, 1 already new shape, 0 raced" in out and "-> OK" in out
+    # A re-run writes nothing and still passes.
+    assert script.run(db, apply=True, dump=str(tmp_path / "b.json")) == 0
+    assert "0 written, 3 already new shape" in capsys.readouterr().out
 
 
-def test_the_count_check_fails_when_a_row_could_not_be_written(capsys):
+def test_a_row_with_no_rev_is_written(tmp_path):
+    db = _db(_ROWS[:1], rev=False)
+    assert _script().run(db, apply=True, dump=str(tmp_path / "a.json")) == 0
+    row = db["growth_blueprint_units"].find_one()
+    assert row["body"]["gtm"]["icp"]["target"] == _TARGET and row["rev"] == 1
+
+
+def test_a_truncating_fold_is_reported_and_refused_unless_allowed(tmp_path, capsys):
+    db = _db([("approved", _LONG)])
+    script = _script()
+    assert script.run(db, apply=False, dump=str(tmp_path / "a.json")) == 0
+    assert "TRUNCATED gtm.icp.target: 2021 -> 2000" in capsys.readouterr().out
+    assert script.run(db, apply=True, dump=str(tmp_path / "b.json")) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "1 truncating (1 refused), 1 still old-shape -> MISMATCH" in out
+    assert db["growth_blueprint_units"].find_one()["body"] == _LONG
+    dump = tmp_path / "c.json"
+    assert script.run(db, apply=True, dump=str(dump), allow_truncate=True) == 0
+    assert json.loads(dump.read_text())[0]["body"] == _LONG  # the full text is kept
+    icp = db["growth_blueprint_units"].find_one()["body"]["gtm"]["icp"]
+    assert len(icp["target"]) == 2000 and "segments" not in icp
+
+
+def test_the_workspace_and_profile_filters_canary_one_brand(tmp_path):
+    db = _db(_ROWS)
+    assert _script().run(db, apply=True, dump=str(tmp_path / "a.json"), profile="p1") == 0
+    bodies = {r["profile_id"]: r["body"] for r in db["growth_blueprint_units"].find()}
+    assert bodies["p0"] == _OLD and bodies["p1"] == fold_strategy(_OLD)
+    assert _script().run(db, apply=True, dump=str(tmp_path / "b.json"), workspace="w9") == 0
+    assert bodies["p0"] == db["growth_blueprint_units"].find_one({"profile_id": "p0"})["body"]
+
+
+def test_the_count_check_fails_when_a_row_could_not_be_written(tmp_path, capsys):
     db = _db(_ROWS[:1])
     coll = db["growth_blueprint_units"]
 
@@ -272,9 +374,10 @@ def test_the_count_check_fails_when_a_row_could_not_be_written(capsys):
         def update_one(self, match, update):
             return coll.update_one({**match, "rev": -1}, update)
 
-    assert _script().run({"growth_blueprint_units": _Raced()}, apply=True, dump=None) == 1
+    dump = str(tmp_path / "a.json")
+    assert _script().run({"growth_blueprint_units": _Raced()}, apply=True, dump=dump) == 1
     out = capsys.readouterr().out
-    assert "NOT WRITTEN" in out and "1 still old-shape -> MISMATCH" in out
+    assert "NOT WRITTEN" in out and "1 raced" in out and "1 still old-shape -> MISMATCH" in out
 
 
 @pytest.mark.parametrize("argv", [[], ["--dry-run"], ["--apply"]])

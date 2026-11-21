@@ -16,7 +16,8 @@
 # and left out of a dump when unset, so an untouched old body dumps as it did.
 # A strategy keeps one audience (``gtm.icp.target`` plus ``not_for`` and
 # ``triggers``) and what people use now in ``positioning.alternatives``; a body in
-# the old shape folds on validation (``fold_strategy``, appending, never erasing).
+# the old shape folds on validation (``fold_strategy``, appending, never erasing;
+# a fold past a cap is left undone, so the save is refused rather than cut).
 # Creator extras require a disclosure and usage rights (FTC).
 # ``BODY_MODELS`` maps a unit kind to its model; ``blueprint.py`` validates a body
 # against it and checks cross-unit goal references there (they need the store).
@@ -24,6 +25,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, get_args
@@ -60,6 +62,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     _unique,
     fold_icp,
 )
+
+logger = logging.getLogger(__name__)
 
 UnitStatus = BlueprintStatus
 PlayStatus = Literal["core", "testing", "parked"]
@@ -186,36 +190,43 @@ class Choices(_Body):
     not_doing: _BlueprintItems = Field(default_factory=list)
 
 
-def fold_strategy(body: Any) -> Any:
+def fold_strategy(body: Any, *, truncate: bool = False, overflow: list | None = None) -> Any:
     """A copy of a strategy ``body`` in the current shape: ``gtm.icp``'s retired lists
     folded into ``target`` (``fold_icp``) and ``market_research.alternatives`` moved
-    onto the end of ``positioning.alternatives``. Only non-empty old values fold;
-    they append (an item already there, ignoring case, is skipped) and never
-    replace. Idempotent; the input is not touched. Kept one release."""
+    onto the end of ``positioning.alternatives`` (created when missing). Only
+    non-empty old values fold; they append (an item already there, ignoring case,
+    is skipped) and never replace. A fold past a cap is recorded in ``overflow`` and
+    left undone (old keys kept, logged) unless ``truncate`` cuts it. Idempotent;
+    the input is not touched. Kept one release."""
     if not isinstance(body, dict):
         return body
     out = dict(body)
     gtm = out.get("gtm")
     if isinstance(gtm, dict) and isinstance(gtm.get("icp"), dict):
-        out["gtm"] = {**gtm, "icp": fold_icp(gtm["icp"])}
+        out["gtm"] = {**gtm, "icp": fold_icp(gtm["icp"], truncate=truncate, overflow=overflow)}
     research = out.get("market_research")
-    if isinstance(research, dict) and "alternatives" in research:
-        research = dict(research)
-        moved = _clean_items(research.pop("alternatives"))
-        out["market_research"] = research
-        positioning = out.get("positioning")
-        if moved and isinstance(positioning, dict | None):
-            positioning = dict(positioning or {})
-            have = positioning.get("alternatives")
-            have = list(have) if isinstance(have, list) else []
-            seen = {s.strip().lower() for s in have if isinstance(s, str)}
-            for item in moved:
-                if item.lower() not in seen:
-                    have.append(item)
-                    seen.add(item.lower())
-            # ponytail: past the item cap the oldest win; the migration dump keeps the rest.
-            positioning["alternatives"] = have[:MAX_BLUEPRINT_ITEMS]
-            out["positioning"] = positioning
+    if not (isinstance(research, dict) and "alternatives" in research):
+        return out
+    moved = _clean_items(research["alternatives"])
+    positioning = out.get("positioning")
+    positioning = dict(positioning) if isinstance(positioning, dict) else {}
+    have = positioning.get("alternatives")
+    have = list(have) if isinstance(have, list) else []
+    seen = {s.strip().casefold() for s in have if isinstance(s, str)}
+    for item in moved:
+        if item.casefold() not in seen:
+            have.append(item)
+            seen.add(item.casefold())
+    if len(have) > MAX_BLUEPRINT_ITEMS:
+        if overflow is not None:
+            overflow.append(("positioning.alternatives", len(have), MAX_BLUEPRINT_ITEMS))
+        if not truncate:
+            logger.warning("growth blueprint: alternatives move would pass the item cap; left")
+            return out
+        have = have[:MAX_BLUEPRINT_ITEMS]
+    out["market_research"] = {k: v for k, v in research.items() if k != "alternatives"}
+    if moved:
+        out["positioning"] = {**positioning, "alternatives": have}
     return out
 
 
