@@ -238,6 +238,7 @@ async def test_sweep_snapshots_reporting_posts_once_and_skips_x_and_personal_lin
         1,
     )
     assert (lp.impressions, lp.likes, lp.replies, lp.reposts, lp.x_post_id) == (1520, 31, 6, 3, "")
+    assert abs(social_service._aware(lp.published_at) - (now - DAY)) < timedelta(seconds=1)
     ig = rows["p-ig"]
     assert (ig.idea, ig.platform, ig.age_bucket) == (str(ig_idea.id), "instagram-standalone", 3)
     assert (ig.impressions, ig.likes, ig.bookmarks) == (410, 12, 0)

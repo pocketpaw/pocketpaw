@@ -14,7 +14,9 @@
 # ``POSTIZ_STATS_PLATFORMS`` are the providers whose Postiz v2.25.0 integration
 # reports per-post stats (X stays on its direct API; personal LinkedIn reports
 # none), and ``postiz_counts`` maps Postiz labels onto ``METRIC_FIELDS``
-# (exact, case-insensitive; unknown labels dropped).
+# (exact, case-insensitive; unknown labels dropped). ``postiz_channel`` names
+# the Blueprint channel a provider's posts count toward (a LinkedIn Page is
+# ``linkedin``; any other provider keeps its own id).
 
 from __future__ import annotations
 
@@ -69,6 +71,14 @@ POSTIZ_LABELS: dict[str, str] = {
 }
 
 
+# Postiz provider id -> Blueprint channel, where the two differ.
+POSTIZ_CHANNELS: dict[str, str] = {"linkedin-page": "linkedin"}
+
+
+def postiz_channel(provider: str) -> str:
+    return POSTIZ_CHANNELS.get(provider, provider)
+
+
 def postiz_counts(totals: dict[str, int]) -> dict[str, int]:
     """Our metric counts from Postiz ``{label: total}``; ``{}`` when no label is known.
     When two labels land on one name, the first one Postiz sent wins."""
@@ -120,10 +130,12 @@ def resolve_metrics_fn() -> XMetricsFn | None:
 
 __all__ = [
     "METRIC_FIELDS",
+    "POSTIZ_CHANNELS",
     "POSTIZ_LABELS",
     "POSTIZ_STATS_PLATFORMS",
     "X_BATCH_SIZE",
     "XMetricsFn",
+    "postiz_channel",
     "postiz_counts",
     "resolve_metrics_fn",
     "set_production_metrics_fn",

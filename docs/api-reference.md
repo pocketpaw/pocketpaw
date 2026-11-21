@@ -10613,7 +10613,7 @@ Each snapshot row carries `platform` (`"x"`, or the Postiz provider id such as
 `"linkedin-page"`) and either `x_post_id` or `postiz_post_id`. Rows written
 before `platform` existed read as `"x"`. A row is unique per idea, platform,
 Postiz post and age. The weekly review and the morning summary below read only
-the X rows for now.
+the X rows; the Blueprint live values read both (see Live values).
 
 X is read with `POCKETPAW_GROWTH_X_BEARER_TOKEN` (an X API app bearer token;
 unset means no reads and no snapshots), in batches of up to 100 posts, one read
@@ -11030,6 +11030,14 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
   acting post play; with two (`x-organic` and `x-authority` both on), each play's
   post-based values are null and only the objectives show the platform's number.
   `github_stars` is brand-wide for every play.
+- Per platform: the numbers of a post measured through Postiz (step 3 of the post
+  metrics job) count on the channel of its Postiz provider, so a LinkedIn Page
+  post counts toward `linkedin` and its plays. It counts at its own publish time,
+  separately from its idea. An idea's X-API snapshots count only on the idea's own
+  platform. An X idea cross-posted to a LinkedIn Page therefore counts once toward
+  the X play and once toward the LinkedIn play. A brand-wide objective counts
+  both. Tracked-link clicks stay with the idea's own platform. Personal LinkedIn
+  reports no stats in Postiz, so a LinkedIn play gets numbers only from Page posts.
 
 ### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`
 

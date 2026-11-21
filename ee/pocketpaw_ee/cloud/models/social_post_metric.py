@@ -3,8 +3,9 @@
 # after it went live), scoped to a workspace, profile and idea. ``platform`` is
 # the network it went out on: "x" rows come from X's API and carry
 # ``x_post_id``; other rows come from Postiz post stats and carry
-# ``postiz_post_id``. Rows written before ``platform`` existed are X rows and
-# read as "x" (the stored doc has no key; queries for X match a missing key too).
+# ``postiz_post_id`` plus the post's ``published_at`` (an X row's lives on its
+# idea). Rows written before ``platform`` existed are X rows and read as "x" (the
+# stored doc has no key; queries for X match a missing key too).
 #
 # Append-only: the unique (workspace, idea, platform, postiz_post_id, age_bucket)
 # index means each post's bucket is written once and never updated or deleted; a
@@ -33,6 +34,7 @@ class SocialPostMetric(TimestampedDocument):
     platform: str = "x"
     x_post_id: str = ""
     postiz_post_id: str | None = None
+    published_at: datetime | None = None
     age_bucket: int
     impressions: int = 0
     likes: int = 0

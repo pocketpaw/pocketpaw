@@ -3430,7 +3430,8 @@ async def _snapshot_postiz_profile(
             )
             if post.get("state") != "PUBLISHED" or platform not in POSTIZ_STATS_PLATFORMS:
                 continue
-            bucket = due_bucket(_parse_iso(post.get("publishDate"), now), now)
+            published = _parse_iso(post.get("publishDate"), now)
+            bucket = due_bucket(published, now)
             if bucket is None or (str(doc.id), pid, bucket) in stored:
                 continue
             due += 1
@@ -3451,6 +3452,7 @@ async def _snapshot_postiz_profile(
                     idea=str(doc.id),
                     platform=platform,
                     postiz_post_id=pid,
+                    published_at=published,
                     age_bucket=bucket,
                     captured_at=now,
                     **{k: counts.get(k, 0) for k in METRIC_FIELDS},
@@ -3615,7 +3617,10 @@ class _LiveIdeaRow(BaseModel):
 class _LiveMetricRow(BaseModel):
     workspace: str
     idea: str
-    x_post_id: str
+    platform: str = "x"
+    x_post_id: str = ""
+    postiz_post_id: str | None = None
+    published_at: datetime | None = None
     age_bucket: int
     captured_at: datetime
     impressions: int = 0
@@ -3633,8 +3638,13 @@ class _LiveLinkRow(BaseModel):
 
 async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
     """Every published idea of one brand (an idea with no platform counts as ``x``)
-    with all its metric snapshots and its tracked links' clicks per UTC day, within
-    ``workspace_id`` only. A pure read; ``live`` does the math."""
+    with its X snapshots and its tracked links' clicks per UTC day, plus one entry per
+    Postiz-measured post (its idea, its provider's channel via ``postiz_channel``,
+    its own publish time and snapshots, no clicks), within ``workspace_id`` only. So
+    an X idea cross-posted to a LinkedIn Page counts once on X and once on LinkedIn.
+    A pure read; ``live`` does the math."""
+    from pocketpaw_ee.cloud.growth.social.metrics import postiz_channel
+
     # ponytail: reads the brand's whole published history; add a window if it grows large.
     ideas = (
         await _IdeaDoc.find(
@@ -3644,22 +3654,33 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
         .to_list()
     )
     ids = [str(d.id) for d in ideas]
+
+    def _snapshot(m: _LiveMetricRow) -> PostMetrics:
+        return PostMetrics(
+            workspace_id=m.workspace,
+            idea_id=m.idea,
+            x_post_id=m.x_post_id,
+            age_bucket=m.age_bucket,
+            captured_at=_aware(m.captured_at),
+            **{k: getattr(m, k) for k in METRIC_FIELDS},
+        )
+
     snaps: dict[str, list[PostMetrics]] = {}
     for m in (
-        await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}})
+        await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}, **_X_ROWS})
         .project(_LiveMetricRow)
         .to_list()
     ):
-        snaps.setdefault(m.idea, []).append(
-            PostMetrics(
-                workspace_id=m.workspace,
-                idea_id=m.idea,
-                x_post_id=m.x_post_id,
-                age_bucket=m.age_bucket,
-                captured_at=_aware(m.captured_at),
-                **{k: getattr(m, k) for k in METRIC_FIELDS},
-            )
+        snaps.setdefault(m.idea, []).append(_snapshot(m))
+    postiz: dict[tuple[str, str], list[_LiveMetricRow]] = {}
+    for m in (
+        await _MetricDoc.find(
+            {"workspace": workspace_id, "profile": profile_id, "platform": {"$nin": ["x", None]}}
         )
+        .project(_LiveMetricRow)
+        .to_list()
+    ):
+        postiz.setdefault((m.idea, m.postiz_post_id or ""), []).append(m)
     clicks: dict[str, list[dict[str, int]]] = {}
     for link in (
         await _LinkDoc.find({"workspace": workspace_id, "idea": {"$in": ids}})
@@ -3678,6 +3699,19 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
         )
         for d in ideas
         if d.published_at is not None  # excluded by the query; narrows the type
+    ] + [
+        LivePost(
+            workspace_id=workspace_id,
+            idea_id=idea,
+            platform=postiz_channel(rows[0].platform),
+            # Rows written by the Postiz step carry published_at; the fallback is
+            # the bucket's start, at most a day late.
+            published_at=_aware(
+                rows[0].published_at or rows[0].captured_at - timedelta(days=rows[0].age_bucket)
+            ),
+            snapshots=tuple(_snapshot(m) for m in rows),
+        )
+        for (idea, _), rows in postiz.items()
     ]
 
 
