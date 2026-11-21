@@ -18,9 +18,9 @@
 # "failed"`` for analysis, one atomic ``$set``). Ideas need a completed onboarding.
 # Ideas, the daily X drafts and reply cards read the brand's approved Blueprint once
 # per run (never a draft), hand it to the agent and stamp ``blueprint_version`` on
-# every row; every new idea gets the ``play_id`` it is for (``_play_picker``).
-# Without one, ideas and reply cards use the owner's typed description (never the
-# website-scan ``analysis``); daily X drafts make nothing. ``weekly_post_quota`` unused.
+# every row; every new idea, memes and pulse picks too, gets the ``play_id`` it is
+# for (``_play_picker``). Without one, ideas and reply cards use the owner's typed
+# description (never the website-scan ``analysis``); daily X drafts make nothing.
 #
 # Crons (cross-workspace reads, one failing profile never stops a sweep):
 # ``run_daily_drafts`` drafts X posts within the X budget (the approved
@@ -2196,6 +2196,8 @@ async def make_meme(
     meme_svg = clean_svg(made.svg) if made is not None else ""
     if not meme_svg:
         raise CloudError(502, "social.meme_failed", "The meme came back unusable")
+    bp = await social_blueprint.approved_for(workspace_id, str(doc.id))
+    pick = await _play_picker(workspace_id, str(doc.id), bp, datetime.now(UTC))
     idea = _IdeaDoc(
         workspace=workspace_id,
         profile=str(doc.id),
@@ -2206,6 +2208,7 @@ async def make_meme(
         platform=body.platform,
         poster_svg=meme_svg,
         status="new",
+        play_id=pick(body.platform),
     )
     await idea.insert()
     # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
@@ -2485,6 +2488,8 @@ async def use_pulse_suggestion(
         raise NotFound("social_pulse_suggestion", str(body.suggestion))
     s = suggestions[body.suggestion]
     reddit = s.get("platform") == "reddit"
+    bp = await social_blueprint.approved_for(workspace_id, str(profile.id))
+    pick = await _play_picker(workspace_id, str(profile.id), bp, datetime.now(UTC))
     idea = _IdeaDoc(
         workspace=workspace_id,
         profile=str(profile.id),
@@ -2495,6 +2500,7 @@ async def use_pulse_suggestion(
         platform="reddit" if reddit else "x",
         subreddit=s.get("subreddit") or "",
         status=body.status,
+        play_id=pick("reddit" if reddit else "x"),
     )
     await idea.insert()
     # no-event: Growth › Social has no realtime subscriber; Blitz / Content re-fetch.
