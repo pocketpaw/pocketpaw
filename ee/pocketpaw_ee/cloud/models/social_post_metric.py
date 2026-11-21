@@ -5,7 +5,9 @@
 # ``x_post_id``; other rows come from Postiz post stats and carry
 # ``postiz_post_id`` plus the post's ``published_at`` (an X row's lives on its
 # idea). Rows written before ``platform`` existed are X rows and read as "x" (the
-# stored doc has no key; queries for X match a missing key too).
+# stored doc has no key; queries for X match a missing key too). A count is None
+# on a Postiz row whose platform did not report it (missing is never 0); X rows
+# always carry every count.
 #
 # Append-only: the unique (workspace, idea, platform, postiz_post_id, age_bucket)
 # index means each post's bucket is written once and never updated or deleted; a
@@ -36,12 +38,12 @@ class SocialPostMetric(TimestampedDocument):
     postiz_post_id: str | None = None
     published_at: datetime | None = None
     age_bucket: int
-    impressions: int = 0
-    likes: int = 0
-    replies: int = 0
-    reposts: int = 0
-    quotes: int = 0
-    bookmarks: int = 0
+    impressions: int | None = 0
+    likes: int | None = 0
+    replies: int | None = 0
+    reposts: int | None = 0
+    quotes: int | None = 0
+    bookmarks: int | None = 0
     captured_at: datetime
 
     class Settings(TimestampedDocument.Settings):

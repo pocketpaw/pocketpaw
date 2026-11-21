@@ -1085,8 +1085,8 @@
   {
     "label": "postiz stats: an empty payload stores a row of zeros",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "            if not counts:\n                continue  # no stats (unsupported, not ready, lost): never store zeros\n",
-    "replace": "            if False:\n                continue\n",
+    "find": "        if not got:\n            continue  # no stats (unsupported, not ready, lost): never store zeros\n",
+    "replace": "        if False:\n            continue\n",
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]
@@ -1103,8 +1103,8 @@
   {
     "label": "postiz stats: the per-run call cap is ignored",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "            if budget[0] <= 0:\n",
-    "replace": "            if False:\n",
+    "find": "    for api_key, doc, pid, platform, published, bucket in due[:POSTIZ_STATS_MAX_CALLS]:\n",
+    "replace": "    for api_key, doc, pid, platform, published, bucket in due:\n",
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]
@@ -1150,6 +1150,24 @@
     "file": "ee/pocketpaw_ee/cloud/shared/db.py",
     "find": "        and list(legacy.get(\"key\", [])) == [(\"workspace\", 1), (\"idea\", 1), (\"age_bucket\", 1)]\n        and legacy.get(\"unique\") is True\n",
     "replace": "        and list(legacy.get(\"key\", [])) == [(\"workspace\", 1), (\"idea\", 1), (\"age_bucket\", 1)]\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: a label Postiz did not report is stored as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                **{k: got.get(k) for k in METRIC_FIELDS},\n",
+    "replace": "                **{k: got.get(k, 0) for k in METRIC_FIELDS},\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: due posts are read in a fixed order",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    random.shuffle(due)\n",
+    "replace": "",
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]

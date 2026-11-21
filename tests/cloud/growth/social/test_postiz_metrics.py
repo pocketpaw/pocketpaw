@@ -13,10 +13,11 @@
 # errors never carry the API key; the label map (exact, case-insensitive,
 # unknown labels dropped); an empty payload stores no row; X and personal
 # LinkedIn posts get no Postiz call; a second run the same day re-reads nothing;
-# the per-run call cap; one failing post never stops the rest; old rows read as
-# X and stay the only rows the X readers see; the boot reconcile in
-# ``shared.db`` drops the superseded index (exact shape only) so an idea's X row
-# and LinkedIn Page row share a bucket.
+# the per-run call cap, shared across profiles, over a shuffled due list; a
+# label Postiz did not send or sent as "n/a" stored as None; one failing post
+# never stops the rest; old rows read as X and stay the only rows the X readers
+# see; the boot reconcile in ``shared.db`` drops the superseded index (exact
+# shape only) so an idea's X row and LinkedIn Page row share a bucket.
 
 from __future__ import annotations
 
@@ -241,7 +242,9 @@ async def test_sweep_snapshots_reporting_posts_once_and_skips_x_and_personal_lin
     assert abs(social_service._aware(lp.published_at) - (now - DAY)) < timedelta(seconds=1)
     ig = rows["p-ig"]
     assert (ig.idea, ig.platform, ig.age_bucket) == (str(ig_idea.id), "instagram-standalone", 3)
-    assert (ig.impressions, ig.likes, ig.bookmarks) == (410, 12, 0)
+    # Saves answered "n/a" and replies were never sent: unknown, stored as None, not 0.
+    assert (ig.impressions, ig.likes, ig.bookmarks, ig.replies) == (410, 12, None, None)
+    assert (lp.quotes, lp.bookmarks) == (None, None)  # LinkedIn Page reports neither
 
     # Same day again: nothing due, no stats call.
     fake.requests.clear()
@@ -287,6 +290,50 @@ async def test_stats_calls_are_capped_per_run(mongo_db: Any, monkeypatch: pytest
     await social_service.run_post_metrics(now + timedelta(hours=1))
     assert len(fake.stat_calls()) == 1
     assert await MetricDoc.find({}).count() == 3
+
+
+@pytest.mark.asyncio
+async def test_the_call_cap_is_shared_across_profiles(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(social_service, "POSTIZ_STATS_MAX_CALLS", 2)
+    now = _now()
+    await _org(profile="p1")
+    await _org(profile="p2")
+    await _idea(["p-1", "p-2"], profile="p1")
+    await _idea(["p-3"], profile="p2")
+    fake = _Postiz(
+        [_post(i, "threads", DAY, now) for i in ("p-1", "p-2", "p-3")],
+        {i: INSTAGRAM_STATS for i in ("p-1", "p-2", "p-3")},
+    )
+    set_production_postiz(fake.client())
+
+    counts = await social_service.run_post_metrics(now)
+    assert len(fake.stat_calls()) == 2
+    assert (counts["postiz_due"], counts["postiz_stored"]) == (3, 2)
+    fake.requests.clear()
+    await social_service.run_post_metrics(now + timedelta(hours=1))
+    assert len(fake.stat_calls()) == 1
+    assert {r.profile for r in await MetricDoc.find({}).to_list()} == {"p1", "p2"}
+
+
+@pytest.mark.asyncio
+async def test_due_posts_are_read_in_a_shuffled_order(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+):
+    """Posts that keep answering empty must not hold the cap in a fixed order."""
+    monkeypatch.setattr(social_service, "POSTIZ_STATS_MAX_CALLS", 1)
+    monkeypatch.setattr(social_service.random, "shuffle", lambda items: items.reverse())
+    now = _now()
+    await _org()
+    await _idea(["p-empty", "p-ok"])
+    fake = _Postiz(
+        [_post("p-empty", "threads", DAY, now), _post("p-ok", "threads", DAY, now)],
+        {"p-empty": [], "p-ok": INSTAGRAM_STATS},
+    )
+    set_production_postiz(fake.client())
+    await social_service.run_post_metrics(now)
+    assert fake.stat_calls() == ["p-ok"]
 
 
 @pytest.mark.asyncio

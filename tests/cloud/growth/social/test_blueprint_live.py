@@ -13,7 +13,8 @@
 # unknown key is 422; a regenerate whose analyst output carries a metric_key
 # keeps the owner's value and never writes a play; a LinkedIn play counting
 # LinkedIn Page rows from the Postiz stats fixture, and an X idea cross-posted
-# to a Page counting once on each platform.
+# to a Page counting once on each platform; a count Postiz did not report is
+# skipped, so an impressions-only or likes-only post leaves the other value null.
 
 from __future__ import annotations
 
@@ -430,3 +431,42 @@ async def test_a_cross_posted_x_idea_counts_once_per_platform(w1):
     # Another brand's LinkedIn Page row never counts.
     await _page_snap(idea, await _profile(), "p-other", 3, 2)
     assert (await _live(pid))["plays"]["play:linkedin-content"]["value"] == 1520.0
+
+
+async def _page_row(idea: str, pid: str, post: str, bucket: int, days_ago: float, **counts):
+    """A Postiz LinkedIn Page row with only ``counts`` reported; the rest None."""
+    none = dict.fromkeys(("impressions", "likes", "replies", "reposts", "quotes", "bookmarks"))
+    await MetricDoc(
+        workspace="w1",
+        profile=pid,
+        idea=idea,
+        platform="linkedin-page",
+        postiz_post_id=post,
+        published_at=NOW - timedelta(days=days_ago),
+        age_bucket=bucket,
+        captured_at=NOW - timedelta(hours=3),
+        **(none | counts),
+    ).insert()
+
+
+async def test_impressions_without_engagement_leave_engagement_null(w1):
+    pid = await _profile()
+    await _blueprint(w1, pid, {"play:linkedin-content": _play(key="engagement_per_post")})
+    idea = await _idea(pid, "reddit", 8)
+    await _page_row(idea, pid, "p-imp", 7, 8, impressions=900)
+    assert (await _live(pid))["plays"]["play:linkedin-content"] == NULL  # unknown, not 0.0
+    # A post that reports likes only counts with what it reported.
+    await _page_row(idea, pid, "p-likes", 7, 8, likes=8)
+    play = (await _live(pid))["plays"]["play:linkedin-content"]
+    assert (play["value"], play["posts_counted"]) == (8.0, 1)
+
+
+async def test_likes_without_impressions_leave_reach_null(w1):
+    pid = await _profile()
+    await _blueprint(w1, pid, {"play:linkedin-content": _play()})
+    idea = await _idea(pid, "reddit", 2)
+    await _page_row(idea, pid, "p-likes", 1, 2, likes=8)
+    assert (await _live(pid))["plays"]["play:linkedin-content"] == NULL  # unknown, not 0.0
+    await _page_row(idea, pid, "p-imp", 1, 2, impressions=40)
+    play = (await _live(pid))["plays"]["play:linkedin-content"]
+    assert (play["value"], play["posts_counted"]) == (40.0, 1)

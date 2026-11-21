@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 import re
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
@@ -3390,23 +3391,22 @@ async def _snapshot_workspace(
     return len(due), saved
 
 
-async def _snapshot_postiz_profile(
+async def _postiz_due(
     postiz: PostizClient,
     workspace_id: str,
     profile: str,
     docs: list[_IdeaDoc],
     now: datetime,
-    budget: list[int],
     cache: _ProfilePosts,
-) -> tuple[int, int]:
-    """Store the due bucket of each published non-X post of these ideas that Postiz
-    has stats for, from one posts-list read and one stats call per post (``budget[0]``
-    calls left this run, spent even when a call fails). Returns (due, stored)."""
-    from pocketpaw_ee.cloud.growth.social.metrics import POSTIZ_STATS_PLATFORMS, postiz_counts
+) -> list[tuple[str, _IdeaDoc, str, str, datetime, int]]:
+    """``(api_key, idea, post_id, provider, published_at, bucket)`` for each published
+    post of these ideas on a platform Postiz has stats for (not X) whose due bucket is
+    not stored yet, from one shared posts-list read."""
+    from pocketpaw_ee.cloud.growth.social.metrics import POSTIZ_STATS_PLATFORMS
 
     read = await _profile_posts(postiz, workspace_id, profile, now, cache)
     if read is None:
-        return 0, 0
+        return []
     api_key, posts = read
     stored = {
         (m.idea, m.postiz_post_id, m.age_bucket)
@@ -3418,7 +3418,7 @@ async def _snapshot_postiz_profile(
             }
         ).to_list()
     }
-    due = saved = 0
+    due = []
     for doc in docs:
         for pid in doc.post_ids:
             post = posts.get(pid) or {}
@@ -3432,43 +3432,22 @@ async def _snapshot_postiz_profile(
                 continue
             published = _parse_iso(post.get("publishDate"), now)
             bucket = due_bucket(published, now)
-            if bucket is None or (str(doc.id), pid, bucket) in stored:
-                continue
-            due += 1
-            if budget[0] <= 0:
-                continue
-            budget[0] -= 1
-            try:
-                counts = postiz_counts(await postiz.post_analytics(api_key, pid, bucket))
-            except PostizError as exc:
-                logger.warning("post metrics: stats for a %s post failed (%s)", platform, exc.code)
-                continue
-            if not counts:
-                continue  # no stats (unsupported, not ready, lost): never store zeros
-            try:
-                await _MetricDoc(
-                    workspace=workspace_id,
-                    profile=doc.profile,
-                    idea=str(doc.id),
-                    platform=platform,
-                    postiz_post_id=pid,
-                    published_at=published,
-                    age_bucket=bucket,
-                    captured_at=now,
-                    **{k: counts.get(k, 0) for k in METRIC_FIELDS},
-                ).insert()
-                saved += 1
-            except DuplicateKeyError:
-                pass  # another run stored this bucket first; snapshots are never overwritten
-    # no-event: an append-only metrics log; nothing listens, the Today strip re-fetches.
-    return due, saved
+            if bucket is not None and (str(doc.id), pid, bucket) not in stored:
+                due.append((api_key, doc, pid, platform, published, bucket))
+    return due
 
 
 async def _run_postiz_metrics(
     postiz: PostizClient, now: datetime, counts: dict[str, int], cache: _ProfilePosts
 ) -> None:
     """The non-X step: snapshot the published non-X posts of every idea with Postiz
-    ``post_ids`` created recently enough for a post to still have a bucket due."""
+    ``post_ids`` created recently enough for a post to still have a bucket due. Every
+    profile's due posts are pooled and shuffled, then read until ``POSTIZ_STATS_MAX_CALLS``
+    calls are spent (failed calls count). A label Postiz did not send, or sent with a
+    non-numeric total, is stored as None, never 0; a post with no known label gets no
+    row."""
+    from pocketpaw_ee.cloud.growth.social.metrics import postiz_counts
+
     window = PUBLISHED_LOOKBACK + timedelta(days=METRIC_AGE_BUCKETS[-1] + METRIC_LATE_DAYS)
     # global-read: the sweep runs for every workspace; each doc carries its own tenant.
     ideas = await _IdeaDoc.find(
@@ -3477,17 +3456,41 @@ async def _run_postiz_metrics(
     groups: dict[tuple[str, str], list[_IdeaDoc]] = {}
     for doc in ideas:
         groups.setdefault((doc.workspace, doc.profile), []).append(doc)
-    budget = [POSTIZ_STATS_MAX_CALLS]
+    due: list[tuple[str, _IdeaDoc, str, str, datetime, int]] = []
     for (workspace_id, profile), docs in groups.items():
         try:
-            due, saved = await _snapshot_postiz_profile(
-                postiz, workspace_id, profile, docs, now, budget, cache
-            )
-            counts["postiz_due"] += due
-            counts["postiz_stored"] += saved
+            due += await _postiz_due(postiz, workspace_id, profile, docs, now, cache)
         except Exception:  # noqa: BLE001
             counts["failed"] += 1
             logger.warning("post metrics: postiz stats %s failed", workspace_id, exc_info=True)
+    counts["postiz_due"] += len(due)
+    # ponytail: a random order so posts that keep answering empty cannot hold the cap
+    # forever; it still re-asks them daily. Remember the last empty answer if they pile up.
+    random.shuffle(due)
+    for api_key, doc, pid, platform, published, bucket in due[:POSTIZ_STATS_MAX_CALLS]:
+        try:
+            got = postiz_counts(await postiz.post_analytics(api_key, pid, bucket))
+        except PostizError as exc:
+            logger.warning("post metrics: stats for a %s post failed (%s)", platform, exc.code)
+            continue
+        if not got:
+            continue  # no stats (unsupported, not ready, lost): never store zeros
+        try:
+            await _MetricDoc(
+                workspace=doc.workspace,
+                profile=doc.profile,
+                idea=str(doc.id),
+                platform=platform,
+                postiz_post_id=pid,
+                published_at=published,
+                age_bucket=bucket,
+                captured_at=now,
+                **{k: got.get(k) for k in METRIC_FIELDS},
+            ).insert()
+            counts["postiz_stored"] += 1
+        except DuplicateKeyError:
+            pass  # another run stored this bucket first; snapshots are never overwritten
+    # no-event: an append-only metrics log; nothing listens, the Today strip re-fetches.
 
 
 async def run_post_metrics(now: datetime | None = None) -> dict[str, int]:
@@ -3623,12 +3626,12 @@ class _LiveMetricRow(BaseModel):
     published_at: datetime | None = None
     age_bucket: int
     captured_at: datetime
-    impressions: int = 0
-    likes: int = 0
-    replies: int = 0
-    reposts: int = 0
-    quotes: int = 0
-    bookmarks: int = 0
+    impressions: int | None = 0
+    likes: int | None = 0
+    replies: int | None = 0
+    reposts: int | None = 0
+    quotes: int | None = 0
+    bookmarks: int | None = 0
 
 
 class _LiveLinkRow(BaseModel):

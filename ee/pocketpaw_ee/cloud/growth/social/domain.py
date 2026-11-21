@@ -335,18 +335,19 @@ class AnalysisOutcome:
 
 @dataclass(frozen=True)
 class PostMetrics:
-    """One published X post's public metrics at ``age_bucket`` days old."""
+    """One published post's metrics at ``age_bucket`` days old. X snapshots carry
+    every count; a Postiz one has None for a count its platform did not report."""
 
     workspace_id: str
     idea_id: str
     x_post_id: str
     age_bucket: int
-    impressions: int = 0
-    likes: int = 0
-    replies: int = 0
-    reposts: int = 0
-    quotes: int = 0
-    bookmarks: int = 0
+    impressions: int | None = 0
+    likes: int | None = 0
+    replies: int | None = 0
+    reposts: int | None = 0
+    quotes: int | None = 0
+    bookmarks: int | None = 0
     captured_at: datetime | None = None
 
 

@@ -10605,8 +10605,10 @@ It only reads; nothing in it posts or writes to X.
    (Impressions or Views to impressions, Likes or Reactions to likes, Replies or
    Comments to replies, Reposts, Retweets or Shares to reposts, Quotes, and
    Bookmarks or Saves to bookmarks). Other labels are dropped, and a post with
-   no known label gets no row. The step makes at most 50 stats calls a run;
-   whatever is left waits for the next run. One posts-list read per profile is
+   no known label gets no row. A column the platform did not report (or reported
+   as a non-number) is stored as `null`, never 0. The step pools every profile's
+   due posts, shuffles them, and makes at most 50 stats calls a run; whatever is
+   left waits for the next run. One posts-list read per profile is
    shared with step 1.
 
 Each snapshot row carries `platform` (`"x"`, or the Postiz provider id such as
@@ -11013,10 +11015,14 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
 ```
 
 - `impressions_per_week`: the sum over posts published in the last 7 days, each at
-  its latest snapshot (the largest of the 1 / 3 / 7 / 28-day buckets it has).
+  its latest snapshot (the largest of the 1 / 3 / 7 / 28-day buckets it has). A
+  snapshot whose platform did not report impressions is left out, and
+  `posts_counted` counts only the measured posts.
 - `engagement_per_post`: likes + replies + reposts at the 7-day snapshot, averaged
   over the posts that HAVE a 7-day snapshot; younger posts are left out. No time
   window: every such post of the brand counts. Quotes and bookmarks are left out.
+  A count the platform did not report adds nothing, and a post reporting none of
+  the three is left out (its engagement is unknown, not 0).
 - `link_clicks_per_week`: tracked-link clicks over the last 7 UTC days (today
   included) on the brand's published posts that have a link.
 - `github_stars`: the newest stored stars of each of the brand's repos, summed.
