@@ -53,7 +53,9 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     _BlueprintItem,
     _BlueprintItems,
     _BlueprintText,
+    _clean_items,
     _unique,
+    fold_icp,
 )
 
 UnitStatus = BlueprintStatus
@@ -120,7 +122,6 @@ class BrandBody(_Body):
 
 class MarketResearch(_Body):
     main_challenge: _BlueprintText = ""
-    alternatives: _BlueprintItems = Field(default_factory=list)
     competitor_notes: _BlueprintItems = Field(default_factory=list)
     interview_notes: _BlueprintItems = Field(default_factory=list)
     trends: _BlueprintItems = Field(default_factory=list)
@@ -134,14 +135,14 @@ class Positioning(_Body):
     usp: _BlueprintText = ""
     category: _BlueprintText = ""
     statement: _BlueprintText = ""
+    # What people use now (moved here from ``market_research``).
+    alternatives: _BlueprintItems = Field(default_factory=list)
 
 
 class Icp(_Body):
     target: _BlueprintText = ""
-    segments: _BlueprintItems = Field(default_factory=list)
     not_for: _BlueprintItems = Field(default_factory=list)
     triggers: _BlueprintItems = Field(default_factory=list)
-    icp_sentences: _BlueprintItems = Field(default_factory=list)
 
 
 class Gtm(_Body):
@@ -182,6 +183,39 @@ class Choices(_Body):
     not_doing: _BlueprintItems = Field(default_factory=list)
 
 
+def fold_strategy(body: Any) -> Any:
+    """A copy of a strategy ``body`` in the current shape: ``gtm.icp``'s retired lists
+    folded into ``target`` (``fold_icp``) and ``market_research.alternatives`` moved
+    onto the end of ``positioning.alternatives``. Only non-empty old values fold;
+    they append (an item already there, ignoring case, is skipped) and never
+    replace. Idempotent; the input is not touched. Kept one release."""
+    if not isinstance(body, dict):
+        return body
+    out = dict(body)
+    gtm = out.get("gtm")
+    if isinstance(gtm, dict) and isinstance(gtm.get("icp"), dict):
+        out["gtm"] = {**gtm, "icp": fold_icp(gtm["icp"])}
+    research = out.get("market_research")
+    if isinstance(research, dict) and "alternatives" in research:
+        research = dict(research)
+        moved = _clean_items(research.pop("alternatives"))
+        out["market_research"] = research
+        positioning = out.get("positioning")
+        if moved and isinstance(positioning, dict | None):
+            positioning = dict(positioning or {})
+            have = positioning.get("alternatives")
+            have = list(have) if isinstance(have, list) else []
+            seen = {s.strip().lower() for s in have if isinstance(s, str)}
+            for item in moved:
+                if item.lower() not in seen:
+                    have.append(item)
+                    seen.add(item.lower())
+            # ponytail: past the item cap the oldest win; the migration dump keeps the rest.
+            positioning["alternatives"] = have[:MAX_BLUEPRINT_ITEMS]
+            out["positioning"] = positioning
+    return out
+
+
 class StrategyBody(_Body):
     market_research: MarketResearch = Field(default_factory=MarketResearch)
     positioning: Positioning = Field(default_factory=Positioning)
@@ -195,6 +229,11 @@ class StrategyBody(_Body):
         list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]],
         Field(max_length=MAX_BLUEPRINT_LEARNINGS),
     ] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_old_shape(cls, v: Any) -> Any:
+        return fold_strategy(v)
 
     @model_validator(mode="after")
     def _distinct(self) -> StrategyBody:

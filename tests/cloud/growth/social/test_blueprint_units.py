@@ -234,7 +234,7 @@ async def test_unit_ids_are_minted_and_the_unit_diff_is_field_level(w1):
     await _ok(w1, pid, "strategy")
     edit = {
         **first["body"],
-        "gtm": {"icp": {"segments": ["studios"]}},
+        "gtm": {"icp": {"target": "studios"}},
         "positioning": {"usp": ""},
         "goals": {"objectives": [{**objective, "target": 9}]},
     }
@@ -245,7 +245,7 @@ async def test_unit_ids_are_minted_and_the_unit_diff_is_field_level(w1):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["fields"] == {
-        "added": ["gtm.icp.segments"],
+        "added": ["gtm.icp.target"],
         "removed": [],
         "changed": ["goals.objectives"],
     }
@@ -325,7 +325,7 @@ async def test_a_pillar_kind_round_trips_through_the_units_and_approved_for(w1):
 
 _LEGACY = {
     "identity": {"summary": "s", "product": "p", "problem": "q"},
-    "audience": {"segments": ["a"], "icp_sentences": ["i"]},
+    "audience": {"target": "t", "not_for": ["n"]},
     "voice": {"tone": "t", "avoid": ["v"]},
     "pillars": [{"name": "n", "weight": 40, "hooks": ["h"]}],
     # The three non-zero cadences no play carries (x sends, email posts, whatsapp)
@@ -425,7 +425,7 @@ async def test_a_migrated_legacy_blueprint_reads_exactly_as_before(w1):
 
 async def test_whole_page_routes_round_trip_through_the_units(w1):
     pid = await _profile()
-    await _seed(w1, pid)
+    seeded = (await _seed(w1, pid))["draft"]["audience"]["target"]
     sections = {k: v for k, v in _LEGACY.items() if k not in ("learning_ids",)}
     resp = await w1.put(f"{BP}/draft", params={"profile_id": pid}, json=sections)
     assert resp.status_code == 422
@@ -435,6 +435,8 @@ async def test_whole_page_routes_round_trip_through_the_units(w1):
     zeroes = {"channel": "whatsapp", "posts_per_week": 0, "sends_per_week": 0}
     state = await _save(w1, pid, {**sections, "channels": [*_MAPPED_CHANNELS, zeroes]})
     sections["channels"] = _MAPPED_CHANNELS
+    # A legacy audience edit appends to the seeded target, never replaces it.
+    sections["audience"] = {**sections["audience"], "target": f"{seeded}; t"}
     draft = state["draft"]
     for name, value in sections.items():
         assert draft[name] == value, name

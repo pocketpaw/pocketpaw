@@ -114,6 +114,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     RoadmapMilestoneModel,
     RoadmapPhaseModel,
     SaveBlueprintDraftRequest,
+    append_parts,
+    fold_icp,
 )
 from pocketpaw_ee.cloud.growth.social.play_catalog import PLAY_IDS, PLAYS
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as _BlueprintDoc
@@ -188,7 +190,7 @@ def _roadmap(value: Any) -> BlueprintRoadmap:
 def _domain(sections: dict[str, Any], **meta: Any) -> GrowthBlueprint:
     """A domain Blueprint from legacy-shaped ``sections`` plus row metadata."""
     identity = sections.get("identity") or {}
-    audience = sections.get("audience") or {}
+    audience = fold_icp(sections.get("audience") or {})
     voice = sections.get("voice") or {}
     return GrowthBlueprint(
         identity=BlueprintIdentity(
@@ -197,8 +199,7 @@ def _domain(sections: dict[str, Any], **meta: Any) -> GrowthBlueprint:
             problem=_str(identity.get("problem")),
         ),
         audience=BlueprintAudience(
-            segments=_strs(audience.get("segments")),
-            icp_sentences=_strs(audience.get("icp_sentences")),
+            target=_str(audience.get("target")), not_for=_strs(audience.get("not_for"))
         ),
         voice=BlueprintVoice(tone=_str(voice.get("tone")), avoid=_strs(voice.get("avoid"))),
         pillars=tuple(
@@ -261,7 +262,7 @@ def _to_response(bp: GrowthBlueprint) -> GrowthBlueprintResponse:
             summary=bp.identity.summary, product=bp.identity.product, problem=bp.identity.problem
         ),
         audience=BlueprintAudienceModel(
-            segments=list(bp.audience.segments), icp_sentences=list(bp.audience.icp_sentences)
+            target=bp.audience.target, not_for=list(bp.audience.not_for)
         ),
         voice=BlueprintVoiceModel(tone=bp.voice.tone, avoid=list(bp.voice.avoid)),
         pillars=[
@@ -456,11 +457,14 @@ def _apply_legacy(bodies: dict[str, dict], sections: dict[str, Any]) -> dict[str
             tone=_str(voice.get("tone")), avoid=list(_strs(voice.get("avoid")))
         )
     if "audience" in sections:
-        audience = sections["audience"] or {}
-        strategy["gtm"]["icp"].update(
-            segments=list(_strs(audience.get("segments"))),
-            icp_sentences=list(_strs(audience.get("icp_sentences"))),
-        )
+        # Old clients and pre-unit rows still send the retired lists: fold them,
+        # then append to the target and keep ``not_for`` unless one is sent.
+        audience = fold_icp(sections["audience"] or {})
+        icp = strategy["gtm"]["icp"]
+        if sent := _str(audience.get("target")).strip():
+            icp["target"] = append_parts(_str(icp.get("target")), sent)
+        if _strs(audience.get("not_for")):
+            icp["not_for"] = list(_strs(audience.get("not_for")))
     if "pillars" in sections:
         strategy["content_pillars"] = copy.deepcopy(_dicts(sections["pillars"]))
     if "goals" in sections:
@@ -524,7 +528,7 @@ def _apply_channels(out: dict[str, dict], channels: list[dict]) -> None:
 def _to_legacy(bodies: dict[str, dict]) -> dict[str, Any]:
     """The legacy sections stitched from unit bodies (the inverse of ``_apply_legacy``)."""
     brand = bodies.get("brand") or {}
-    strategy = bodies.get("strategy") or {}
+    strategy = _normal("strategy", bodies.get("strategy") or {})
     plan = bodies.get("plan") or {}
     voice = brand.get("tone_of_voice") or {}
     icp = (strategy.get("gtm") or {}).get("icp") or {}
@@ -554,10 +558,7 @@ def _to_legacy(bodies: dict[str, dict]) -> dict[str, Any]:
     who = brand.get("who_we_are") or {}
     return {
         "identity": {k: _str(who.get(k)) for k in ("summary", "product", "problem")},
-        "audience": {
-            "segments": list(_strs(icp.get("segments"))),
-            "icp_sentences": list(_strs(icp.get("icp_sentences"))),
-        },
+        "audience": {"target": _str(icp.get("target")), "not_for": list(_strs(icp.get("not_for")))},
         "voice": {"tone": _str(voice.get("tone")), "avoid": list(_strs(voice.get("avoid")))},
         "pillars": copy.deepcopy(_dicts(strategy.get("content_pillars"))),
         "channels": channels,
@@ -581,7 +582,7 @@ def _compose(
     picked = _pick(rows, status)
     if picked is None:
         return None
-    bodies = {unit: doc.body for unit, doc in picked.items()}
+    bodies = {unit: _wire_body(unit, doc.body) for unit, doc in picked.items()}
     strategy = picked["strategy"]
     return _domain(
         _to_legacy(bodies),
@@ -674,9 +675,13 @@ def acting_post_plays(bp: GrowthBlueprint) -> dict[str, list[str]]:
 
 
 def _wire_body(unit: str, body: dict[str, Any]) -> dict[str, Any]:
-    """A play body in its model's shape (formats always ``{name, status}``, an old
-    plain string read as testing); other units as stored."""
-    if unit.startswith(_PLAY) and play_catalog.play(unit[len(_PLAY) :]) is not None:
+    """A play or strategy body in its model's current shape (play formats always
+    ``{name, status}``, an old plain string read as testing; a strategy's retired
+    ICP lists and ``market_research.alternatives`` folded, ``fold_strategy``);
+    brand and plan as stored."""
+    if unit == "strategy" or (
+        unit.startswith(_PLAY) and play_catalog.play(unit[len(_PLAY) :]) is not None
+    ):
         return _normal(unit, body)
     return body
 
@@ -860,10 +865,12 @@ async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[st
 
     sections = {
         "identity": {name: text(getattr(a, name)) for name in ("summary", "product", "problem")},
-        "audience": {
-            "segments": _checked(_segments(a.audience), source),
-            "icp_sentences": await _icp_sentences(ctx, profile.id),
-        },
+        "audience": fold_icp(
+            {
+                "segments": _checked(_segments(a.audience), source),
+                "icp_sentences": await _icp_sentences(ctx, profile.id),
+            }
+        ),
         "voice": {"tone": text(a.tone), "avoid": _checked(a.avoid, source)},
         "pillars": _pillars(
             _checked(a.content_pillars, source, MAX_BLUEPRINT_PILLARS, _PILLAR_CHARS),
@@ -905,9 +912,12 @@ def _regenerated(base: dict[str, Any], a: SocialAnalysis, source: str) -> dict[s
         name: text(getattr(a, name), identity.get(name))
         for name in ("summary", "product", "problem")
     }
+    # The analyst's segments seed an empty target only: an owner's target is kept,
+    # so a repeat regenerate never grows it.
     out["audience"] = {
-        "segments": items(_segments(a.audience)) or list(_strs(audience.get("segments"))),
-        "icp_sentences": list(_strs(audience.get("icp_sentences"))),
+        "target": _str(audience.get("target"))
+        or fold_icp({"segments": items(_segments(a.audience))})["target"],
+        "not_for": list(_strs(audience.get("not_for"))),
     }
     out["voice"] = {
         "tone": text(a.tone, voice.get("tone")),
@@ -1126,6 +1136,22 @@ def _unit_body(unit: str, raw: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _carry_alternatives(raw: dict[str, Any], new_body: dict[str, Any], base: _UnitDoc | None):
+    """An old editor (it knows only ``market_research.alternatives``) may send a
+    strategy body with no ``positioning.alternatives`` key: keep the base row's,
+    with anything it folded in appended. An explicit list, even ``[]``, wins."""
+    positioning = raw.get("positioning")
+    if base is None or (isinstance(positioning, dict) and "alternatives" in positioning):
+        return
+    kept = _normal("strategy", base.body).get("positioning", {}).get("alternatives") or []
+    folded = new_body["positioning"]["alternatives"]
+    seen = {a.lower() for a in kept}
+    new_body["positioning"]["alternatives"] = [
+        *kept,
+        *(a for a in folded if a.lower() not in seen),
+    ][:MAX_BLUEPRINT_ITEMS]
+
+
 async def _unit_result(workspace_id: str, profile_id: str, unit: str):
     rows = await _rows(workspace_id, profile_id)
     return _unit_state(unit, rows.get(unit, {}))
@@ -1160,6 +1186,8 @@ async def save_unit_draft(
     base = draft or mine.get("approved")
     if (body.base_version, body.base_rev) != ((base.version, base.rev) if base else (0, 0)):
         raise _stale()
+    if kind == "strategy":
+        _carry_alternatives(body.body, new_body, base)
     await _write_draft(workspace_id, profile.id, unit, draft, new_body, ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     result = await _unit_result(workspace_id, profile.id, unit)

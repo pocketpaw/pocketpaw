@@ -192,12 +192,10 @@ def blueprint_lines(
             if text.strip():
                 lines.append(f"{label}: {fence(text)}")
     if "audience" in parts:
-        if bp.audience.segments:
-            lines.append("Audience: " + "; ".join(fence(s) for s in bp.audience.segments))
-        if bp.audience.icp_sentences:
-            lines.append(
-                "Ideal customers: " + "; ".join(fence(s) for s in bp.audience.icp_sentences)
-            )
+        if bp.audience.target.strip():
+            lines.append(f"Audience: {fence(bp.audience.target)}")
+        if bp.audience.not_for:
+            lines.append("Not for: " + "; ".join(fence(s) for s in bp.audience.not_for))
     if "voice" in parts:
         if bp.voice.tone.strip():
             lines.append(f"Tone: {fence(bp.voice.tone)}")

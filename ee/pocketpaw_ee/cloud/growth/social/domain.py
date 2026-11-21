@@ -445,8 +445,10 @@ class BlueprintIdentity:
 
 @dataclass(frozen=True)
 class BlueprintAudience:
-    segments: tuple[str, ...] = ()
-    icp_sentences: tuple[str, ...] = ()
+    """The strategy's one ``target`` and who it is ``not_for``."""
+
+    target: str = ""
+    not_for: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

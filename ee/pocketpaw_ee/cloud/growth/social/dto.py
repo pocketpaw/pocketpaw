@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -951,7 +951,10 @@ class SocialPostListResponse(BaseModel):
 
 # --- Brand Blueprint ------------------------------------------------------------------------
 
-_BlueprintText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
+BLUEPRINT_TEXT_MAX = 2000
+_BlueprintText = Annotated[
+    str, StringConstraints(strip_whitespace=True, max_length=BLUEPRINT_TEXT_MAX)
+]
 _BlueprintItem = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
 ]
@@ -966,11 +969,60 @@ class BlueprintIdentityModel(BaseModel):
     problem: _BlueprintText = ""
 
 
+# The retired ICP lists and the label each folds into ``target`` under.
+_ICP_FOLDS = (("segments", "Segments"), ("icp_sentences", "In their words"))
+
+
+def _clean_items(raw: Any) -> list[str]:
+    return (
+        [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+        if isinstance(raw, list)
+        else []
+    )
+
+
+def append_parts(target: str, text: str) -> str:
+    """``target`` with each "; "-separated part of ``text`` appended unless the target
+    already holds it as a part, cut at the text cap."""
+    parts = [p.strip() for p in target.split(";") if p.strip()]
+    for part in (p.strip() for p in text.split(";")):
+        if part and part not in parts:
+            parts.append(part)
+    # ponytail: a fold past the text cap is cut there; the migration dump keeps the full text.
+    return "; ".join(parts)[:BLUEPRINT_TEXT_MAX]
+
+
+def fold_icp(icp: Any) -> Any:
+    """A copy of ``icp`` with the retired ``segments`` / ``icp_sentences`` folded into
+    ``target`` as "Segments: a, b" / "In their words: x, y", appended after any
+    target text with "; ". Only non-empty lists fold, and a part already in the
+    target is not added again (``append_parts``), so a repeat fold changes nothing. Kept one release
+    (old clients and old rows still send them)."""
+    if not isinstance(icp, dict) or not any(k in icp for k, _ in _ICP_FOLDS):
+        return icp
+    out = dict(icp)
+    target = out.get("target") if isinstance(out.get("target"), str) else ""
+    for key, label in _ICP_FOLDS:
+        items = _clean_items(out.pop(key, None))
+        if items:
+            target = append_parts(target, f"{label}: " + ", ".join(items))
+    out["target"] = target
+    return out
+
+
 class BlueprintAudienceModel(BaseModel):
+    """The legacy whole-page audience: the strategy's one ``target`` and its
+    ``not_for`` list. Old ``segments`` / ``icp_sentences`` fold into ``target``."""
+
     model_config = ConfigDict(extra="forbid")
 
-    segments: _BlueprintItems = Field(default_factory=list)
-    icp_sentences: _BlueprintItems = Field(default_factory=list)
+    target: _BlueprintText = ""
+    not_for: _BlueprintItems = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold(cls, v: Any) -> Any:
+        return fold_icp(v)
 
 
 class BlueprintVoiceModel(BaseModel):
