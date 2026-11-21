@@ -390,3 +390,28 @@ async def test_a_postiz_snapshot_bucket_is_unique(mongo_db: Any):
         await MetricDoc(**row).insert()
     # A second post of the same idea on the same platform gets its own row.
     await MetricDoc(**{**row, "postiz_post_id": "p-2"}).insert()
+
+
+@pytest.mark.asyncio
+async def test_a_cross_posted_x_idea_gets_both_its_x_and_its_postiz_snapshot(mongo_db: Any):
+    """The Postiz step runs first; its LinkedIn Page row must not count as the X row's
+    bucket, and both steps share one posts-list read."""
+    now = _now()
+    await _org()
+    await _idea(["p-x", "p-lp"], platform="x")
+    x_post = {**_post("p-x", "x", DAY, now), "releaseURL": "https://x.com/a/status/123"}
+    fake = _Postiz(
+        [x_post, _post("p-lp", "linkedin-page", DAY, now)], {"p-lp": LINKEDIN_PAGE_STATS}
+    )
+    set_production_postiz(fake.client())
+
+    async def _x_metrics(workspace_id: str, ids: list[str]) -> dict[str, dict[str, int]]:
+        return {i: {"impressions": 50, "likes": 2} for i in ids}
+
+    social_metrics.set_production_metrics_fn(_x_metrics)
+
+    counts = await social_service.run_post_metrics(now)
+    assert (counts["filled"], counts["stored"], counts["postiz_stored"]) == (1, 1, 1)
+    rows = await MetricDoc.find({}).to_list()
+    assert sorted((r.platform, r.age_bucket) for r in rows) == [("linkedin-page", 1), ("x", 1)]
+    assert sum(r.url.path == "/api/public/v1/posts" for r in fake.requests) == 1

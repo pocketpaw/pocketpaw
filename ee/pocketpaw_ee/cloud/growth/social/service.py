@@ -15,9 +15,9 @@
 #
 # Agents: analysis, ideas, memes and pulse run in-request behind their seams
 # (503 when none is installed; a failed run is a 502, or ``analysis_status=
-# "failed"`` for analysis, written with one atomic ``$set``). Ideas need a
-# completed onboarding. Ideas, the daily X drafts and reply cards read the brand's
-# approved Blueprint once per run (never a draft), hand it to the agent and stamp
+# "failed"`` for analysis, one atomic ``$set``). Ideas need a completed onboarding.
+# Ideas, the daily X drafts and reply cards read the brand's approved Blueprint
+# once per run (never a draft), hand it to the agent and stamp
 # ``blueprint_version`` on every row made. Without one, ideas and reply cards use
 # the owner's typed description (never the website-scan ``analysis``) and the
 # daily X drafts make nothing. ``weekly_post_quota`` stays on the wire, unused.
@@ -28,10 +28,9 @@
 # the last 24 h of GitHub changes and checked by ``ideas.check_draft`` with one
 # retry; ``run_reply_drafts`` drafts reply cards a person posts by hand from an
 # intent link; ``run_repo_metrics`` stores one RepoMetric per repo and day
-# (reruns refresh in place); ``run_post_metrics`` stores append-only X snapshots
-# through the capped, read-only ``x_api``, plus snapshots of other platforms' posts
-# from Postiz post stats (at most ``POSTIZ_STATS_MAX_CALLS`` a run). The review and
-# ``latest_metrics`` read X rows only. Nothing here posts to X on its own.
+# (reruns refresh in place); ``run_post_metrics`` stores append-only snapshots, X's
+# through the capped, read-only ``x_api`` and other platforms' from Postiz post stats
+# (the review and ``latest_metrics`` read X rows only). Nothing here posts to X.
 #
 # Accounts and posting: each profile has its own Postiz org (created on first
 # connect, never on a read; API key stored encrypted and checked first, since org

@@ -1135,5 +1135,14 @@
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]
+  },
+  {
+    "label": "postiz stats: a Postiz row blocks the X snapshot of the same bucket",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        (m.idea, m.age_bucket)\n        for m in await _MetricDoc.find(\n            {\"workspace\": workspace_id, \"idea\": {\"$in\": ids}, **_X_ROWS}\n",
+    "replace": "        (m.idea, m.age_bucket)\n        for m in await _MetricDoc.find(\n            {\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
   }
 ]
