@@ -40,7 +40,9 @@
 # names each channel once at 0..21 posts a week, and a milestone link is http(s).
 # Phase and milestone ids are unique across the roadmap (the service mints a
 # missing one). The weekly Plan (``WeekPlanResponse``) is a read only. A setup
-# skip names one of the ``SetupKey`` rows (anything else is a 422).
+# skip names one of the ``SetupKey`` rows (anything else is a 422). The legacy
+# blueprint audience is ``{target, not_for}``; ``fold_icp`` folds the retired
+# ``segments`` / ``icp_sentences`` into ``target`` (shared with the unit bodies).
 
 from __future__ import annotations
 

@@ -18,7 +18,8 @@
 # ``owner_lines`` renders the owner's typed description (ideas and replies);
 # ``blueprint_lines`` renders an approved Brand Blueprint as a fenced data block
 # (every value through ``fence``) for the drafting agents: ideas, replies, the
-# outreach writer and hunt research. A pillar's optional kind (audience or
+# outreach writer and hunt research; its audience is the strategy's one target
+# and its not-for list. A pillar's optional kind (audience or
 # product) shows next to its weight, and when any pillar has one a line after
 # the block tells the agent to lean on audience pillars; with no kinds the
 # block renders exactly as it did before kinds existed. Given the idea's

@@ -10843,7 +10843,7 @@ dropped.
   "version": 2,
   "status": "draft",
   "identity": {"summary": "…", "product": "…", "problem": "…"},
-  "audience": {"segments": ["…"], "icp_sentences": ["…"]},
+  "audience": {"target": "…", "not_for": ["…"]},
   "voice": {"tone": "…", "avoid": ["…"]},
   "pillars": [{"name": "Speed", "weight": 34, "hooks": ["…"], "kind": "audience"}],
   "channels": [{"channel": "x", "posts_per_week": 5, "sends_per_week": 0}],
@@ -10881,11 +10881,12 @@ dropped.
   dangling (a new phase, or a removed goal) is `422 social.blueprint_unknown_goal`.
 - `seed` builds version 1 drafts of `brand`, `strategy`, `plan` and
   `play:x-organic` from the profile's analysis (or what the owner typed
-  when there is none): summary, product, problem, audience segments, tone, avoid,
+  when there is none): summary, product, problem, the audience target, tone, avoid,
   the content pillars at equal weights summing to 100 with the hooks dealt across
   them, the weekly post quota as the `x` channel's `posts_per_week`, and the
-  criteria of the active ICPs for this brand (at most 5),
-  as `icp_sentences`. No goals. A first roadmap: "This week" (today to +6 days)
+  criteria of the active ICPs for this brand (at most 5). The audience segments
+  and ICP criteria seed `gtm.icp.target` as "Segments: a, b; In their words: x, y".
+  No goals. A first roadmap: "This week" (today to +6 days)
   and "Next 4 weeks" (+7 to +34), each with every channel's `posts_per_week` as
   its cadence (capped at 21) and no milestones. Seeded text goes through the same dash and number
   check as `regenerate`; a failing field seeds empty and a failing item is dropped.
@@ -10894,6 +10895,9 @@ dropped.
   section, and every unit whose body changes gets a draft (opened from its
   approved when it has none). A channel left out parks its plays. Any other
   key (`status`, `version`, `approved_by`…) is a 422. A goal without an `id` gets one.
+  `audience` is the exception: `{target, not_for}` (old `segments` /
+  `icp_sentences` fold into `target`) appends to the stored target, and `not_for`
+  replaces only when one is sent.
   `learning_ids` (at most 200, unique) must each name a learning of the same
   workspace and brand, in any status; an unknown, malformed or foreign id is
   `422 social.blueprint_unknown_learning` with `details.learning_ids` listing them.
@@ -10961,14 +10965,23 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   `brand`: `vision {why, vision}`, `brand_story`, `messaging_framework` (at most 3),
   `tone_of_voice {tone, do, avoid}`, `archetype`, `who_we_are {summary, product,
   problem}`, `proof`, `assets {tagline, colors, names}`.
-  `strategy`: `market_research {main_challenge, alternatives, competitor_notes,
+  `strategy`: `market_research {main_challenge, competitor_notes,
   interview_notes, trends, baseline, tam_sam_som}`, `positioning {job_to_be_done,
-  value_proposition, usp, category, statement}`, `gtm {icp {target, segments,
-  not_for, triggers, icp_sentences}, pricing_notes, launch_plan}`, `goals
+  value_proposition, usp, category, statement, alternatives}` (`alternatives`:
+  what people use now), `gtm {icp {target, not_for, triggers}, pricing_notes,
+  launch_plan}`, `goals
   {business_goal, objectives [{id, metric, baseline, target, deadline, channel,
   metric_key}]}`,
   `choices {guiding_policy, growth_engine, core_play, tests, not_doing}`,
   `content_pillars [{name, weight, hooks, kind?}]`, `learning_ids`.
+  Old strategy keys are still accepted for one release and folded, on save and on
+  read (the wire is always the new shape): non-empty `gtm.icp.segments` and
+  `gtm.icp.icp_sentences` append to `target` as "Segments: a, b" and "In their
+  words: x, y" (a part already in the target is not added again), and non-empty
+  `market_research.alternatives` append to `positioning.alternatives` (an item
+  already there, ignoring case, is skipped). A strategy save with no
+  `positioning.alternatives` key keeps the base row's; an explicit `[]` clears it.
+  `scripts/migrate_growth_strategy_one_audience.py` rewrites stored rows.
   `plan`: `roadmap` (as above), `budget {money_per_month, hours_per_week}`.
   `play:<id>`: `status` (`core`, `testing` default, `parked`), `role`, `goal_id`,
   `audience`, `formats [{name, status}]`, `pillar_mix [{pillar, weight}]`,
@@ -11005,7 +11018,7 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   Blueprint's channels; every other play is plan-only.
 - `GET …/{unit}/diff?from_version=&to_version=` returns `{unit, from_version,
   to_version, fields: {added, removed, changed}}` with dotted body paths
-  (`gtm.icp.segments`); empty values count as absent, lists are compared whole.
+  (`gtm.icp.target`); empty values count as absent, lists are compared whole.
 - `metric_key` (objectives and play `kpi`) is `null` or one of `impressions_per_week`,
   `engagement_per_post`, `link_clicks_per_week`, `github_stars`; anything else is
   `422 social.blueprint_invalid_body`. `metric` stays the free-text label. Only the

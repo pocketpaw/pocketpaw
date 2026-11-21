@@ -14,6 +14,9 @@
 # (``format_entries`` is the same tolerant read over a raw stored body). The play
 # decision fields (KPI ``pass_mark`` / ``expand_at``, ``decide_by``) are owner-only
 # and left out of a dump when unset, so an untouched old body dumps as it did.
+# A strategy keeps one audience (``gtm.icp.target`` plus ``not_for`` and
+# ``triggers``) and what people use now in ``positioning.alternatives``; a body in
+# the old shape folds on validation (``fold_strategy``, appending, never erasing).
 # Creator extras require a disclosure and usage rights (FTC).
 # ``BODY_MODELS`` maps a unit kind to its model; ``blueprint.py`` validates a body
 # against it and checks cross-unit goal references there (they need the store).

@@ -29,6 +29,11 @@
 # (strategy last). ``migrate_profile`` splits legacy rows into units, strategy last;
 # reads of an unmigrated brand fall back to its legacy rows.
 #
+# Strategy bodies are read through ``fold_strategy`` (wire, compose, diff), so an
+# old-shape row reads as one ``gtm.icp.target`` and ``positioning.alternatives``.
+# A strategy save without a ``positioning.alternatives`` key (an old editor) keeps
+# the base row's. A legacy ``audience`` edit appends to the target, never replaces.
+#
 # Numbers are never model-written: weights, cadences and goals are owner-entered or
 # computed here; an objective's ``metric_key`` is always the base body's, and
 # regenerate never writes a play, so a play's KPI ``pass_mark`` / ``expand_at`` and

@@ -906,5 +906,86 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_decisions.py"
     ]
+  },
+  {
+    "label": "one audience: old segments / icp_sentences are dropped, not folded into target",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "        if items:\n            target = append_parts(target, f\"{label}: \" + \", \".join(items))\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: an empty old list still folds into target",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "        if items:\n            target = append_parts",
+    "replace": "        if True:\n            target = append_parts",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: a repeat fold appends the same part again",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "        if part and part not in parts:\n",
+    "replace": "        if part:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: market_research.alternatives is dropped, not moved",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py",
+    "find": "        moved = _clean_items(research.pop(\"alternatives\"))\n",
+    "replace": "        moved = [] if research.pop(\"alternatives\") else []\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: the alternatives move replaces positioning.alternatives",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py",
+    "find": "            have = list(have) if isinstance(have, list) else []\n",
+    "replace": "            have = []\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: an old-client save without positioning.alternatives erases them",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        _carry_alternatives(body.body, new_body, base)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: a stored old-shape strategy reaches the wire unfolded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if unit == \"strategy\" or (\n",
+    "replace": "    if (\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience migration: the dry run writes",
+    "file": "scripts/migrate_growth_strategy_one_audience.py",
+    "find": "        if apply:\n            res = coll.update_one(",
+    "replace": "        if True:\n            res = coll.update_one(",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience migration: the count check always passes",
+    "file": "scripts/migrate_growth_strategy_one_audience.py",
+    "find": "    ok = processed == total and not raced and not left\n",
+    "replace": "    ok = True\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
   }
 ]
