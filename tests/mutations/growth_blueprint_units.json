@@ -811,8 +811,8 @@
   {
     "label": "format status: the open draft gets no appended format",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "_normal(unit, draft.body), name, status, name)",
-    "replace": "_normal(unit, draft.body), name, status)",
+    "find": "        add = name if appended else None\n",
+    "replace": "        add = None\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_decisions.py"
     ]
@@ -840,6 +840,24 @@
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
     "find": "    if len(new_body[\"formats\"]) > MAX_BLUEPRINT_ITEMS:\n",
     "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: a draft that dropped a listed format gets it back",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        add = name if appended else None\n",
+    "replace": "        add = name\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: the audit names the format as sent, not as stored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "metadata={\"unit\": unit, \"format\": written,",
+    "replace": "metadata={\"unit\": unit, \"format\": name,",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_decisions.py"
     ]

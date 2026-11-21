@@ -11036,13 +11036,15 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   `x_thread` on X, `reddit_post` on Reddit, the video formats elsewhere: the table
   the ideas agent picks from) is appended as `{name, status}`, spelled as the table
   spells it, so a play listing no formats can still track the ones its posts used.
-  An open draft gets the same status (its `rev` goes up), the entry appended when
-  the draft does not list it, so approving it later does not revert the change; a
+  An open draft that lists the format gets the same status (its `rev` goes up); one
+  that does not gets the entry appended only when this call appended it to the
+  approved play (a draft that removed a format the play listed is left alone), so
+  approving it later does not revert the change; a
   draft saved meanwhile is re-read and retried, and once the approved write has
   landed the route never answers 409. Each change is an audit event
   (`growth.blueprint.format_status`, target `growth_blueprint_unit`
   `<profile_id>:<unit>`, metadata `{unit, format, old, new}`, with actor and time;
-  `old` is `null` for an appended format). `409 social.blueprint_stale` on a stale
+  `format` is the stored spelling and `old` is `null` for an appended format). `409 social.blueprint_stale` on a stale
   `rev`; `404` for a play with no approved row or a name neither listed nor in the
   table; `422 social.blueprint_not_a_play` for a non-play unit,
   `422 social.blueprint_formats_full` when the play already holds 20 formats.

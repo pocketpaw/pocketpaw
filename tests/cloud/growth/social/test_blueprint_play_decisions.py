@@ -13,7 +13,8 @@
 # rest of the table stays; the status route (ok, stale 409, unknown 404, non-play
 # 422, audit event, draft mirrored so a later approve keeps it; a fixed-table format
 # the play does not list is appended in the table's spelling, on the approved row
-# and an open draft, audited as old None); seed, a channel
+# and on an open draft only when it was appended, audited as old None under the
+# stored spelling); seed, a channel
 # save and regenerate never set or lose the decision marks; an old string-format
 # play row opens no draft on an unrelated whole-page save; the second-core warning
 # (no live value, under, at or over, no expand_at, a testing play, on approve).
@@ -305,16 +306,13 @@ async def test_status_route_mirrors_onto_an_open_draft_so_approve_keeps_it(w1):
     assert approved["approved"]["body"]["formats"][1] == {"name": "x_thread", "status": "dropped"}
 
 
-async def test_status_route_appends_to_a_draft_that_does_not_list_the_format(w1):
+async def test_status_route_leaves_a_draft_that_does_not_list_the_format(w1):
     pid = await _approved_play(w1)
     await _put(w1, pid, XO, {"status": "core", "formats": ["x_post"]}, 1)
     rev = await _rev(pid, XO)
     state = await _status(w1, pid, XO, "x_thread", "dropped", await _approved_rev(pid))
-    assert state["draft"]["body"]["formats"] == [
-        {"name": "x_post", "status": "testing"},
-        {"name": "x_thread", "status": "dropped"},
-    ]
-    assert state["draft"]["rev"] == rev + 1
+    assert state["draft"]["body"]["formats"] == [{"name": "x_post", "status": "testing"}]
+    assert state["draft"]["rev"] == rev
 
 
 # A play listing no formats (the live brand's only play): Results marks the formats
@@ -342,6 +340,13 @@ async def test_an_appended_format_takes_the_table_spelling_and_is_never_doubled(
     await _status(w1, pid, XO, "X Post", "winning", await _approved_rev(pid))
     state = await _status(w1, pid, XO, "x-post", "dropped", await _approved_rev(pid))
     assert state["approved"]["body"]["formats"] == [{"name": "x_post", "status": "dropped"}]
+    events = await audit_service.list_target_events(
+        "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
+    )
+    assert sorted((e.metadata["format"], e.metadata["old"]) for e in events) == [
+        ("x_post", None),
+        ("x_post", "winning"),
+    ]
 
 
 async def test_an_open_draft_gets_the_appended_format_so_approve_keeps_it(w1):

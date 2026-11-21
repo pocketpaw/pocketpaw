@@ -13,7 +13,8 @@
 # ``social.blueprint_goal_in_use``. ``set_format_status`` writes one play format's
 # status straight into the approved row (no draft, no approve), appending a format
 # the play does not list when its platform's fixed table has it (table spelling),
-# mirrors it onto an open draft (appending there too), and records an audit event. Saving or
+# mirrors it onto an open draft that lists it (or appends it there when this call
+# appended it), and records an audit event naming the stored spelling. Saving or
 # approving a core play while another approved core play is under its KPI
 # ``expand_at`` (or has no live value) adds a plain-text ``warnings`` entry
 # (``live`` numbers); it never blocks.
@@ -1306,10 +1307,12 @@ _MIRROR_TRIES = 3
 
 
 async def _mirror_format_status(
-    workspace_id: str, profile_id: str, unit: str, name: str, status: str
+    workspace_id: str, profile_id: str, unit: str, name: str, status: str, appended: bool
 ) -> None:
-    """Give the unit's open draft the same format status, appending ``name`` when the
-    draft does not list it, so approving it later keeps the change. Runs after the
+    """Give the unit's open draft the same format status, so approving it later keeps
+    the change. A draft that does not list ``name`` gets it appended only when this
+    call ``appended`` it to the approved play; when the approved play already listed
+    it, the owner removed it from the draft on purpose and the draft is left. Runs after the
     approved write landed, so it never fails the request: a draft saved meanwhile is
     re-read and retried, and after ``_MIRROR_TRIES`` lost races it is logged and
     left. The bumped draft rev makes a stale editor's next save a 409, so it cannot
@@ -1318,7 +1321,10 @@ async def _mirror_format_status(
         draft = (await _rows(workspace_id, profile_id)).get(unit, {}).get("draft")
         if draft is None:
             return
-        mirrored, _, _ = _with_format_status(_normal(unit, draft.body), name, status, name)
+        add = name if appended else None
+        mirrored, _, written = _with_format_status(_normal(unit, draft.body), name, status, add)
+        if written is None:
+            return
         if len(mirrored["formats"]) > MAX_BLUEPRINT_ITEMS:
             logger.warning("growth blueprint: the %s draft has no room for another format", unit)
             return
@@ -1381,9 +1387,11 @@ async def set_format_status(
         "growth.blueprint.format_status",
         target_type="growth_blueprint_unit",
         target_id=f"{profile.id}:{unit}",
-        metadata={"unit": unit, "format": name, "old": old, "new": body.status},
+        metadata={"unit": unit, "format": written, "old": old, "new": body.status},
     )
-    await _mirror_format_status(workspace_id, profile.id, unit, written, body.status)
+    await _mirror_format_status(
+        workspace_id, profile.id, unit, written, body.status, appended=old is None
+    )
     # no-event: Growth › Social has no realtime subscriber; the audit row is the record.
     return await _unit_result(workspace_id, profile.id, unit)
 
