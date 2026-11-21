@@ -32,7 +32,9 @@
 # Strategy bodies are read through ``fold_strategy`` (wire, compose, diff), so an
 # old-shape row reads as one ``gtm.icp.target`` and ``positioning.alternatives``.
 # A strategy save without a ``positioning.alternatives`` key (an old editor) keeps
-# the base row's. A legacy ``audience`` edit appends to the target, never replaces.
+# the base row's. A legacy ``audience`` edit replaces the target and ``not_for`` it
+# sends; its old lists fold against the stored target (only new items), and a fold
+# past the cap is a 422.
 #
 # Numbers are never model-written: weights, cadences and goals are owner-entered or
 # computed here; an objective's ``metric_key`` is always the base body's, and
@@ -119,7 +121,6 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     RoadmapMilestoneModel,
     RoadmapPhaseModel,
     SaveBlueprintDraftRequest,
-    append_parts,
     fold_icp,
 )
 from pocketpaw_ee.cloud.growth.social.play_catalog import PLAY_IDS, PLAYS
@@ -447,9 +448,13 @@ def _normal(unit: str, body: dict[str, Any]) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
-def _apply_legacy(bodies: dict[str, dict], sections: dict[str, Any]) -> dict[str, dict]:
+def _apply_legacy(
+    bodies: dict[str, dict], sections: dict[str, Any], *, strict: bool = True
+) -> dict[str, dict]:
     """``bodies`` (every core unit present) with the legacy ``sections`` sent laid
-    over the fields they map to; every other field is kept."""
+    over the fields they map to; every other field is kept. ``strict`` makes an
+    audience fold past the target cap a 422; the migration of pre-unit rows passes
+    False and cuts it (the legacy row is kept, read-only)."""
     out = {u: copy.deepcopy(b) for u, b in bodies.items()}
     for unit in _CORE_UNITS:
         out[unit] = _normal(unit, out.get(unit) or {})
@@ -463,14 +468,26 @@ def _apply_legacy(bodies: dict[str, dict], sections: dict[str, Any]) -> dict[str
             tone=_str(voice.get("tone")), avoid=list(_strs(voice.get("avoid")))
         )
     if "audience" in sections:
-        # Old clients and pre-unit rows still send the retired lists: fold them,
-        # then append to the target and keep ``not_for`` unless one is sent.
-        audience = fold_icp(sections["audience"] or {})
-        icp = strategy["gtm"]["icp"]
-        if sent := _str(audience.get("target")).strip():
-            icp["target"] = append_parts(_str(icp.get("target")), sent)
-        if _strs(audience.get("not_for")):
-            icp["not_for"] = list(_strs(audience.get("not_for")))
+        # The keys sent replace (``target`` is the owner's text); the retired lists
+        # old clients and pre-unit rows send fold against that target, so only new
+        # items are added. Only keys present count: ``_draft_edit`` dumps it unset-free.
+        audience = sections["audience"] or {}
+        icp = dict(strategy["gtm"]["icp"])
+        if "target" in audience:
+            icp["target"] = _str(audience["target"])
+        if "not_for" in audience:
+            icp["not_for"] = list(_strs(audience["not_for"]))
+        for key in ("segments", "icp_sentences"):
+            if key in audience:
+                icp[key] = list(_strs(audience[key]))
+        icp = fold_icp(icp, truncate=not strict)
+        if "segments" in icp or "icp_sentences" in icp:
+            raise ValidationError(
+                "social.blueprint_invalid_body",
+                "This Blueprint section has a field that is missing or not allowed",
+                {"errors": [{"loc": ["audience", "target"], "msg": "too long once folded"}]},
+            )
+        strategy["gtm"]["icp"] = icp
     if "pillars" in sections:
         strategy["content_pillars"] = copy.deepcopy(_dicts(sections["pillars"]))
     if "goals" in sections:
@@ -1498,6 +1515,9 @@ def _draft_edit(body: SaveBlueprintDraftRequest) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name in body.model_fields_set:
         value = dumped[name]
+        if name == "audience" and body.audience is not None:
+            # Only the audience keys sent: an absent target must not read as "".
+            value = body.audience.model_dump(mode="json", exclude_unset=True)
         if value is None:
             continue
         if name == "goals":
@@ -1799,7 +1819,7 @@ async def migrate_profile(
     docs: list[_UnitDoc] = []
     base: dict[str, dict] = {}
     if approved is not None:
-        base = _apply_legacy({}, _legacy_sections(approved))
+        base = _apply_legacy({}, _legacy_sections(approved), strict=False)
         docs += [
             _UnitDoc(
                 workspace=workspace_id,
@@ -1825,7 +1845,7 @@ async def migrate_profile(
                 body=body,
                 created_by=draft.created_by,
             )
-            for unit, body in _apply_legacy(base, _legacy_sections(draft)).items()
+            for unit, body in _apply_legacy(base, _legacy_sections(draft), strict=False).items()
             if body != base.get(unit)
         ]
     docs.sort(key=lambda d: d.unit == "strategy")  # strategy last, see the docstring
@@ -1887,7 +1907,9 @@ async def migration_counts() -> tuple[int, int]:
     complete = 0
     for workspace_id, profile_id in legacy:
         approved = await _legacy_find(workspace_id, profile_id, "approved")
-        expected = set(_apply_legacy({}, _legacy_sections(approved))) if approved else set()
+        expected = (
+            set(_apply_legacy({}, _legacy_sections(approved), strict=False)) if approved else set()
+        )
         have = {
             d.unit
             for d in await _UnitDoc.find(

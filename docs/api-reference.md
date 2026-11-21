@@ -10895,9 +10895,10 @@ dropped.
   section, and every unit whose body changes gets a draft (opened from its
   approved when it has none). A channel left out parks its plays. Any other
   key (`status`, `version`, `approved_by`…) is a 422. A goal without an `id` gets one.
-  `audience` is the exception: `{target, not_for}` (old `segments` /
-  `icp_sentences` fold into `target`) appends to the stored target, and `not_for`
-  replaces only when one is sent.
+  `audience` is `{target, not_for}`: each key sent replaces the stored one. Old
+  clients may still send `segments` / `icp_sentences`; they fold against the
+  stored (or sent) target, adding only the items it does not list yet, and a fold
+  past the 2000-character target is `422 social.blueprint_invalid_body`.
   `learning_ids` (at most 200, unique) must each name a learning of the same
   workspace and brand, in any status; an unknown, malformed or foreign id is
   `422 social.blueprint_unknown_learning` with `details.learning_ids` listing them.

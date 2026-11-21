@@ -955,8 +955,8 @@
   {
     "label": "one audience: migrating an old-shape legacy row drops its segments",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "        audience = fold_icp(sections[\"audience\"] or {})\n",
-    "replace": "        audience = sections[\"audience\"] or {}\n",
+    "find": "                icp[key] = list(_strs(audience[key]))\n",
+    "replace": "                pass\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_one_audience.py"
     ]
@@ -1081,8 +1081,8 @@
   {
     "label": "one audience migration: --apply writes truncating rows without --allow-truncate",
     "file": "scripts/migrate_growth_strategy_one_audience.py",
-    "find": "            if apply and not allow_truncate:\n",
-    "replace": "            if False:\n",
+    "find": "                    \"--allow-truncate\"\n                )\n                continue\n",
+    "replace": "                    \"--allow-truncate\"\n                )\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_one_audience.py"
     ]
@@ -1092,6 +1092,60 @@
     "file": "scripts/migrate_growth_strategy_one_audience.py",
     "find": "        q[\"profile_id\"] = profile\n",
     "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: a legacy target edit is ignored instead of replacing",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if \"target\" in audience:\n            icp[\"target\"]",
+    "replace": "        if False:\n            icp[\"target\"]",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: legacy old lists fold without the stored target",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        icp = dict(strategy[\"gtm\"][\"icp\"])\n",
+    "replace": "        icp = {}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: a legacy fold past the cap is cut instead of a 422",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        icp = fold_icp(icp, truncate=not strict)\n",
+    "replace": "        icp = fold_icp(icp, truncate=True)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience: a legacy edit without a target erases it",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "            value = body.audience.model_dump(mode=\"json\", exclude_unset=True)\n",
+    "replace": "            value = body.audience.model_dump(mode=\"json\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience migration: the dry run counts a refused row as would write",
+    "file": "scripts/migrate_growth_strategy_one_audience.py",
+    "find": "            if not allow_truncate:\n                refused += 1\n",
+    "replace": "            if apply and not allow_truncate:\n                refused += 1\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_one_audience.py"
+    ]
+  },
+  {
+    "label": "one audience migration: a failed read leaves the dump behind",
+    "file": "scripts/migrate_growth_strategy_one_audience.py",
+    "find": "            os.unlink(dump)\n",
+    "replace": "            pass\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_one_audience.py"
     ]

@@ -41,8 +41,9 @@
 # Phase and milestone ids are unique across the roadmap (the service mints a
 # missing one). The weekly Plan (``WeekPlanResponse``) is a read only. A setup
 # skip names one of the ``SetupKey`` rows (anything else is a 422). The legacy
-# blueprint audience is ``{target, not_for}``; ``fold_icp`` folds the retired
-# ``segments`` / ``icp_sentences`` into ``target`` (shared with the unit bodies).
+# blueprint audience is ``{target, not_for}`` (a request may still carry the retired
+# ``segments`` / ``icp_sentences``); ``fold_icp`` folds those into ``target``
+# (shared with the unit bodies).
 
 from __future__ import annotations
 
@@ -992,21 +993,6 @@ def _joined(target: str, part: str) -> str:
     return f"{base}; {part}" if base else part
 
 
-def append_parts(target: str, text: str) -> str:
-    """``target`` with the "; "-separated parts of ``text`` it does not already hold
-    appended. The owner's text is never rewritten; past the text cap the target is
-    kept as it is (logged), never cut."""
-    have = {p.strip().casefold() for p in target.split(";")}
-    missing = [p.strip() for p in text.split(";") if p.strip() and p.strip().casefold() not in have]
-    if not missing:
-        return target
-    out = _joined(target, "; ".join(missing))
-    if len(out) > BLUEPRINT_TEXT_MAX:
-        logger.warning("growth blueprint: audience edit would pass the target cap; kept as is")
-        return target
-    return out
-
-
 def _fold_items(target: str, label: str, items: list[str]) -> str:
     """``target`` with the ``items`` it does not already list under ``label`` (ignoring
     case) added: onto its last "label: ..." part, else as a new one."""
@@ -1057,17 +1043,21 @@ def fold_icp(icp: Any, *, truncate: bool = False, overflow: list | None = None) 
 
 class BlueprintAudienceModel(BaseModel):
     """The legacy whole-page audience: the strategy's one ``target`` and its
-    ``not_for`` list. Old ``segments`` / ``icp_sentences`` fold into ``target``."""
+    ``not_for`` list."""
 
     model_config = ConfigDict(extra="forbid")
 
     target: _BlueprintText = ""
     not_for: _BlueprintItems = Field(default_factory=list)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _fold(cls, v: Any) -> Any:
-        return fold_icp(v)
+
+class BlueprintAudienceRequest(BlueprintAudienceModel):
+    """A legacy audience edit. Old clients may still send ``segments`` /
+    ``icp_sentences``; the service folds them against the STORED target, so only
+    the keys actually sent count (it reads the fields set)."""
+
+    segments: _BlueprintItems = Field(default_factory=list)
+    icp_sentences: _BlueprintItems = Field(default_factory=list)
 
 
 class BlueprintVoiceModel(BaseModel):
@@ -1207,7 +1197,7 @@ class SaveBlueprintDraftRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     identity: BlueprintIdentityModel | None = None
-    audience: BlueprintAudienceModel | None = None
+    audience: BlueprintAudienceRequest | None = None
     voice: BlueprintVoiceModel | None = None
     pillars: _Pillars | None = None
     channels: list[BlueprintChannelModel] | None = None

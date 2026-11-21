@@ -30,7 +30,7 @@ from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as Bluepr
 from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
 from pydantic import ValidationError
 
-from tests.cloud.growth.social.test_blueprint import _profile
+from tests.cloud.growth.social.test_blueprint import BP, _profile, _seed
 from tests.cloud.growth.social.test_blueprint_units import UNITS, _ok, _put, _rev
 from tests.cloud.growth.social.test_router import _client
 
@@ -254,6 +254,39 @@ async def test_an_old_client_save_over_a_migrated_row_loses_nothing_and_never_fo
     assert draft["positioning"]["alternatives"] == []
 
 
+# --- the legacy whole-page audience edit ---------------------------------------------------
+
+
+async def _legacy_audience(client, pid: str, audience: dict, status: int = 200) -> dict:
+    resp = await client.put(
+        f"{BP}/draft",
+        params={"profile_id": pid},
+        json={"audience": audience},
+    )
+    assert resp.status_code == status, resp.text
+    return resp.json()
+
+
+async def test_a_legacy_audience_edit_replaces_the_target_and_folds_only_new_items(w1):
+    pid = await _profile()
+    await _seed(w1, pid)
+    state = await _legacy_audience(w1, pid, {"target": "T", "not_for": ["banks"]})
+    assert state["draft"]["audience"] == {"target": "T", "not_for": ["banks"]}
+    state = await _legacy_audience(w1, pid, {"segments": ["a", "b"]})
+    assert state["draft"]["audience"]["target"] == "T; Segments: a, b"
+    state = await _legacy_audience(w1, pid, {"segments": ["a", "b", "c"]})
+    assert state["draft"]["audience"] == {"target": "T; Segments: a, b, c", "not_for": ["banks"]}
+    # The owner's target edit replaces, folds included.
+    state = await _legacy_audience(w1, pid, {"target": "Solo founders"})
+    assert state["draft"]["audience"]["target"] == "Solo founders"
+    # Over the cap once folded: refused, nothing written.
+    long = {"target": "t" * 1990, "segments": ["more than ten chars"]}
+    resp = await _legacy_audience(w1, pid, long, status=422)
+    assert resp["error"]["code"] == "social.blueprint_invalid_body"
+    strategy = await UnitDoc.find_one({"profile_id": pid, "unit": "strategy", "status": "draft"})
+    assert strategy.body["gtm"]["icp"]["target"] == "Solo founders"
+
+
 # --- the migration script -------------------------------------------------------------------
 
 
@@ -339,8 +372,11 @@ def test_a_row_with_no_rev_is_written(tmp_path):
 def test_a_truncating_fold_is_reported_and_refused_unless_allowed(tmp_path, capsys):
     db = _db([("approved", _LONG)])
     script = _script()
-    assert script.run(db, apply=False, dump=str(tmp_path / "a.json")) == 0
-    assert "TRUNCATED gtm.icp.target: 2021 -> 2000" in capsys.readouterr().out
+    assert script.run(db, apply=False, dump=str(tmp_path / "a.json")) == 1
+    out = capsys.readouterr().out
+    assert "TRUNCATED gtm.icp.target: 2021 -> 2000" in out and "WARN: --apply would refuse" in out
+    assert "0 would write, 0 already new shape" in out and "(1 would refuse)" in out
+    assert out.rstrip().endswith("-> WARN")
     assert script.run(db, apply=True, dump=str(tmp_path / "b.json")) == 1
     out = capsys.readouterr().out
     assert "REFUSED" in out and "1 truncating (1 refused), 1 still old-shape -> MISMATCH" in out
@@ -378,6 +414,17 @@ def test_the_count_check_fails_when_a_row_could_not_be_written(tmp_path, capsys)
     assert _script().run({"growth_blueprint_units": _Raced()}, apply=True, dump=dump) == 1
     out = capsys.readouterr().out
     assert "NOT WRITTEN" in out and "1 raced" in out and "1 still old-shape -> MISMATCH" in out
+
+
+def test_a_failed_read_leaves_no_dump_behind(tmp_path):
+    class _Down:
+        def find(self, query):
+            raise RuntimeError("mongo is down")
+
+    dump = tmp_path / "a.json"
+    with pytest.raises(RuntimeError):
+        _script().run({"growth_blueprint_units": _Down()}, apply=False, dump=str(dump))
+    assert not dump.exists()
 
 
 @pytest.mark.parametrize("argv", [[], ["--dry-run"], ["--apply"]])

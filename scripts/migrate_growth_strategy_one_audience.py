@@ -25,7 +25,9 @@ for a row that never had one), and bumps ``rev`` so an open editor gets a 409.
 The count check: rows matched; would write / written; already new shape; raced;
 truncating. A real run passes only when written + already new == matched and a
 re-scan finds no old-shape row left; a dry run when would write + already new ==
-matched. A failure exits 1. The URI is printed as host and database only.
+matched (a row --apply would refuse makes it WARN). Anything but OK exits 1. A
+dump left half-written by a failed read is deleted, so the re-run is not refused.
+The URI is printed as host and database only.
 
 Usage:
     uv run python scripts/migrate_growth_strategy_one_audience.py --dump /tmp/s1.json
@@ -108,17 +110,22 @@ def run(
     query = _query(workspace, profile)
     coll = db[COLLECTION]
     with open(dump, "x") as fh:
-        rows = list(coll.find(query))
-        json.dump(
-            [
-                {k: r.get(k) for k in ("_id", "workspace", "profile_id", "status")}
-                | {"version": r.get("version"), "rev": r.get("rev"), "body": r.get("body")}
-                for r in rows
-            ],
-            fh,
-            default=str,
-            indent=2,
-        )
+        try:
+            rows = list(coll.find(query))
+            json.dump(
+                [
+                    {k: r.get(k) for k in ("_id", "workspace", "profile_id", "status")}
+                    | {"version": r.get("version"), "rev": r.get("rev"), "body": r.get("body")}
+                    for r in rows
+                ],
+                fh,
+                default=str,
+                indent=2,
+            )
+        except BaseException:
+            # A half-written dump is no restore copy, and would refuse the re-run.
+            os.unlink(dump)
+            raise
     tag = "" if apply else "[dry-run] "
     print(f"{tag}dumped {len(rows)} strategy row(s) to {dump}")
     writes = already_new = raced = truncating = refused = 0
@@ -137,9 +144,14 @@ def run(
             print(f"  TRUNCATED {field}: {length} -> {cap}")
         if overflow:
             truncating += 1
-            if apply and not allow_truncate:
+            if not allow_truncate:
                 refused += 1
-                print("  REFUSED: the fold truncates; pass --allow-truncate (the dump keeps it)")
+                print(
+                    "  REFUSED: the fold truncates; pass --allow-truncate (the dump keeps it)"
+                    if apply
+                    else "  WARN: --apply would refuse this row (it truncates) without "
+                    "--allow-truncate"
+                )
                 continue
         if not apply:
             writes += 1
@@ -156,11 +168,12 @@ def run(
     total = coll.count_documents(query)
     left = sum(1 for r in coll.find(query) if _old_shape(r.get("body"))) if apply else 0
     ok = writes + already_new == total == len(rows) and not left
-    verb = "written" if apply else "would write"
+    verb, refuse = ("written", "refused") if apply else ("would write", "would refuse")
+    verdict = "OK" if ok else ("MISMATCH" if apply or not refused else "WARN")
     print(
         f"{tag}count check: {total} matched, {writes} {verb}, {already_new} already new shape, "
-        f"{raced} raced, {truncating} truncating ({refused} refused), "
-        f"{left} still old-shape -> {'OK' if ok else 'MISMATCH'}"
+        f"{raced} raced, {truncating} truncating ({refused} {refuse}), "
+        f"{left} still old-shape -> {verdict}"
     )
     return 0 if ok else 1
 

@@ -425,7 +425,7 @@ async def test_a_migrated_legacy_blueprint_reads_exactly_as_before(w1):
 
 async def test_whole_page_routes_round_trip_through_the_units(w1):
     pid = await _profile()
-    seeded = (await _seed(w1, pid))["draft"]["audience"]["target"]
+    await _seed(w1, pid)
     sections = {k: v for k, v in _LEGACY.items() if k not in ("learning_ids",)}
     resp = await w1.put(f"{BP}/draft", params={"profile_id": pid}, json=sections)
     assert resp.status_code == 422
@@ -435,8 +435,6 @@ async def test_whole_page_routes_round_trip_through_the_units(w1):
     zeroes = {"channel": "whatsapp", "posts_per_week": 0, "sends_per_week": 0}
     state = await _save(w1, pid, {**sections, "channels": [*_MAPPED_CHANNELS, zeroes]})
     sections["channels"] = _MAPPED_CHANNELS
-    # A legacy audience edit appends to the seeded target, never replaces it.
-    sections["audience"] = {**sections["audience"], "target": f"{seeded}; t"}
     draft = state["draft"]
     for name, value in sections.items():
         assert draft[name] == value, name
