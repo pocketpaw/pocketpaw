@@ -18,6 +18,7 @@
 # growth.read, writes growth.write. ``/blueprint`` (read, diff; draft save, seed,
 # regenerate, approve) is the profile's Blueprint composed from its units, and
 # ``/blueprint/units`` (list; per unit: draft save, discard, approve, diff) edits a unit;
+# ``GET /blueprint/live`` (growth.read) is the approved Blueprint's live numbers;
 # Blueprint writes are growth.manage.
 # ``GET /plan?week=YYYY-Www`` is the computed weekly post slots (growth.read). The
 # media upload reads at most one byte past the largest size cap. The connect route builds the
@@ -36,9 +37,11 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.auth.social.service import frontend_base_url, safe_frontend_origin
 from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
+from pocketpaw_ee.cloud.growth.social import live as social_live
 from pocketpaw_ee.cloud.growth.social import plan as social_plan
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import (
+    BlueprintLiveResponse,
     BlueprintUnitDiffResponse,
     BlueprintUnitsResponse,
     BlueprintUnitStateResponse,
@@ -427,6 +430,18 @@ async def get_blueprint_units(
 ) -> BlueprintUnitsResponse:
     """Every unit's approved and draft rows, plus the play catalog."""
     return await social_blueprint.units(ctx, profile_id)
+
+
+@router.get(
+    "/blueprint/live",
+    response_model=BlueprintLiveResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_blueprint_live(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> BlueprintLiveResponse:
+    """Live values per approved objective id and play unit; null when unmeasured."""
+    return await social_live.get(ctx, profile_id)
 
 
 @router.put(

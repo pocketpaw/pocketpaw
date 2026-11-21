@@ -223,5 +223,131 @@
     "tests": [
       "tests/cloud/growth/social/test_analyst.py"
     ]
+  },
+  {
+    "label": "live: regenerate takes the analyst's metric_key over the owner's",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "                \"metric_key\": base.get(\"metric_key\"),\n",
+    "replace": "                \"metric_key\": g.get(\"metric_key\", base.get(\"metric_key\")),\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: impressions with no snapshot read as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if not latest:\n        return LiveValueResponse()\n",
+    "replace": "    if not latest:\n        return LiveValueResponse(value=0.0)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: engagement with no 7-day snapshot reads as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if not week:\n        return LiveValueResponse()\n",
+    "replace": "    if not week:\n        return LiveValueResponse(value=0.0)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: clicks with no tracked link read as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if not linked:\n        return LiveValueResponse()\n",
+    "replace": "    if not linked:\n        return LiveValueResponse(value=0.0)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: stars with no repo row read as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if not stars:\n        return LiveValueResponse()\n",
+    "replace": "    if not stars:\n        return LiveValueResponse(value=0.0)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: a KPI with no metric_key is measured anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "        fn = _POST_METRICS.get(key)\n",
+    "replace": "        fn = _POST_METRICS.get(key or \"impressions_per_week\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: impressions take the smallest bucket, not the latest",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "        max(p.snapshots, key=lambda s: s.age_bucket)\n",
+    "replace": "        min(p.snapshots, key=lambda s: s.age_bucket)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: engagement counts posts younger than 7 days",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    week = [s for p in posts for s in p.snapshots if s.age_bucket == ENGAGEMENT_BUCKET]\n",
+    "replace": "    week = [s for p in posts for s in p.snapshots]\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: a play sums every platform's ideas",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    return [p for p in posts if p.platform == q.channel]\n",
+    "replace": "    return posts\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: two acting plays on one platform both claim its ideas",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if acting.get(q.channel) != [play_id]:\n",
+    "replace": "    if play_id not in acting.get(q.channel, []):\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: an objective channel does not scope its ideas",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "            scoped = [p for p in posts if p.platform == channel] if channel else posts\n",
+    "replace": "            scoped = posts\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: the snapshot read leaks across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    ).to_list()\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():\n",
+    "replace": "    ).to_list()\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"idea\": {\"$in\": ids}}).to_list():\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: the link read leaks across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    for link in await _LinkDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():\n        clicks.setdefault(",
+    "replace": "    for link in await _LinkDoc.find({\"idea\": {\"$in\": ids}}).to_list():\n        clicks.setdefault(",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: the stars read leaks across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            await _RepoMetricDoc.find({\"workspace\": workspace_id, \"repo\": repo})\n            .sort([(\"day\", -1)])\n            .first_or_none()\n",
+    "replace": "            await _RepoMetricDoc.find({\"repo\": repo})\n            .sort([(\"day\", -1)])\n            .first_or_none()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
   }
 ]
