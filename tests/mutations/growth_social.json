@@ -1119,10 +1119,10 @@
     ]
   },
   {
-    "label": "postiz stats: the superseded unique index is never dropped",
-    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    await _drop_legacy_metric_index()\n",
-    "replace": "",
+    "label": "postiz stats: the boot reconcile never drops the superseded unique index",
+    "file": "ee/pocketpaw_ee/cloud/shared/db.py",
+    "find": "        await coll.drop_index(name)\n",
+    "replace": "        pass\n",
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]
@@ -1141,6 +1141,15 @@
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
     "find": "        (m.idea, m.age_bucket)\n        for m in await _MetricDoc.find(\n            {\"workspace\": workspace_id, \"idea\": {\"$in\": ids}, **_X_ROWS}\n",
     "replace": "        (m.idea, m.age_bucket)\n        for m in await _MetricDoc.find(\n            {\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: the boot reconcile drops a non-unique index of the legacy name",
+    "file": "ee/pocketpaw_ee/cloud/shared/db.py",
+    "find": "        and list(legacy.get(\"key\", [])) == [(\"workspace\", 1), (\"idea\", 1), (\"age_bucket\", 1)]\n        and legacy.get(\"unique\") is True\n",
+    "replace": "        and list(legacy.get(\"key\", [])) == [(\"workspace\", 1), (\"idea\", 1), (\"age_bucket\", 1)]\n",
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]

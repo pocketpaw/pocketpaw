@@ -9,8 +9,8 @@
 # Append-only: the unique (workspace, idea, platform, postiz_post_id, age_bucket)
 # index means each post's bucket is written once and never updated or deleted; a
 # second write is a DuplicateKeyError the metrics sweep skips. It replaced the
-# (workspace, idea, age_bucket) index, which ``service.run_post_metrics`` drops
-# before it writes a non-X row, since Beanie never drops an index itself.
+# (workspace, idea, age_bucket) index, which ``shared.db.init_cloud_db`` drops at
+# boot, since Beanie never drops an index itself.
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).

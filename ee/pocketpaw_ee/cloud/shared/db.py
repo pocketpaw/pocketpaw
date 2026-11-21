@@ -1,89 +1,28 @@
-"""MongoDB connection and Beanie ODM initialization.
+"""MongoDB connection and Beanie ODM initialization for the cloud.
 
-2026-09-28 (feat/concierge-manual-create, CR-12): ``init_cloud_db`` runs the
-concierge-marker backfill (``sites.migrate_concierge_marker.migrate_on_boot``)
-right after the studio import. CR-12 makes ``Site.concierge_created_at`` a
-requirement for serving a concierge and flips ``concierge_enabled`` to default
-False, so the rows written before it must be classified before the first request
-or every live bar goes dark. Running it at boot ties it to the model by
-construction, whatever the deploy config does. Best-effort like its neighbours.
-After it, ``sites.migrate_concierge_v2.migrate_on_boot`` moves legacy concierges
-to the v2 runtime, a no-op unless the v2 eval gate is open. Beside them,
-``sites.migrate_appearance_follow_site.migrate_on_boot`` moves appearances stored
-under the old look defaults to "follow the site", once per row.
+``init_cloud_db`` builds the one ``AsyncMongoClient`` (explicit timeouts and a
+visible pool size; options already in the URI win over these defaults, the
+opposite of PyMongo's own precedence, see ``_client_options``), initializes
+Beanie with every cloud document, then runs the boot steps below in order. Each
+step is idempotent; the reconciles and migrations never raise into startup.
 
-2026-09-04 (fix/pool-and-body-ceilings, backend-perf H6): the client is built
-with explicit timeouts. It had none, so it ran on PyMongo's defaults, and two of
-those are the wrong shape for a request-serving process. ``serverSelectionTimeoutMS``
-defaults to 30s, which turns a brief Mongo blip into 30-second request hangs
-instead of fast failures — and every hung request holds a worker slot for the
-duration. ``socketTimeoutMS`` defaults to None, so a socket that stops
-responding without closing hangs its operation forever. ``waitQueueTimeoutMS``
-is also None, meaning a saturated pool queues callers indefinitely rather than
-telling them.
+- Index reconciles, for drift Beanie cannot fix because it only ever creates the
+  indexes a model declares: the stale ``token_1`` unique index on ``invites``,
+  the four-column ``ws_user_provider_repo_unique`` on ``code_projects``, and the
+  three-column ``workspace_1_idea_1_age_bucket_1`` on
+  ``growth_social_post_metrics``. Each drops only its exact legacy shape. Left in
+  place, each rejects rows the current model allows, which passes on mongomock
+  and fails in production.
+- One-time migrations: the legacy workspace-to-VM JSON map, the studio
+  generations log, and the Sites concierge marker, appearance and v2 moves.
+- Guards that refuse or warn at boot: the memory backend must be Mongo, the
+  upload backend should be S3 (``POCKETPAW_REQUIRE_S3_IN_CLOUD`` makes it fatal),
+  and no credit wallet may still hold a pre-micro field.
+- The LiteLLM proxy's own model prices are loaded as the top rung of the pricing
+  ladder (fails open to the public lists).
 
-Note for anyone reading the audit alongside this: the finding says the client
-has "no pool tuning", which is true, but the pool is NOT unbounded — PyMongo
-already defaults ``maxPoolSize`` to 100. It is set explicitly below at that same
-100 so the number is visible and tunable, which changes nothing on any existing
-deploy. The unbounded pool in that finding is the Redis one, fixed separately in
-``_core/redis_client.py``.
-
-Options already present in the connection URI WIN over these defaults, which is
-the opposite of PyMongo's own precedence — see ``_client_options``.
-
-2026-09-04 (fix/wallet-migration-guard): ``init_cloud_db`` now awaits
-``credits.service.verify_wallet_migrated()`` alongside the memory and storage
-guards, and refuses the boot when any wallet document still carries a pre-micro
-field. The rename in #2064 shipped without its migration being run; the ledger
-endpoint 500d, but the balance rows failed SILENTLY — ``balance_micro`` defaults
-to 0, so every customer read as broke and was refused runs they could pay for.
-A schema rename in a money path needs a boot-time tie to its migration, because
-half of it does not fail loudly on its own.
-
-2026-09-04 (fix/proxy-model-prices): ``init_cloud_db`` also loads the LiteLLM
-proxy's own per-model rates and registers them as the top rung of the pricing
-ladder. Runs were priced from public lists that cannot know our negotiated
-rates, and a model only our proxy serves appeared in none of them — it priced
-as None and billed nothing. Fails open: no proxy means the public lists.
-
-2026-07-22 (fix/starter-project-collision): added
-``_drop_legacy_code_project_index`` and called it after ``init_beanie``, beside
-the invite-token reconcile and for the identical reason. ``CodeProject``'s
-registry key grew a ``registry_key`` column so two projects can be built from
-one starter template; the superseded four-column unique index
-``ws_user_provider_repo_unique`` would still reject that second row, and Beanie
-never drops an index the model stopped declaring. Without this the fix passes on
-mongomock and 500s in production.
-
-2026-07-15 (fix/workspace-vm-map-to-db): added ``migrate_workspace_vm_map_to_db``
-— a best-effort, one-time boot task that imports the captain's existing
-workspace→VM entries from the legacy local JSON file
-(``~/.pocketpaw/daytona_workspace_vm_map.json``) into the new ``workspace_vms``
-Mongo collection, then renames the file to ``.migrated`` so it never re-imports.
-Skips any workspace whose DB row already exists (never clobbers newer DB state),
-wraps everything in try/except so a migration hiccup can't block boot, and is
-called once from ``init_cloud_db`` after Beanie is initialized.
-
-2026-06-26 (ART-4): added ``is_multi_tenant_cloud()`` — the single, named home
-for the established "this process is serving tenants" signal
-(``get_client() is not None``, set exactly when ``init_cloud_db`` ran). The
-agent cwd jail (ART-2) and the new cloud-storage boot guard both read it instead
-of re-spelling the ``get_client()`` truthiness check inline. ``init_cloud_db``
-also now calls ``verify_cloud_storage_backend()`` right after the memory guard so
-a cloud deploy missing the S3 upload adapter is loud (warn, or a hard boot
-failure under ``POCKETPAW_REQUIRE_S3_IN_CLOUD``) instead of silently writing
-"blob" artifacts to local disk.
-
-2026-06-07: added ``_drop_legacy_invite_token_index`` and called it after
-``init_beanie``. The invite-token hashing rollout dropped ``unique=True``
-from ``Invite.token`` (uniqueness moved to ``token_hash``), but Beanie only
-*creates* indexes from the model — it never drops ones that disappear. The
-old non-sparse unique index ``token_1`` therefore survived in every existing
-deployment, and because new invites persist ``token=None``, the second new
-invite collided on ``{ token: null }`` with a ``DuplicateKeyError`` that
-escaped as an unhandled 500 on ``POST /workspaces/{id}/invites``. This
-reconciles the live schema with the current model on startup.
+``is_multi_tenant_cloud()`` is the single "this process serves tenants" signal:
+true exactly when ``init_cloud_db`` ran.
 """
 
 from __future__ import annotations
@@ -200,6 +139,43 @@ async def _drop_legacy_code_project_index(db) -> None:  # type: ignore[no-untype
         logger.exception(
             "Failed to drop legacy 'ws_user_provider_repo_unique' index on code_projects"
         )
+
+
+async def _drop_legacy_social_post_metric_index(db) -> None:  # type: ignore[no-untyped-def]
+    """Drop the superseded ``workspace_1_idea_1_age_bucket_1`` unique index on
+    ``growth_social_post_metrics``.
+
+    ``SocialPostMetric`` now keys a snapshot on (workspace, idea, platform,
+    postiz_post_id, age_bucket), so one idea's X post and its LinkedIn Page post
+    each get a row per age bucket. The superseded three-column index would reject
+    the second row, and the metrics sweep swallows ``DuplicateKeyError``, so the
+    Postiz snapshot would vanish silently in production while mongomock passes.
+
+    Idempotent and best-effort like the reconciles above: only the exact legacy
+    shape is dropped, and nothing raises into startup.
+    """
+    name = "workspace_1_idea_1_age_bucket_1"
+    try:
+        coll = db["growth_social_post_metrics"]
+        legacy = (await coll.index_information()).get(name)
+    except Exception:  # pragma: no cover - startup must not fail on probe
+        logger.exception("Could not read post-metric index information; skipping cleanup")
+        return
+    if not (
+        legacy
+        and list(legacy.get("key", [])) == [("workspace", 1), ("idea", 1), ("age_bucket", 1)]
+        and legacy.get("unique") is True
+    ):
+        return
+    try:
+        await coll.drop_index(name)
+        logger.warning(
+            "Dropped superseded unique index %r on growth_social_post_metrics; the "
+            "snapshot key now includes platform and postiz_post_id.",
+            name,
+        )
+    except Exception:  # pragma: no cover - startup must not fail on drop
+        logger.exception("Failed to drop legacy %r index on growth_social_post_metrics", name)
 
 
 async def migrate_workspace_vm_map_to_db() -> None:
@@ -339,6 +315,7 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     # now-nullable `token` column that 500s every second invite.
     await _drop_legacy_invite_token_index(db)
     await _drop_legacy_code_project_index(db)
+    await _drop_legacy_social_post_metric_index(db)
 
     # One-time import of the legacy workspace→VM JSON map into Mongo. Runs after
     # init_beanie so the ``workspace_vms`` collection is live. Best-effort — the

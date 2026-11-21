@@ -3263,7 +3263,6 @@ METRIC_LATE_DAYS = 3
 POSTIZ_STATS_MAX_CALLS = 50
 # X snapshot rows; rows written before ``platform`` existed have no key and are X.
 _X_ROWS: dict[str, Any] = {"platform": {"$in": ["x", None]}}
-_LEGACY_METRIC_INDEX = "workspace_1_idea_1_age_bucket_1"
 _X_STATUS_URL = re.compile(r"^https?://(?:[\w-]+\.)?(?:x|twitter)\.com/(?:[^/?#]+/)*status/(\d+)")
 
 
@@ -3391,22 +3390,6 @@ async def _snapshot_workspace(
     return len(due), saved
 
 
-async def _drop_legacy_metric_index() -> None:
-    """Drop the (workspace, idea, age_bucket) unique index the platform-aware key
-    replaced. Beanie never drops an index a model stopped declaring, and the old one
-    would reject an idea's second post in a bucket (its X row and its LinkedIn Page
-    row) as a DuplicateKeyError the sweep swallows. Exact shape only; idempotent."""
-    coll = _MetricDoc.get_pymongo_collection()
-    legacy = (await coll.index_information()).get(_LEGACY_METRIC_INDEX)
-    if (
-        legacy
-        and list(legacy.get("key", [])) == [("workspace", 1), ("idea", 1), ("age_bucket", 1)]
-        and legacy.get("unique") is True
-    ):
-        await coll.drop_index(_LEGACY_METRIC_INDEX)
-        logger.warning("post metrics: dropped superseded index %s", _LEGACY_METRIC_INDEX)
-
-
 async def _snapshot_postiz_profile(
     postiz: PostizClient,
     workspace_id: str,
@@ -3484,7 +3467,6 @@ async def _run_postiz_metrics(
 ) -> None:
     """The non-X step: snapshot the published non-X posts of every idea with Postiz
     ``post_ids`` created recently enough for a post to still have a bucket due."""
-    await _drop_legacy_metric_index()
     window = PUBLISHED_LOOKBACK + timedelta(days=METRIC_AGE_BUCKETS[-1] + METRIC_LATE_DAYS)
     # global-read: the sweep runs for every workspace; each doc carries its own tenant.
     ideas = await _IdeaDoc.find(

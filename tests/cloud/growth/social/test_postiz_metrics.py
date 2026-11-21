@@ -14,8 +14,9 @@
 # unknown labels dropped); an empty payload stores no row; X and personal
 # LinkedIn posts get no Postiz call; a second run the same day re-reads nothing;
 # the per-run call cap; one failing post never stops the rest; old rows read as
-# X and stay the only rows the X readers see; the superseded index is dropped
-# so an idea's X row and LinkedIn Page row share a bucket.
+# X and stay the only rows the X readers see; the boot reconcile in
+# ``shared.db`` drops the superseded index (exact shape only) so an idea's X row
+# and LinkedIn Page row share a bucket.
 
 from __future__ import annotations
 
@@ -37,6 +38,7 @@ from pocketpaw_ee.cloud.growth.social.postiz import (
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as IdeaDoc
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as MetricDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as OrgDoc
+from pocketpaw_ee.cloud.shared.db import _drop_legacy_social_post_metric_index
 
 API_KEY = "org-api-key-abc123"
 
@@ -347,14 +349,35 @@ async def test_old_rows_read_as_x_and_x_readers_skip_postiz_rows(mongo_db: Any):
     assert (out["idea-1"].x_post_id, out["idea-1"].likes) == ("123", 5)
 
 
+_LEGACY = "workspace_1_idea_1_age_bucket_1"
+_LEGACY_KEYS = [("workspace", 1), ("idea", 1), ("age_bucket", 1)]
+
+
 @pytest.mark.asyncio
-async def test_sweep_drops_the_superseded_index_so_x_and_postiz_rows_share_a_bucket(
+async def test_boot_reconcile_is_a_noop_without_the_legacy_index(mongo_db: Any):
+    coll = MetricDoc.get_pymongo_collection()
+    before = set(await coll.index_information())
+    await _drop_legacy_social_post_metric_index(mongo_db)
+    assert set(await coll.index_information()) == before
+
+
+@pytest.mark.asyncio
+async def test_boot_reconcile_leaves_a_non_unique_index_of_that_name_alone(mongo_db: Any):
+    coll = MetricDoc.get_pymongo_collection()
+    await coll.create_index(_LEGACY_KEYS)  # not unique
+    await _drop_legacy_social_post_metric_index(mongo_db)
+    assert _LEGACY in await coll.index_information()
+
+
+@pytest.mark.asyncio
+async def test_boot_drops_the_superseded_index_so_x_and_postiz_rows_share_a_bucket(
     mongo_db: Any,
 ):
     coll = MetricDoc.get_pymongo_collection()
-    legacy = "workspace_1_idea_1_age_bucket_1"
-    await coll.create_index([("workspace", 1), ("idea", 1), ("age_bucket", 1)], unique=True)
-    assert legacy in await coll.index_information()
+    await coll.create_index(_LEGACY_KEYS, unique=True)
+    assert _LEGACY in await coll.index_information()
+    await _drop_legacy_social_post_metric_index(mongo_db)
+    assert _LEGACY not in await coll.index_information()
 
     now = _now()
     await _org()
@@ -366,7 +389,6 @@ async def test_sweep_drops_the_superseded_index_so_x_and_postiz_rows_share_a_buc
     set_production_postiz(fake.client())
 
     counts = await social_service.run_post_metrics(now)
-    assert legacy not in await coll.index_information()
     assert counts["postiz_stored"] == 1
     rows = await MetricDoc.find({"idea": str(idea.id)}).to_list()
     assert sorted(r.platform for r in rows) == ["linkedin-page", "x"]
