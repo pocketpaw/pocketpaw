@@ -694,7 +694,7 @@
   {
     "label": "format status: an unknown format name is not a 404",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "    if old is None:\n        raise NotFound(\"social_blueprint_format\", name)\n",
+    "find": "    if written is None:\n        raise NotFound(\"social_blueprint_format\", name)\n",
     "replace": "    pass\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_decisions.py"
@@ -703,7 +703,7 @@
   {
     "label": "format status: the open draft is not mirrored",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
-    "find": "        if listed is None:\n            return\n",
+    "find": "        if await _set_if(_draft_match(workspace_id, profile_id, draft), {\"body\": mirrored}):\n            return\n",
     "replace": "        return\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_decisions.py"
@@ -795,6 +795,42 @@
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
     "find": "    logger.warning(\"growth blueprint: format status not mirrored onto the %s draft\", unit)\n",
     "replace": "    raise _stale()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: a table format the play does not list is not appended",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if written is None and add is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: the open draft gets no appended format",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "_normal(unit, draft.body), name, status, name)",
+    "replace": "_normal(unit, draft.body), name, status)",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: an appended format keeps the owner's spelling",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    return key if q and key in social_ideas.allowed_formats(q.channel) else None\n",
+    "replace": "    return name if q and key in social_ideas.allowed_formats(q.channel) else None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: any name is appended, table or not",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    return key if q and key in social_ideas.allowed_formats(q.channel) else None\n",
+    "replace": "    return key\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_decisions.py"
     ]

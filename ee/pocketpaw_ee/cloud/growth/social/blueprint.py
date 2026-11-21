@@ -11,8 +11,9 @@
 # ``social.blueprint_stale``. A goal a plan or play names must exist in the
 # strategy (422), and approving a strategy that drops a named goal is a 422
 # ``social.blueprint_goal_in_use``. ``set_format_status`` writes one play format's
-# status straight into the approved row (no draft, no approve), mirrors it onto an
-# open draft that lists the format, and records an audit event. Saving or
+# status straight into the approved row (no draft, no approve), appending a format
+# the play does not list when its platform's fixed table has it (table spelling),
+# mirrors it onto an open draft (appending there too), and records an audit event. Saving or
 # approving a core play while another approved core play is under its KPI
 # ``expand_at`` (or has no live value) adds a plain-text ``warnings`` entry
 # (``live`` numbers); it never blocks.
@@ -1273,17 +1274,32 @@ async def _core_warnings(workspace_id: str, profile: SocialProfile, unit: str) -
     return out
 
 
-def _with_format_status(body: dict[str, Any], name: str, status: str) -> tuple[dict, str | None]:
-    """``body`` with every format named ``name`` (any case) set to ``status``, its
-    formats as entries; and the old status, None when no format has that name."""
-    out, old = copy.deepcopy(body), None
+def _with_format_status(
+    body: dict[str, Any], name: str, status: str, add: str | None = None
+) -> tuple[dict, str | None, str | None]:
+    """``body`` with every format named ``name`` (``format_key`` match) set to
+    ``status``, its formats as entries, and ``{add, status}`` appended when no format
+    has that name and ``add`` is set. Also the old status (None when untracked) and
+    the name written (None when nothing was)."""
+    out, old, written = copy.deepcopy(body), None, None
     entries = []
     for n, s in format_entries(out.get("formats")):
         if format_key(n) == format_key(name):
-            old, s = s, status
+            old, s, written = s, status, n
         entries.append({"name": n, "status": s})
+    if written is None and add is not None:
+        entries.append({"name": add, "status": status})
+        written = add
     out["formats"] = entries
-    return out, old
+    return out, old, written
+
+
+def _table_format(unit: str, name: str) -> str | None:
+    """``name`` as the play platform's fixed format table spells it (the table
+    ``ideas.allowed_formats`` reads), None when that table has no such format."""
+    q = play_catalog.play(unit[len(_PLAY) :])
+    key = format_key(name)
+    return key if q and key in social_ideas.allowed_formats(q.channel) else None
 
 
 _MIRROR_TRIES = 3
@@ -1292,17 +1308,19 @@ _MIRROR_TRIES = 3
 async def _mirror_format_status(
     workspace_id: str, profile_id: str, unit: str, name: str, status: str
 ) -> None:
-    """Give the unit's open draft the same format status, so approving it later keeps
-    the change. Runs after the approved write landed, so it never fails the request:
-    a draft saved meanwhile is re-read and retried, and after ``_MIRROR_TRIES`` lost
-    races it is logged and left. The bumped draft rev makes a stale editor's next
-    save a 409, so it cannot write the old status back unseen."""
+    """Give the unit's open draft the same format status, appending ``name`` when the
+    draft does not list it, so approving it later keeps the change. Runs after the
+    approved write landed, so it never fails the request: a draft saved meanwhile is
+    re-read and retried, and after ``_MIRROR_TRIES`` lost races it is logged and
+    left. The bumped draft rev makes a stale editor's next save a 409, so it cannot
+    write the old status back unseen."""
     for _ in range(_MIRROR_TRIES):
         draft = (await _rows(workspace_id, profile_id)).get(unit, {}).get("draft")
         if draft is None:
             return
-        mirrored, listed = _with_format_status(_normal(unit, draft.body), name, status)
-        if listed is None:
+        mirrored, _, _ = _with_format_status(_normal(unit, draft.body), name, status, name)
+        if len(mirrored["formats"]) > MAX_BLUEPRINT_ITEMS:
+            logger.warning("growth blueprint: the %s draft has no room for another format", unit)
             return
         if await _set_if(_draft_match(workspace_id, profile_id, draft), {"body": mirrored}):
             return
@@ -1317,10 +1335,12 @@ async def set_format_status(
     profile_id: str | None = None,
 ) -> BlueprintUnitStateResponse:
     """Set one format's status on the APPROVED play straight away (a status-only
-    change skips draft and approve). An open draft listing the format gets the same
-    status, so approving it later does not revert this. 422 for a non-play unit; 404
-    without an approved row or for a format the play does not list; 409 when ``rev``
-    is not the approved row's."""
+    change skips draft and approve). A format the play does not list but its
+    platform's fixed table has is appended, spelled as the table spells it. An open
+    draft gets the same entry (set, or appended when it does not list it), so
+    approving it later does not revert this. 422 for a non-play unit or a play
+    already holding the most formats; 404 without an approved row or for a name
+    neither listed nor in the table; 409 when ``rev`` is not the approved row's."""
     body = SetFormatStatusRequest.model_validate(body)
     if _kind(unit) != "play":
         raise ValidationError(
@@ -1334,9 +1354,15 @@ async def set_format_status(
         raise NotFound("social_blueprint_unit", unit)
     if body.rev != approved.rev:
         raise _stale()
-    new_body, old = _with_format_status(_normal(unit, approved.body), name, body.status)
-    if old is None:
+    new_body, old, written = _with_format_status(
+        _normal(unit, approved.body), name, body.status, _table_format(unit, name)
+    )
+    if written is None:
         raise NotFound("social_blueprint_format", name)
+    if len(new_body["formats"]) > MAX_BLUEPRINT_ITEMS:
+        raise ValidationError(
+            "social.blueprint_formats_full", "This play already tracks the most formats", {}
+        )
     match = {
         "_id": approved.id,
         "workspace": workspace_id,
@@ -1355,7 +1381,7 @@ async def set_format_status(
         target_id=f"{profile.id}:{unit}",
         metadata={"unit": unit, "format": name, "old": old, "new": body.status},
     )
-    await _mirror_format_status(workspace_id, profile.id, unit, name, body.status)
+    await _mirror_format_status(workspace_id, profile.id, unit, written, body.status)
     # no-event: Growth › Social has no realtime subscriber; the audit row is the record.
     return await _unit_result(workspace_id, profile.id, unit)
 

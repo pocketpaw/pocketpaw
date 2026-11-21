@@ -10306,7 +10306,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `PUT /api/v1/growth/social/blueprint/units/{unit}/draft` | `{body, base_version, base_rev}`: replace one unit's draft; `409` when either is stale. `growth.manage`. |
 | `DELETE /api/v1/growth/social/blueprint/units/{unit}/draft` | `?rev=`: drop one unit's draft (it becomes `superseded`); `404` without a draft, `409` on a stale `rev`, `422` for a core unit never approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
-| `POST /api/v1/growth/social/blueprint/units/{unit}/formats/{name}/status` | `{status, rev}`: mark one of the approved play's formats `winning`, `testing` or `dropped` right away (no draft, no approve). `growth.manage`. |
+| `POST /api/v1/growth/social/blueprint/units/{unit}/formats/{name}/status` | `{status, rev}`: mark one of the approved play's formats `winning`, `testing` or `dropped` right away (no draft, no approve). A format the play does not list yet but its platform's fixed table has is appended. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
 | `GET /api/v1/growth/social/blueprint/live` | Live numbers per approved objective id and play unit: `{value, as_of, posts_counted}`, `value` null when unmeasured; each play adds per-format `formats[]` with a suggestion (see Blueprint units). |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
@@ -11030,15 +11030,22 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   seed never sets them, a channel edit carries them, regenerate never writes a play.
 - `POST …/{unit}/formats/{name}/status` with `{status, rev}`, `rev` being the APPROVED
   row's: writes that status into the approved play straight away and returns the
-  unit's `{unit, approved, draft, warnings}`. `name` matches ignoring case. An open
-  draft that lists the format gets the same status (its `rev` goes up), so approving
-  it later does not revert the change; a draft saved meanwhile is re-read and
-  retried, and once the approved write has landed the route never answers 409. Each change is an audit event
+  unit's `{unit, approved, draft, warnings}`. `name` matches ignoring case, spaces,
+  hyphens and underscores (`X Post`, `x-post` and `x_post` are one format). A name
+  the play does not list but its platform's fixed format table has (`x_post` /
+  `x_thread` on X, `reddit_post` on Reddit, the video formats elsewhere: the table
+  the ideas agent picks from) is appended as `{name, status}`, spelled as the table
+  spells it, so a play listing no formats can still track the ones its posts used.
+  An open draft gets the same status (its `rev` goes up), the entry appended when
+  the draft does not list it, so approving it later does not revert the change; a
+  draft saved meanwhile is re-read and retried, and once the approved write has
+  landed the route never answers 409. Each change is an audit event
   (`growth.blueprint.format_status`, target `growth_blueprint_unit`
-  `<profile_id>:<unit>`, metadata `{unit, format, old, new}`, with actor and time).
-  `409 social.blueprint_stale` on a stale `rev`; `404` for a play with no approved
-  row or a format it does not list; `422 social.blueprint_not_a_play` for a non-play
-  unit.
+  `<profile_id>:<unit>`, metadata `{unit, format, old, new}`, with actor and time;
+  `old` is `null` for an appended format). `409 social.blueprint_stale` on a stale
+  `rev`; `404` for a play with no approved row or a name neither listed nor in the
+  table; `422 social.blueprint_not_a_play` for a non-play unit,
+  `422 social.blueprint_formats_full` when the play already holds 20 formats.
 - `warnings` (on every unit response, usually `[]`): saving or approving a `core`
   play while another approved core play has a `kpi.expand_at` and its live value
   (`GET …/blueprint/live`) is under it, or has none yet, adds one plain-text line
