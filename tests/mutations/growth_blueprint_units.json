@@ -560,5 +560,23 @@
     "tests": [
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
+  },
+  {
+    "label": "play_id: a meme is not stamped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        status=\"new\",\n        play_id=pick(body.platform),\n",
+    "replace": "        status=\"new\",\n        play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: a pulse pick is not stamped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        play_id=pick(\"reddit\" if reddit else \"x\"),\n",
+    "replace": "        play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
   }
 ]

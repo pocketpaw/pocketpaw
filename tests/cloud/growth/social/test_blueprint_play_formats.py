@@ -1,17 +1,17 @@
 # tests/cloud/growth/social/test_blueprint_play_formats.py — which play a new idea
-# is made for (``SocialIdea.play_id``, stamped by ``generate_ideas`` and the daily X
-# drafts) and the per-format numbers on each play of ``GET /blueprint/live``. Same
-# harness as test_blueprint_live.py: approved units over mongomock-backed Beanie and
-# a fake ``IdeasFn``. No network, no model.
+# is made for (``SocialIdea.play_id``, stamped on every new idea) and the
+# per-format numbers on each play of ``GET /blueprint/live``. Same harness as
+# test_blueprint_live.py: approved units over mongomock-backed Beanie and fake
+# ``IdeasFn`` / ``MemeFn``. No network, no model.
 #
 # Covers: one acting play stamps every idea on its platform (an idea with no
 # platform reads as X); two on one platform go to the one with the most posts left
 # this ISO week, each pick counting, last week's ideas not, and a tie going to the
 # core play; no acting play on the platform (or no Blueprint) is None; the daily
-# drafts stamp too. Live: a stamped idea counts toward exactly its play, an old one
-# keeps the single-play fallback; formats carry posts, avg and a suggestion at the
-# 1.3 / 0.7 edges, none under 5 posts, with the reason text; ``play_id`` crosses
-# model, domain and the idea response.
+# drafts, memes and pulse picks stamp too. Live: a stamped idea counts toward
+# exactly its play, an old one keeps the single-play fallback; formats carry posts,
+# avg and a suggestion at the 1.3 / 0.7 edges, none under 5 posts, with the reason
+# text; ``play_id`` crosses model, domain and the idea response.
 
 from __future__ import annotations
 
@@ -23,16 +23,22 @@ import pytest_asyncio
 from pocketpaw_ee.cloud.growth.social import live
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.domain import GeneratedIdea
-from pocketpaw_ee.cloud.growth.social.dto import GenerateIdeasRequest
+from pocketpaw_ee.cloud.growth.social.dto import (
+    GenerateIdeasRequest,
+    MakeMemeRequest,
+    UsePulseSuggestionRequest,
+)
 from pocketpaw_ee.cloud.growth.social.ideas import set_production_ideas_fn
+from pocketpaw_ee.cloud.growth.social.memes import MadeMeme, set_production_meme_fn
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as IdeaDoc
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as MetricDoc
+from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as PulseDoc
 
 from tests.cloud.growth.social.test_blueprint import _profile
 from tests.cloud.growth.social.test_blueprint_live import NOW as LIVE_NOW
 from tests.cloud.growth.social.test_blueprint_live import NULL, _blueprint, _ctx, _live
 from tests.cloud.growth.social.test_blueprint_live import _play as _live_play
-from tests.cloud.growth.social.test_router import _client
+from tests.cloud.growth.social.test_router import MEME_SVG, _client
 
 
 @pytest_asyncio.fixture
@@ -44,10 +50,12 @@ async def w1(mongo_db: Any):
 @pytest.fixture(autouse=True)
 def _reset_ideas_fn():
     set_production_ideas_fn(None)
+    set_production_meme_fn(None)
     try:
         yield
     finally:
         set_production_ideas_fn(None)
+        set_production_meme_fn(None)
 
 
 def _play(status: str = "core", per_week: int = 3) -> dict:
@@ -137,6 +145,28 @@ async def test_daily_drafts_stamp_their_play(w1):
     set_production_ideas_fn(_Ideas())
     made = await social_service.draft_daily_for_profile("w1", pid, now=datetime.now(UTC))
     assert made and {i.play_id for i in made} == {"play:x-organic"}
+
+
+async def test_a_meme_is_stamped_with_its_play(w1):
+    async def make(*_: Any) -> MadeMeme:
+        return MadeMeme(hook="Nobody: / Me:", caption="Post", why="Relatable", svg=MEME_SVG)
+
+    set_production_meme_fn(make)
+    pid = await _brand(w1, {"play:x-organic": _play(), "play:reddit-community": _play()})
+    made = await social_service.make_meme(_ctx(), MakeMemeRequest(platform="reddit"), pid)
+    assert made.play_id == "play:reddit-community"
+
+
+async def test_a_pulse_pick_is_stamped_with_its_play(w1):
+    pid = await _brand(w1, {"play:x-organic": _play()})
+    suggestions = [{"platform": "x", "hook": "A"}, {"platform": "reddit", "hook": "B"}]
+    await PulseDoc(
+        workspace="w1", profile=pid, themes=[{"title": "T", "suggestions": suggestions}]
+    ).insert()
+    pick = UsePulseSuggestionRequest
+    x = await social_service.use_pulse_suggestion(_ctx(), pick(theme=0, suggestion=0), pid)
+    reddit = await social_service.use_pulse_suggestion(_ctx(), pick(theme=0, suggestion=1), pid)
+    assert (x.play_id, reddit.play_id) == ("play:x-organic", None)  # no Reddit play
 
 
 async def test_play_id_crosses_model_domain_and_response(w1):
