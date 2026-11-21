@@ -222,6 +222,13 @@ async def get(
     bp = await social_blueprint.approved_for(workspace_id, profile.id)
     if bp is None:
         return BlueprintLiveResponse()
+    return await for_blueprint(workspace_id, profile, bp, now)
+
+
+async def for_blueprint(
+    workspace_id: str, profile: Any, bp: Any, now: datetime | None = None
+) -> BlueprintLiveResponse:
+    """The live values of ``bp`` (already read from ``approved_for``) for ``profile``."""
     posts = await social_service.live_posts(workspace_id, profile.id)
     stars = await social_service.latest_repo_stars(workspace_id, profile.github_repos)
     return compute(bp, posts, stars, now or datetime.now(UTC))

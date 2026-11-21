@@ -672,5 +672,176 @@
       "tests/cloud/growth/social/test_blueprint_live.py",
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
+  },
+  {
+    "label": "formats: a plain string format no longer reads as a testing entry",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py",
+    "find": "        return {\"name\": v} if isinstance(v, str) else v\n",
+    "replace": "        return v\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: a stale rev writes anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if body.rev != approved.rev:\n        raise _stale()\n",
+    "replace": "    pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: an unknown format name is not a 404",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if old is None:\n        raise NotFound(\"social_blueprint_format\", name)\n",
+    "replace": "    pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: the open draft is not mirrored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if listed is None:\n            return\n",
+    "replace": "        return\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: no audit event recorded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    await audit_service.record(\n        workspace_id,\n",
+    "replace": "    0 and await audit_service.record(\n        workspace_id,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "second core: a play at its expand_at still warns",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if value is not None and value >= expand_at:\n",
+    "replace": "        if value is not None and value > expand_at:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "second core: the play warns about itself",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if f\"{_PLAY}{pid}\" != unit and b.get(\"status\") == \"core\"\n",
+    "replace": "        if b.get(\"status\") == \"core\"\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "whole-page save: an old string-format play opens a draft",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if unit not in bodies or new_body != _normal(unit, bodies[unit])\n",
+    "replace": "        if new_body != bodies.get(unit)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: dropped formats stay allowed",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "        if status == \"dropped\"\n",
+    "replace": "        if status == \"never\"\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: every format dropped brings the whole table back",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "    return tuple(f for f in table if f not in dropped)\n",
+    "replace": "    return tuple(f for f in table if f not in dropped) or table\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: a play with no formats changes the prompt",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "        if not entries:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "second core: a live read error fails the landed save",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        return await _core_warnings(workspace_id, profile, unit)\n    except Exception:  # noqa: BLE001\n",
+    "replace": "        return await _core_warnings(workspace_id, profile, unit)\n    except ZeroDivisionError:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: a draft saved meanwhile is not retried",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "_MIRROR_TRIES = 3\n",
+    "replace": "_MIRROR_TRIES = 1\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: a lost mirror race is a 409 after the write landed",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    logger.warning(\"growth blueprint: format status not mirrored onto the %s draft\", unit)\n",
+    "replace": "    raise _stale()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "units read: an old string-format play goes out raw",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        body=_wire_body(doc.unit, doc.body),\n",
+    "replace": "        body=doc.body,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "formats: x post and x_post may both exist",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py",
+    "find": "        _unique([format_key(f.name) for f in self.formats], \"format names\")\n",
+    "replace": "        _unique([f.name.lower() for f in self.formats], \"format names\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "marks: an unset decide_by is dumped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py",
+    "find": "        return _drop_unset(handler(self), (\"decide_by\",))\n",
+    "replace": "        return handler(self)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: a platform with every format dropped runs the agent anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if body.platform and not social_ideas.allowed_formats(body.platform, bp):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "daily drafts: a platform with every format dropped still drafts",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    if not social_ideas.allowed_formats(\"x\", bp):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
   }
 ]

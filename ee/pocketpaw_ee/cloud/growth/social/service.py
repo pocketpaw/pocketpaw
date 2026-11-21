@@ -21,16 +21,16 @@
 # every row; every new idea, memes and pulse picks too, gets the ``play_id`` it is
 # for (``_play_picker``). Without one, ideas and reply cards use the owner's typed
 # description (never the website-scan ``analysis``); daily X drafts make nothing.
+# A platform whose every format the plays dropped is a 422 for ideas, a skip daily.
 #
 # Crons (cross-workspace reads, one failing profile never stops a sweep):
 # ``run_daily_drafts`` drafts X posts within the X budget (the approved
-# Blueprint's x channel; no Blueprint or 0 skips with a log) and two a day, built on
-# the last 24 h of GitHub changes and checked by ``ideas.check_draft`` with one
-# retry; ``run_reply_drafts`` drafts reply cards a person posts by hand from an
-# intent link; ``run_repo_metrics`` stores one RepoMetric per repo and day
-# (reruns refresh in place); ``run_post_metrics`` stores append-only snapshots, X's
-# through the capped, read-only ``x_api`` and other platforms' from Postiz post stats
-# (the review and ``latest_metrics`` read X rows only). Nothing here posts to X.
+# Blueprint's x channel; no Blueprint or 0 skips with a log) and two a day, on the
+# last 24 h of GitHub changes, checked by ``ideas.check_draft`` with one retry;
+# ``run_reply_drafts`` drafts reply cards a person posts by hand from an intent link;
+# ``run_repo_metrics`` stores one RepoMetric per repo and day (reruns refresh);
+# ``run_post_metrics`` stores append-only snapshots, X's through the capped, read-only
+# ``x_api``, others' from Postiz; review and ``latest_metrics`` read X rows. No X posts.
 #
 # Accounts and posting: each profile has its own Postiz org (created on first
 # connect, never on a read; API key stored encrypted and checked first, since org
@@ -723,6 +723,12 @@ async def generate_ideas(
     bp = await social_blueprint.approved_for(workspace_id, profile_key)
     if bp is not None:
         extra["blueprint"] = bp
+        if body.platform and not social_ideas.allowed_formats(body.platform, bp):
+            raise ValidationError(
+                "social.ideas_formats_all_dropped",
+                "Every format for this platform is dropped. Set one back to testing.",
+                {"platform": body.platform},
+            )
     try:
         generated = await ideas_fn(
             profile,
@@ -920,6 +926,9 @@ async def _draft_daily(
             profile_key,
             bp.version,
         )
+        return [], 0
+    if not social_ideas.allowed_formats("x", bp):
+        logger.info("daily drafts: profile=%s skipped, every X format is dropped", profile_key)
         return [], 0
     left_week = budget - await _daily_count(workspace_id, profile_key, now - timedelta(days=7))
     left_today = DAILY_DRAFTS_PER_DAY - await _daily_count(

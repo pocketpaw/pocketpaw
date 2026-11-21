@@ -860,7 +860,7 @@
   {
     "label": "blueprint: the ideas prompt drops the approved Blueprint",
     "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
-    "find": "        lines += blueprint_lines(blueprint)\n",
+    "find": "        lines += blueprint_lines(blueprint, platform=platform)\n",
     "replace": "        pass\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"

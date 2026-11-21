@@ -17,7 +17,8 @@
 # and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
 # growth.read, writes growth.write. ``/blueprint`` (read, diff; draft save, seed,
 # regenerate, approve) is the profile's Blueprint composed from its units, and
-# ``/blueprint/units`` (list; per unit: draft save, discard, approve, diff) edits a unit;
+# ``/blueprint/units`` (list; per unit: draft save, discard, approve, diff, and a play
+# format's status) edits a unit;
 # ``GET /blueprint/live`` (growth.read) is the approved Blueprint's live numbers;
 # Blueprint writes are growth.manage.
 # ``GET /plan?week=YYYY-Www`` is the computed weekly post slots (growth.read). The
@@ -46,6 +47,7 @@ from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import (
     BlueprintUnitsResponse,
     BlueprintUnitStateResponse,
     SaveUnitDraftRequest,
+    SetFormatStatusRequest,
 )
 from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaSource,
@@ -469,6 +471,23 @@ async def approve_blueprint_unit(
 ) -> BlueprintUnitStateResponse:
     """The unit's draft becomes its approved version; 409 when there is no draft."""
     return await social_blueprint.approve_unit(ctx, unit, profile_id)
+
+
+@router.post(
+    "/blueprint/units/{unit}/formats/{name}/status",
+    response_model=BlueprintUnitStateResponse,
+    dependencies=_MANAGE,
+)
+async def set_blueprint_format_status(
+    unit: str,
+    name: str,
+    body: SetFormatStatusRequest,
+    profile_id: str | None = _PROFILE_ID,
+    ctx: RequestContext = Depends(request_context),
+) -> BlueprintUnitStateResponse:
+    """Mark one of the approved play's formats winning, testing or dropped, no
+    approve needed; 409 on a stale ``rev``, 404 for an unknown format."""
+    return await social_blueprint.set_format_status(ctx, unit, name, body, profile_id)
 
 
 @router.delete(

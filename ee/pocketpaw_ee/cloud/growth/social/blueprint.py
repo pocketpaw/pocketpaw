@@ -1,59 +1,43 @@
 # ee/pocketpaw_ee/cloud/growth/social/blueprint.py — the Brand Blueprint service
 # and the SOLE writer of the Blueprint docs: the per-unit ``growth_blueprint_units``
-# and the legacy whole-page ``growth_blueprints`` (read-only now, kept for one
-# release). Service-is-repo; the import-linter "Growth" contract keeps every other
-# module off both doc classes.
+# and the legacy whole-page ``growth_blueprints`` (read-only, kept for one release).
+# Service-is-repo; the import-linter "Growth" contract keeps others off both docs.
 #
-# A brand's Blueprint is a set of units (``brand``, ``strategy``, ``plan``,
-# ``play:<id>`` for a ``play_catalog`` id), each its own version chain: at most one
-# ``approved`` and one ``draft`` per unit, older versions ``superseded``. Unit
-# routes (``units``, ``save_unit_draft``, ``approve_unit``, ``discard_unit_draft``,
-# ``unit_diff``) edit one unit; a save carries the version it started from and a
-# discard the draft's ``rev``, and a stale one is a 409 ``social.blueprint_stale``.
-# A discard supersedes the draft; a core unit needs an approved row first (422).
-# A plan phase or play naming a goal the strategy (draft, else approved) lacks is
-# a 422 on save; on approve the check is against
-# the approved strategy, and approving a strategy that drops a goal a plan or play
-# still names is a 422 ``social.blueprint_goal_in_use`` listing those units.
+# A Blueprint is a set of units (``brand``, ``strategy``, ``plan``, ``play:<id>``
+# for a ``play_catalog`` id), each its own version chain: at most one ``approved``
+# and one ``draft``, older ones ``superseded``. Unit routes save, approve, discard
+# and diff one unit; every row carries a ``rev`` bumped on each write, a save names
+# the version and rev it started from and a stale one is a 409
+# ``social.blueprint_stale``. A goal a plan or play names must exist in the
+# strategy (422), and approving a strategy that drops a named goal is a 422
+# ``social.blueprint_goal_in_use``. ``set_format_status`` writes one play format's
+# status straight into the approved row (no draft, no approve), mirrors it onto an
+# open draft that lists the format, and records an audit event. Saving or
+# approving a core play while another approved core play is under its KPI
+# ``expand_at`` (or has no live value) adds a plain-text ``warnings`` entry
+# (``live`` numbers); it never blocks.
 #
-# ``approved_for`` (the one read the drafting agents use) stitches the approved
-# units back into the legacy ``GrowthBlueprint`` fields (``_to_legacy``): it is None
-# unless brand AND strategy are approved, ``version`` is the strategy unit's, and
-# each channel's cadence is the sum over its active (core / testing) acting plays.
-# A play whose catalog branch the brand turned off (``growth_branches``, empty means
-# ``play_catalog.DEFAULT_BRANCHES``) is paused: ``approved_for`` leaves it out, while
-# the UI reads (``get``, ``units``, ``diff``) still show it.
+# ``approved_for`` (the read the drafting agents use) stitches the approved units
+# into the legacy ``GrowthBlueprint``: None unless brand AND strategy are approved,
+# each channel's cadence the sum over its active acting plays, and a play whose
+# catalog branch the brand turned off left out (the UI reads still show it).
 # The whole-page routes (``get``, ``seed``, ``save_draft``, ``regenerate``,
-# ``approve``, ``diff``) are wrappers over the units: a save splits the sections
-# sent into drafts of the units they change (``_apply_legacy``), approve approves
-# every unit with a draft (strategy last), and diff compares the composed approved
-# with the composed draft whatever versions were asked for.
+# ``approve``, ``diff``) wrap the units: a save splits the sections sent into drafts
+# of the units they change (``_apply_legacy``), approve approves every draft
+# (strategy last). ``migrate_profile`` splits legacy rows into units, strategy last;
+# reads of an unmigrated brand fall back to its legacy rows.
 #
-# Migration: ``migrate_profile`` splits a brand's legacy approved and draft rows
-# into units at their legacy version numbers, ``strategy`` last. Every write
-# migrates the brand first; reads of a brand with no ``strategy`` row fall back to
-# its legacy rows (never writing), so a half-finished migration still reads the
-# legacy Blueprint and the next run resumes it. Every row carries a ``rev`` bumped
-# on each write: a unit draft save must name the ``base_rev`` it read (two tabs on
-# one draft is a 409), and the whole-page save and approve recheck every unit they
-# will write before the first write. A non-zero legacy cadence no play carries is a
-# 422 ``social.blueprint_unmapped_channel`` on the whole-page save, and is listed
-# under ``dropped`` in a migration report.
-#
-# Numbers are never model-written: pillar weights are owner-entered or an equal
-# split computed here, cadences come from the profile or the owner, goals are
-# owner-entered only; an objective's ``metric_key`` is always the base body's
-# (``_apply_legacy``), and regenerate never writes a play. A pillar's ``kind``
-# (audience or product) is owner-set too; regenerate keeps it, like the weight, for
-# a pillar whose name survives. ``seed`` and ``regenerate`` text must pass
-# ``ideas.check_texts`` (no em or en dash, no number the owner did not type); a
-# first two-phase roadmap is seeded when there is none. Writes to an existing row
-# are conditional on its status; approve marks a draft approved before superseding
-# the rest, so a crash leaves two approved (the highest version wins on read), never
-# zero; the unique version index stops two writers forking a version.
-# Tenancy: every query filters on ``workspace`` and ``profile_id`` (the profile
-# comes from ``social.service.require_profile``) except the migration's discovery
-# and count reads, marked ``global-read``. Writes carry ``# no-event:`` markers.
+# Numbers are never model-written: weights, cadences and goals are owner-entered or
+# computed here; an objective's ``metric_key`` is always the base body's, and
+# regenerate never writes a play, so a play's KPI ``pass_mark`` / ``expand_at`` and
+# ``decide_by`` only ever come from the owner (seed opens new plays without them,
+# a channel edit carries them). ``seed`` and ``regenerate`` text must pass
+# ``ideas.check_texts`` (no em or en dash, no number the owner did not type).
+# Writes to an existing row are conditional on its status and rev; approve marks a
+# draft approved before superseding the rest, so a crash leaves two approved (the
+# highest version wins), never zero. Tenancy: every query filters on ``workspace``
+# and ``profile_id`` except the migration's discovery reads (``global-read``).
+# Writes carry ``# no-event:`` markers.
 
 from __future__ import annotations
 
@@ -70,6 +54,7 @@ from pymongo.errors import DuplicateKeyError
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.growth.social import analyst as social_analyst
 from pocketpaw_ee.cloud.growth.social import ideas as social_ideas
 from pocketpaw_ee.cloud.growth.social import play_catalog
@@ -84,6 +69,9 @@ from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import (
     PlayCatalogResponse,
     PlayResponse,
     SaveUnitDraftRequest,
+    SetFormatStatusRequest,
+    format_entries,
+    format_key,
 )
 from pocketpaw_ee.cloud.growth.social.domain import (
     BLUEPRINT_CHANNELS,
@@ -680,12 +668,15 @@ async def approved_for(workspace_id: str, profile_id: str) -> GrowthBlueprint | 
 def acting_post_plays(bp: GrowthBlueprint) -> dict[str, list[str]]:
     """Per platform, the ids of ``bp``'s active (core / testing) acting post plays.
     ``bp`` comes from ``approved_for``, so paused plays are already left out."""
-    out: dict[str, list[str]] = {}
-    for play_id, body in bp.plays.items():
-        q = play_catalog.play(play_id)
-        if q and q.acts and q.cadence == "posts" and q.channel and _active(body):
-            out.setdefault(q.channel, []).append(play_id)
-    return out
+    return play_catalog.acting_post_plays(bp.plays)
+
+
+def _wire_body(unit: str, body: dict[str, Any]) -> dict[str, Any]:
+    """A play body in its model's shape (formats always ``{name, status}``, an old
+    plain string read as testing); other units as stored."""
+    if unit.startswith(_PLAY) and play_catalog.play(unit[len(_PLAY) :]) is not None:
+        return _normal(unit, body)
+    return body
 
 
 def _unit_row(doc: _UnitDoc | None) -> BlueprintUnitRowResponse | None:
@@ -697,7 +688,7 @@ def _unit_row(doc: _UnitDoc | None) -> BlueprintUnitRowResponse | None:
         version=doc.version,
         rev=doc.rev,
         status=doc.status,
-        body=doc.body,
+        body=_wire_body(doc.unit, doc.body),
         created_by=doc.created_by,
         approved_by=doc.approved_by,
         approved_at=iso_utc(doc.approved_at),
@@ -1169,7 +1160,10 @@ async def save_unit_draft(
         raise _stale()
     await _write_draft(workspace_id, profile.id, unit, draft, new_body, ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
-    return await _unit_result(workspace_id, profile.id, unit)
+    result = await _unit_result(workspace_id, profile.id, unit)
+    if kind == "play":
+        result.warnings = await _second_core_warnings(workspace_id, profile, unit, new_body)
+    return result
 
 
 async def approve_unit(
@@ -1194,7 +1188,10 @@ async def approve_unit(
         _check_goals_in_use(rows, _goal_ids(draft.body))
     await _approve_row(workspace_id, profile.id, draft, ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
-    return await _unit_result(workspace_id, profile.id, unit)
+    result = await _unit_result(workspace_id, profile.id, unit)
+    if kind == "play":
+        result.warnings = await _second_core_warnings(workspace_id, profile, unit, draft.body)
+    return result
 
 
 async def discard_unit_draft(
@@ -1225,6 +1222,141 @@ async def discard_unit_draft(
     if not await _set_if(_draft_match(workspace_id, profile.id, draft), {"status": "superseded"}):
         raise _stale()
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
+    return await _unit_result(workspace_id, profile.id, unit)
+
+
+def _num(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(round(value, 2))
+
+
+async def _second_core_warnings(
+    workspace_id: str, profile: SocialProfile, unit: str, body: dict[str, Any]
+) -> list[str]:
+    """For a core play: one line per OTHER approved core play whose live KPI value is
+    under its ``expand_at``, or that has an ``expand_at`` and no live value yet. A
+    play with no ``expand_at`` never warns. Numbers come from ``live``. Runs after the
+    write landed, so any error is logged and reads as no warnings: it never blocks."""
+    if body.get("status") != "core":
+        return []
+    try:
+        return await _core_warnings(workspace_id, profile, unit)
+    except Exception:  # noqa: BLE001
+        logger.warning("growth blueprint: second-core warning check failed", exc_info=True)
+        return []
+
+
+async def _core_warnings(workspace_id: str, profile: SocialProfile, unit: str) -> list[str]:
+    bp = await approved_for(workspace_id, profile.id)
+    if bp is None:
+        return []
+    others = {
+        f"{_PLAY}{pid}": (b.get("kpi") or {}).get("expand_at")
+        for pid, b in bp.plays.items()
+        if f"{_PLAY}{pid}" != unit and b.get("status") == "core"
+    }
+    others = {u: x for u, x in others.items() if isinstance(x, int | float)}
+    if not others:
+        return []
+    from pocketpaw_ee.cloud.growth.social import live as social_live
+
+    plays = (await social_live.for_blueprint(workspace_id, profile, bp)).plays
+    out = []
+    for other, expand_at in sorted(others.items()):
+        value = plays[other].value if other in plays else None
+        if value is not None and value >= expand_at:
+            continue
+        now = "has no live value yet" if value is None else f"is at {_num(value)}"
+        out.append(
+            f"{other} is already core and {now}, under its expand_at of {_num(expand_at)}. "
+            "A second core play splits the effort before the first one has earned it."
+        )
+    return out
+
+
+def _with_format_status(body: dict[str, Any], name: str, status: str) -> tuple[dict, str | None]:
+    """``body`` with every format named ``name`` (any case) set to ``status``, its
+    formats as entries; and the old status, None when no format has that name."""
+    out, old = copy.deepcopy(body), None
+    entries = []
+    for n, s in format_entries(out.get("formats")):
+        if format_key(n) == format_key(name):
+            old, s = s, status
+        entries.append({"name": n, "status": s})
+    out["formats"] = entries
+    return out, old
+
+
+_MIRROR_TRIES = 3
+
+
+async def _mirror_format_status(
+    workspace_id: str, profile_id: str, unit: str, name: str, status: str
+) -> None:
+    """Give the unit's open draft the same format status, so approving it later keeps
+    the change. Runs after the approved write landed, so it never fails the request:
+    a draft saved meanwhile is re-read and retried, and after ``_MIRROR_TRIES`` lost
+    races it is logged and left. The bumped draft rev makes a stale editor's next
+    save a 409, so it cannot write the old status back unseen."""
+    for _ in range(_MIRROR_TRIES):
+        draft = (await _rows(workspace_id, profile_id)).get(unit, {}).get("draft")
+        if draft is None:
+            return
+        mirrored, listed = _with_format_status(_normal(unit, draft.body), name, status)
+        if listed is None:
+            return
+        if await _set_if(_draft_match(workspace_id, profile_id, draft), {"body": mirrored}):
+            return
+    logger.warning("growth blueprint: format status not mirrored onto the %s draft", unit)
+
+
+async def set_format_status(
+    ctx: RequestContext,
+    unit: str,
+    name: str,
+    body: SetFormatStatusRequest,
+    profile_id: str | None = None,
+) -> BlueprintUnitStateResponse:
+    """Set one format's status on the APPROVED play straight away (a status-only
+    change skips draft and approve). An open draft listing the format gets the same
+    status, so approving it later does not revert this. 422 for a non-play unit; 404
+    without an approved row or for a format the play does not list; 409 when ``rev``
+    is not the approved row's."""
+    body = SetFormatStatusRequest.model_validate(body)
+    if _kind(unit) != "play":
+        raise ValidationError(
+            "social.blueprint_not_a_play", "Only a play has formats", {"unit": unit}
+        )
+    workspace_id, profile = await _profile(ctx, profile_id)
+    await migrate_profile(workspace_id, profile.id)
+    mine = (await _rows(workspace_id, profile.id)).get(unit, {})
+    approved = mine.get("approved")
+    if approved is None:
+        raise NotFound("social_blueprint_unit", unit)
+    if body.rev != approved.rev:
+        raise _stale()
+    new_body, old = _with_format_status(_normal(unit, approved.body), name, body.status)
+    if old is None:
+        raise NotFound("social_blueprint_format", name)
+    match = {
+        "_id": approved.id,
+        "workspace": workspace_id,
+        "profile_id": profile.id,
+        "unit": unit,
+        "status": "approved",
+        "rev": approved.rev,
+    }
+    if not await _set_if(match, {"body": new_body}):
+        raise _stale()
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id or "",
+        "growth.blueprint.format_status",
+        target_type="growth_blueprint_unit",
+        target_id=f"{profile.id}:{unit}",
+        metadata={"unit": unit, "format": name, "old": old, "new": body.status},
+    )
+    await _mirror_format_status(workspace_id, profile.id, unit, name, body.status)
+    # no-event: Growth › Social has no realtime subscriber; the audit row is the record.
     return await _unit_result(workspace_id, profile.id, unit)
 
 
@@ -1327,10 +1459,12 @@ async def save_draft(
             "No play carries this cadence; set it to 0 or remove the channel",
             {"fields": unmapped},
         )
+    # Compared in full shape: a stored body that predates a field (a plain-string
+    # format, a new default) is not a change, so it opens no draft.
     changed = {
         unit: new_body
         for unit, new_body in _apply_legacy(bodies, edit).items()
-        if new_body != bodies.get(unit)
+        if unit not in bodies or new_body != _normal(unit, bodies[unit])
     }
     await _check_unchanged(workspace_id, profile.id, rows, changed)
     for unit, new_body in changed.items():
@@ -1554,7 +1688,7 @@ async def unit_diff(
         unit=unit,
         from_version=from_version,
         to_version=to_version,
-        fields=_key_diff(_flat(old.body), _flat(new.body)),
+        fields=_key_diff(_flat(_wire_body(unit, old.body)), _flat(_wire_body(unit, new.body))),
     )
 
 
@@ -1692,6 +1826,7 @@ __all__ = [
     "approve",
     "approve_unit",
     "approved_for",
+    "set_format_status",
     "catalog",
     "diff",
     "discard_unit_draft",

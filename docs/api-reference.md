@@ -10306,6 +10306,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `PUT /api/v1/growth/social/blueprint/units/{unit}/draft` | `{body, base_version, base_rev}`: replace one unit's draft; `409` when either is stale. `growth.manage`. |
 | `DELETE /api/v1/growth/social/blueprint/units/{unit}/draft` | `?rev=`: drop one unit's draft (it becomes `superseded`); `404` without a draft, `409` on a stale `rev`, `422` for a core unit never approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
+| `POST /api/v1/growth/social/blueprint/units/{unit}/formats/{name}/status` | `{status, rev}`: mark one of the approved play's formats `winning`, `testing` or `dropped` right away (no draft, no approve). `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
 | `GET /api/v1/growth/social/blueprint/live` | Live numbers per approved objective id and play unit: `{value, as_of, posts_counted}`, `value` null when unmeasured; each play adds per-format `formats[]` with a suggestion (see Blueprint units). |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
@@ -10970,9 +10971,10 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   `content_pillars [{name, weight, hooks, kind?}]`, `learning_ids`.
   `plan`: `roadmap` (as above), `budget {money_per_month, hours_per_week}`.
   `play:<id>`: `status` (`core`, `testing` default, `parked`), `role`, `goal_id`,
-  `audience`, `formats`, `pillar_mix [{pillar, weight}]`, `posts_per_week` 0..50,
-  `sends_per_week` 0..5000, `voice_tweak`, `cta`, `repurpose_from`, `kpi {metric,
-  baseline, target, metric_key}`, `budget`, `hours`, `rules`, `autonomy`, and optional extras
+  `audience`, `formats [{name, status}]`, `pillar_mix [{pillar, weight}]`,
+  `posts_per_week` 0..50, `sends_per_week` 0..5000, `voice_tweak`, `cta`,
+  `repurpose_from`, `kpi {metric, baseline, target, metric_key, pass_mark?,
+  expand_at?}`, `decide_by?` (a date), `budget`, `hours`, `rules`, `autonomy`, and optional extras
   `seo {topic_clusters, article_queue, ai_search_targets}`, `paid {objective,
   audience, daily_budget, creative_angles (at most 3), landing_url}`, `creator
   {program_type, creator_profile, payment, brief, disclosure, usage_rights}`
@@ -11009,6 +11011,38 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   `422 social.blueprint_invalid_body`. `metric` stays the free-text label. Only the
   owner sets it: a regenerate carries every objective's `metric_key` from the base
   body (whatever the analyst returns) and never writes a play.
+- A play format is a `FormatEntry` `{name, status}`, `status` one of `winning`,
+  `testing` (default) or `dropped`; names are unique as the fixed table spells them
+  (case, spaces, hyphens and underscores folded, so `x post` and `x_post` clash). A
+  plain string (`"x_thread"`, how rows stored before statuses) reads as `{name,
+  status: "testing"}`, so old rows need no migration, and play bodies always go out
+  on the wire as entries. The ideas agent gets the platform's acting plays
+  that list formats (role, audience, formats by status, "never use dropped
+  formats"), and its allowed formats are the platform's fixed table minus every
+  format those plays mark dropped (the union across them, since an idea is stamped
+  with its play only after it is written). A play with no formats changes nothing.
+  When every format of the platform ends up dropped, `POST /ideas` is `422
+  social.ideas_formats_all_dropped` ("Every format for this platform is dropped. Set
+  one back to testing.") and the daily drafts skip the brand with a log line.
+- `kpi.pass_mark`, `kpi.expand_at` and `decide_by` are owner-only decision marks: the
+  number the play must reach to pass its test, the live value at which a second
+  core play is earned, and the date to decide by. Left out of the body when unset;
+  seed never sets them, a channel edit carries them, regenerate never writes a play.
+- `POST …/{unit}/formats/{name}/status` with `{status, rev}`, `rev` being the APPROVED
+  row's: writes that status into the approved play straight away and returns the
+  unit's `{unit, approved, draft, warnings}`. `name` matches ignoring case. An open
+  draft that lists the format gets the same status (its `rev` goes up), so approving
+  it later does not revert the change; a draft saved meanwhile is re-read and
+  retried, and once the approved write has landed the route never answers 409. Each change is an audit event
+  (`growth.blueprint.format_status`, target `growth_blueprint_unit`
+  `<profile_id>:<unit>`, metadata `{unit, format, old, new}`, with actor and time).
+  `409 social.blueprint_stale` on a stale `rev`; `404` for a play with no approved
+  row or a format it does not list; `422 social.blueprint_not_a_play` for a non-play
+  unit.
+- `warnings` (on every unit response, usually `[]`): saving or approving a `core`
+  play while another approved core play has a `kpi.expand_at` and its live value
+  (`GET …/blueprint/live`) is under it, or has none yet, adds one plain-text line
+  per such play citing its `expand_at` and live value. It never blocks the write.
 
 #### Live values: `GET /api/v1/growth/social/blueprint/live`
 
