@@ -15,6 +15,8 @@
 # ``experiment_id`` names the experiment whose arm this daily draft was written
 # for. All three read as "" on older rows. ``blueprint_version`` is the approved
 # Brand Blueprint version the ideas agent followed (None when it had none).
+# ``play_id`` is the ``play:<id>`` unit the idea was made for (None when the
+# Blueprint had no acting play on its platform, and on older rows).
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).
@@ -60,6 +62,7 @@ class SocialIdea(TimestampedDocument):
     experiment_id: str = ""
     # The approved Blueprint version the agent followed; None when none was used.
     blueprint_version: int | None = None
+    play_id: str | None = None
 
     class Settings:
         name = "growth_social_ideas"

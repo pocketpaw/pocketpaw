@@ -677,6 +677,17 @@ async def approved_for(workspace_id: str, profile_id: str) -> GrowthBlueprint | 
     return _compose(workspace_id, profile_id, rows, "approved")
 
 
+def acting_post_plays(bp: GrowthBlueprint) -> dict[str, list[str]]:
+    """Per platform, the ids of ``bp``'s active (core / testing) acting post plays.
+    ``bp`` comes from ``approved_for``, so paused plays are already left out."""
+    out: dict[str, list[str]] = {}
+    for play_id, body in bp.plays.items():
+        q = play_catalog.play(play_id)
+        if q and q.acts and q.cadence == "posts" and q.channel and _active(body):
+            out.setdefault(q.channel, []).append(play_id)
+    return out
+
+
 def _unit_row(doc: _UnitDoc | None) -> BlueprintUnitRowResponse | None:
     if doc is None:
         return None

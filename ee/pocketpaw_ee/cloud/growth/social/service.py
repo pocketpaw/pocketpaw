@@ -16,11 +16,11 @@
 # Agents: analysis, ideas, memes and pulse run in-request behind their seams
 # (503 when none is installed; a failed run is a 502, or ``analysis_status=
 # "failed"`` for analysis, one atomic ``$set``). Ideas need a completed onboarding.
-# Ideas, the daily X drafts and reply cards read the brand's approved Blueprint
-# once per run (never a draft), hand it to the agent and stamp
-# ``blueprint_version`` on every row made. Without one, ideas and reply cards use
-# the owner's typed description (never the website-scan ``analysis``) and the
-# daily X drafts make nothing. ``weekly_post_quota`` stays on the wire, unused.
+# Ideas, the daily X drafts and reply cards read the brand's approved Blueprint once
+# per run (never a draft), hand it to the agent and stamp ``blueprint_version`` on
+# every row; every new idea gets the ``play_id`` it is for (``_play_picker``).
+# Without one, ideas and reply cards use the owner's typed description (never the
+# website-scan ``analysis``); daily X drafts make nothing. ``weekly_post_quota`` unused.
 #
 # Crons (cross-workspace reads, one failing profile never stops a sweep):
 # ``run_daily_drafts`` drafts X posts within the X budget (the approved
@@ -56,8 +56,8 @@ import hashlib
 import logging
 import random
 import re
-from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime, timedelta
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -352,6 +352,7 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         hook_type=doc.hook_type,
         experiment_id=doc.experiment_id,
         blueprint_version=doc.blueprint_version,
+        play_id=doc.play_id,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -386,6 +387,7 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         hook_type=i.hook_type,
         experiment_id=i.experiment_id,
         blueprint_version=i.blueprint_version,
+        play_id=i.play_id,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -658,6 +660,41 @@ async def _recent_hooks(workspace_id: str, profile: str) -> list[str]:
     return [d.hook for d in docs if d.hook]
 
 
+async def _play_picker(
+    workspace_id: str, profile: str, bp: GrowthBlueprint | None, now: datetime
+) -> Callable[[str], str | None]:
+    """A picker stamping each new idea with the ``play:<id>`` it is made for: its
+    platform's one active acting post play; with two or more, the one with the most
+    posts left this ISO week (``posts_per_week`` minus ideas already stamped with it
+    since Monday), a tie going to the core play, then the lower id. None when the
+    platform has no acting play. Each pick counts, so one batch spreads over plays."""
+    plays = bp.plays if bp is not None else {}
+    acting = social_blueprint.acting_post_plays(bp) if bp is not None else {}
+    today = _aware(now).astimezone(UTC).date()
+    since = datetime.combine(review.parse_week(None, today), time.min, tzinfo=UTC)
+    left: dict[str, int] = {}
+    for play_id in (p for ids in acting.values() for p in ids):
+        used = await _IdeaDoc.find(
+            {
+                "workspace": workspace_id,
+                "profile": profile,
+                "play_id": f"play:{play_id}",
+                "createdAt": {"$gte": since},
+            }
+        ).count()
+        left[play_id] = int(plays[play_id].get("posts_per_week") or 0) - used
+
+    def pick(platform: str) -> str | None:
+        ids = acting.get(platform or "x")  # no platform reads as X, as in live_posts
+        if not ids:
+            return None
+        best = min(ids, key=lambda p: (-left[p], plays[p].get("status") != "core", p))
+        left[best] -= 1
+        return f"play:{best}"
+
+    return pick
+
+
 async def generate_ideas(
     ctx: RequestContext, body: GenerateIdeasRequest, profile_id: str | None = None
 ) -> SocialIdeaListResponse:
@@ -701,6 +738,7 @@ async def generate_ideas(
         logger.warning("growth social: ideas run failed for ws=%s", workspace_id, exc_info=True)
         raise CloudError(502, "social.ideas_failed", "The ideas run failed") from exc
 
+    pick = await _play_picker(workspace_id, profile_key, bp, datetime.now(UTC))
     docs: list[_IdeaDoc] = []
     for item in list(generated)[: body.count]:
         idea = _IdeaDoc(
@@ -719,6 +757,7 @@ async def generate_ideas(
             hook_type=item.hook_type,
             status="new",
             blueprint_version=bp.version if bp is not None else None,
+            play_id=pick(item.platform),
         )
         await idea.insert()
         docs.append(idea)
@@ -934,6 +973,7 @@ async def _draft_daily(
         logger.info("daily drafts: dropped %d draft(s) for profile=%s", dropped, profile_key)
 
     slots = await _free_slots(workspace_id, profile_key, now)
+    pick = await _play_picker(workspace_id, profile_key, bp, now)
     docs: list[_IdeaDoc] = []
     for item, slot in zip(kept, slots, strict=False):
         idea_doc = _IdeaDoc(
@@ -953,6 +993,7 @@ async def _draft_daily(
             source="daily",
             suggested_at=slot,
             blueprint_version=bp.version,
+            play_id=pick("x"),
         )
         if exp is not None:  # stamp the arm the draft was written for
             setattr(idea_doc, exp.variable, arm)
@@ -3615,6 +3656,8 @@ class _LiveIdeaRow(BaseModel):
     id: PydanticObjectId = Field(alias="_id")
     platform: str = ""
     published_at: datetime | None = None
+    format: str = ""
+    play_id: str | None = None
 
 
 class _LiveMetricRow(BaseModel):
@@ -3699,6 +3742,8 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
             published_at=_aware(d.published_at),
             snapshots=tuple(snaps.get(str(d.id), ())),
             link_clicks=tuple(clicks.get(str(d.id), ())),
+            format=d.format,
+            play_id=d.play_id,
         )
         for d in ideas
         if d.published_at is not None  # excluded by the query; narrows the type

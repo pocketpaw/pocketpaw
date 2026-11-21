@@ -212,7 +212,9 @@ async def test_no_data_is_null_never_zero(w1):
     await _idea(pid, "x", 30)  # outside the week, no snapshot, no link
     out = await _live(pid)
     assert out["objectives"] == {o["id"]: NULL for o in _OBJECTIVES}
-    assert out["plays"] == {"play:x-organic": NULL}
+    unmeasured = {"name": "x_post", "posts": 0, "avg": None, "suggestion": None,
+                  "reason": "0 posts, needs 5 for a call"}  # fmt: skip
+    assert out["plays"] == {"play:x-organic": {**NULL, "formats": [unmeasured]}}
 
 
 async def test_a_measured_zero_is_a_number(w1):
@@ -233,7 +235,10 @@ async def test_no_kpi_key_is_null(w1):
     pid = await _profile(github_repos=[REPO])
     await _blueprint(w1, pid, {"play:x-organic": _play(key=None)})
     await _seed_numbers(pid)
-    assert (await _live(pid))["plays"] == {"play:x-organic": NULL}
+    play = (await _live(pid))["plays"]["play:x-organic"]
+    assert {k: play[k] for k in NULL} == NULL
+    # Formats still read engagement per post: the two X posts with a 7-day snapshot.
+    assert [(f["name"], f["posts"], f["avg"]) for f in play["formats"]] == [("x_post", 2, 4.0)]
 
 
 # --- scoping -------------------------------------------------------------------------------
@@ -264,8 +269,8 @@ async def test_two_acting_plays_on_one_platform_leave_post_values_null(w1):
     )
     await _seed_numbers(pid)
     out = await _live(pid)
-    assert out["plays"]["play:x-organic"] == NULL
-    assert out["plays"]["play:x-authority"] == NULL
+    assert out["plays"]["play:x-organic"] == {**NULL, "formats": []}
+    assert out["plays"]["play:x-authority"] == {**NULL, "formats": []}
     assert out["plays"]["play:reddit-community"]["value"] == 50.0  # its own platform
     assert out["objectives"]["imp"]["value"] == 300.0  # platform level still counts
 
@@ -279,7 +284,7 @@ async def test_two_acting_plays_on_one_platform_leave_post_values_null(w1):
     await _ok(w1, pid, "play:x-authority")
     out = await _live(pid)
     assert out["plays"]["play:x-organic"]["value"] == 300.0
-    assert out["plays"]["play:x-authority"] == NULL
+    assert out["plays"]["play:x-authority"] == {**NULL, "formats": []}
 
 
 async def test_no_approved_blueprint_is_empty_maps(w1):

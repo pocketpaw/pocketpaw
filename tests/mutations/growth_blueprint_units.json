@@ -299,17 +299,18 @@
   {
     "label": "live: a play sums every platform's ideas",
     "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
-    "find": "    return [p for p in posts if p.platform == q.channel]\n",
-    "replace": "    return posts\n",
+    "find": "        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)\n",
+    "replace": "        p for p in posts if (p.play_id == unit if p.play_id else single)\n",
     "tests": [
-      "tests/cloud/growth/social/test_blueprint_live.py"
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
   },
   {
     "label": "live: two acting plays on one platform both claim its ideas",
     "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
-    "find": "    if acting.get(q.channel) != [play_id]:\n",
-    "replace": "    if play_id not in acting.get(q.channel, []):\n",
+    "find": "    single = acting.get(q.channel) == [play_id]\n",
+    "replace": "    single = play_id in acting.get(q.channel, [])\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
@@ -402,6 +403,207 @@
     "replace": "",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "play_id: the pick takes the play with the fewest posts left",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        best = min(ids, key=lambda p: (-left[p], plays[p].get(\"status\") != \"core\", p))\n",
+    "replace": "        best = min(ids, key=lambda p: (left[p], plays[p].get(\"status\") != \"core\", p))\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: a tie goes to the testing play, not the core one",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        best = min(ids, key=lambda p: (-left[p], plays[p].get(\"status\") != \"core\", p))\n",
+    "replace": "        best = min(ids, key=lambda p: (-left[p], plays[p].get(\"status\") == \"core\", p))\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: a tie between equal plays takes the higher id",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        best = min(ids, key=lambda p: (-left[p], plays[p].get(\"status\") != \"core\", p))\n",
+    "replace": "        best = max(ids, key=lambda p: (left[p], plays[p].get(\"status\") == \"core\", p))\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: a pick does not count toward the batch",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        left[best] -= 1\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: ideas stamped before this ISO week still count",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "                \"play_id\": f\"play:{play_id}\",\n                \"createdAt\": {\"$gte\": since},\n",
+    "replace": "                \"play_id\": f\"play:{play_id}\",\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: an idea with no platform gets no play",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        ids = acting.get(platform or \"x\")  # no platform reads as X, as in live_posts\n",
+    "replace": "        ids = acting.get(platform)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: generate_ideas does not stamp",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            play_id=pick(item.platform),\n",
+    "replace": "            play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: daily drafts do not stamp",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            play_id=pick(\"x\"),\n",
+    "replace": "            play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: the doc to domain mapper drops it",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        play_id=doc.play_id,\n",
+    "replace": "        play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "play_id: the domain to response mapper drops it",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        play_id=i.play_id,\n",
+    "replace": "        play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: the live idea read drops play_id",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            play_id=d.play_id,\n",
+    "replace": "            play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: a stamped idea falls back to the single-play rule",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)\n",
+    "replace": "        p for p in posts if p.platform == q.channel and single\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: an old idea with no play_id counts toward no play",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)\n",
+    "replace": "        p for p in posts if p.platform == q.channel and p.play_id == unit\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: exactly 1.3x is not double_down",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if ratio >= DOUBLE_DOWN_RATIO:\n",
+    "replace": "    if ratio > DOUBLE_DOWN_RATIO:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: exactly 0.7x is not drop",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if ratio <= DROP_RATIO:\n",
+    "replace": "    if ratio < DROP_RATIO:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: double_down threshold drops to 1.2",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "DOUBLE_DOWN_RATIO = 1.3\n",
+    "replace": "DOUBLE_DOWN_RATIO = 1.2\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: drop threshold rises to 0.8",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "DROP_RATIO = 0.7\n",
+    "replace": "DROP_RATIO = 0.8\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: four posts are enough for a call",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "FORMAT_MIN_POSTS = 5\n",
+    "replace": "FORMAT_MIN_POSTS = 4\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: the min-posts rule is skipped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if posts < FORMAT_MIN_POSTS:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: a zero play average divides by zero",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    if avg is None or not play_avg:\n",
+    "replace": "    if avg is None or play_avg is None:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: posts counts unmeasured ideas",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "                posts=m.posts_counted,\n",
+    "replace": "                posts=len(group),\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "formats: the play average is the format's own",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "        suggestion, reason = suggest(m.posts_counted, m.value, play_avg)\n",
+    "replace": "        suggestion, reason = suggest(m.posts_counted, m.value, m.value)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
   }
 ]
