@@ -458,8 +458,8 @@ async def test_a_second_core_play_warns_while_the_first_has_no_live_value(w1):
     pid = await _approved_play(w1, _expanding(1000))
     state = await _put(w1, pid, _REDDIT, _CORE, 0)
     assert state["warnings"] == [
-        f"{XO} is already core and has no live value yet, under its expand_at of 1000. "
-        "A second core play splits the effort before the first one has earned it."
+        "Your core X organic play has no live number yet, and you set it to expand at "
+        "1,000. Adding a second core play now splits your time."
     ]
     assert not any(has_dash(w) for w in state["warnings"])
     assert (await _ok(w1, pid, _REDDIT))["warnings"] == state["warnings"]
@@ -474,7 +474,10 @@ async def test_a_second_core_play_warns_under_expand_at_and_not_at_it(w1, monkey
     await _snap(idea, 24, impressions=400)
     state = await _put(w1, pid, _REDDIT, _CORE, 0)
     assert len(state["warnings"]) == 1
-    assert "is at 400, under its expand_at of 1000" in state["warnings"][0]
+    assert state["warnings"] == [
+        "Your core X organic play is at 400 of the 1,000 you set to expand. "
+        "Adding a second core play now splits your time."
+    ]
 
     await UnitDoc.get_pymongo_collection().update_one(
         {"profile_id": pid, "unit": XO, "status": "approved"},

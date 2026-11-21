@@ -1285,16 +1285,18 @@ async def discard_unit_draft(
 
 
 def _num(value: float) -> str:
-    return str(int(value)) if float(value).is_integer() else str(round(value, 2))
+    """A number as people read it: thousands grouped, at most two decimals."""
+    return f"{int(value):,}" if float(value).is_integer() else f"{round(value, 2):,}"
 
 
 async def _second_core_warnings(
     workspace_id: str, profile: SocialProfile, unit: str, body: dict[str, Any]
 ) -> list[str]:
-    """For a core play: one line per OTHER approved core play whose live KPI value is
-    under its ``expand_at``, or that has an ``expand_at`` and no live value yet. A
-    play with no ``expand_at`` never warns. Numbers come from ``live``. Runs after the
-    write landed, so any error is logged and reads as no warnings: it never blocks."""
+    """For a core play: one plain line per OTHER approved core play (named by its
+    catalog label) whose live KPI value is under its ``expand_at``, or that has an
+    ``expand_at`` and no live value yet. A play with no ``expand_at`` never warns.
+    Numbers come from ``live``. Runs after the write landed, so any error is logged
+    and reads as no warnings: it never blocks."""
     if body.get("status") != "core":
         return []
     try:
@@ -1324,11 +1326,14 @@ async def _core_warnings(workspace_id: str, profile: SocialProfile, unit: str) -
         value = plays[other].value if other in plays else None
         if value is not None and value >= expand_at:
             continue
-        now = "has no live value yet" if value is None else f"is at {_num(value)}"
-        out.append(
-            f"{other} is already core and {now}, under its expand_at of {_num(expand_at)}. "
-            "A second core play splits the effort before the first one has earned it."
+        q = play_catalog.play(other[len(_PLAY) :])
+        name = f"Your core {q.label if q else other[len(_PLAY) :]} play"
+        now = (
+            f"{name} has no live number yet, and you set it to expand at {_num(expand_at)}."
+            if value is None
+            else f"{name} is at {_num(value)} of the {_num(expand_at)} you set to expand."
         )
+        out.append(f"{now} Adding a second core play now splits your time.")
     return out
 
 

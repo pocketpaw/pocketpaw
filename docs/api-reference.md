@@ -11069,7 +11069,10 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
 - `warnings` (on every unit response, usually `[]`): saving or approving a `core`
   play while another approved core play has a `kpi.expand_at` and its live value
   (`GET …/blueprint/live`) is under it, or has none yet, adds one plain-text line
-  per such play citing its `expand_at` and live value. It never blocks the write.
+  per such play, written for people with the play's catalog name, e.g. "Your core
+  X organic play is at 400 of the 1,000 you set to expand. Adding a second core
+  play now splits your time." (or "... has no live number yet, and you set it to
+  expand at 1,000."). It never blocks the write.
 
 #### Live values: `GET /api/v1/growth/social/blueprint/live`
 
