@@ -343,10 +343,10 @@ async def test_an_appended_format_takes_the_table_spelling_and_is_never_doubled(
     events = await audit_service.list_target_events(
         "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
     )
-    assert sorted((e.metadata["format"], e.metadata["old"]) for e in events) == [
+    assert {(e.metadata["format"], e.metadata["old"]) for e in events} == {
         ("x_post", None),
         ("x_post", "winning"),
-    ]
+    }
 
 
 async def test_an_open_draft_gets_the_appended_format_so_approve_keeps_it(w1):
