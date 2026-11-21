@@ -11012,13 +11012,18 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   owner sets it: a regenerate carries every objective's `metric_key` from the base
   body (whatever the analyst returns) and never writes a play.
 - A play format is a `FormatEntry` `{name, status}`, `status` one of `winning`,
-  `testing` (default) or `dropped`; names are unique ignoring case. A plain string
-  (`"x_thread"`, how rows stored before statuses) reads as `{name, status: "testing"}`,
-  so old rows need no migration. The ideas agent gets the platform's acting plays
+  `testing` (default) or `dropped`; names are unique as the fixed table spells them
+  (case, spaces, hyphens and underscores folded, so `x post` and `x_post` clash). A
+  plain string (`"x_thread"`, how rows stored before statuses) reads as `{name,
+  status: "testing"}`, so old rows need no migration, and play bodies always go out
+  on the wire as entries. The ideas agent gets the platform's acting plays
   that list formats (role, audience, formats by status, "never use dropped
   formats"), and its allowed formats are the platform's fixed table minus every
   format those plays mark dropped (the union across them, since an idea is stamped
   with its play only after it is written). A play with no formats changes nothing.
+  When every format of the platform ends up dropped, `POST /ideas` is `422
+  social.ideas_formats_all_dropped` ("Every format for this platform is dropped. Set
+  one back to testing.") and the daily drafts skip the brand with a log line.
 - `kpi.pass_mark`, `kpi.expand_at` and `decide_by` are owner-only decision marks: the
   number the play must reach to pass its test, the live value at which a second
   core play is earned, and the date to decide by. Left out of the body when unset;
@@ -11027,7 +11032,8 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   row's: writes that status into the approved play straight away and returns the
   unit's `{unit, approved, draft, warnings}`. `name` matches ignoring case. An open
   draft that lists the format gets the same status (its `rev` goes up), so approving
-  it later does not revert the change. Each change is an audit event
+  it later does not revert the change; a draft saved meanwhile is re-read and
+  retried, and once the approved write has landed the route never answers 409. Each change is an audit event
   (`growth.blueprint.format_status`, target `growth_blueprint_unit`
   `<profile_id>:<unit>`, metadata `{unit, format, old, new}`, with actor and time).
   `409 social.blueprint_stale` on a stale `rev`; `404` for a play with no approved

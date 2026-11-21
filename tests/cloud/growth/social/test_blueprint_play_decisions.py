@@ -18,13 +18,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 import pytest_asyncio
+from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social import live
+from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.analyst import (
     PLAY_FORMAT_RULE,
     blueprint_lines,
@@ -43,17 +46,19 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     SocialAnalysis,
     SocialProfile,
 )
+from pocketpaw_ee.cloud.growth.social.dto import GenerateIdeasRequest
 from pocketpaw_ee.cloud.growth.social.ideas import (
     allowed_formats,
     build_ideas_prompt,
     has_dash,
     parse_ideas_response,
+    set_production_ideas_fn,
 )
 from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
 
 from tests.cloud.growth.social.test_blueprint import BP, _profile, _save, _seed
 from tests.cloud.growth.social.test_blueprint_live import NOW as LIVE_NOW
-from tests.cloud.growth.social.test_blueprint_live import _blueprint, _idea, _snap
+from tests.cloud.growth.social.test_blueprint_live import _blueprint, _ctx, _idea, _snap
 from tests.cloud.growth.social.test_blueprint_units import UNITS, _ok, _put, _rev
 from tests.cloud.growth.social.test_router import _client, _FakeAnalyzer
 
@@ -66,13 +71,21 @@ async def w1(mongo_db: Any):
         yield client
 
 
+@pytest_asyncio.fixture
+async def w2(mongo_db: Any):
+    async with await _client("w2") as client:
+        yield client
+
+
 @pytest.fixture(autouse=True)
 def _reset_seams():
     set_production_analyze_fn(None)
+    set_production_ideas_fn(None)
     try:
         yield
     finally:
         set_production_analyze_fn(None)
+        set_production_ideas_fn(None)
 
 
 # --- the ideas prompt and allowed formats (pure) --------------------------------------------
@@ -141,8 +154,9 @@ def test_a_plain_string_format_reads_as_a_testing_entry():
     ]
     with pytest.raises(ValueError):
         PlayBody.model_validate({"formats": [{"name": "x_post", "status": "great"}]})
-    with pytest.raises(ValueError):
-        PlayBody.model_validate({"formats": ["x_post", "X_POST"]})
+    for twin in ("X_POST", "x post", "x-post"):
+        with pytest.raises(ValueError):
+            PlayBody.model_validate({"formats": ["x_post", twin]})
 
 
 def test_a_play_with_no_formats_leaves_the_prompt_and_formats_as_on_dev():
@@ -373,8 +387,8 @@ async def test_a_second_core_play_warns_while_the_first_has_no_live_value(w1):
 
 
 async def test_a_second_core_play_warns_under_expand_at_and_not_at_it(w1, monkeypatch):
-    real = live.get
-    monkeypatch.setattr(live, "get", lambda ctx, pid: real(ctx, pid, now=LIVE_NOW))
+    real = live.for_blueprint
+    monkeypatch.setattr(live, "for_blueprint", lambda ws, p, bp: real(ws, p, bp, LIVE_NOW))
     pid = await _approved_play(w1, _expanding(1000))
     idea = await _idea(pid, "x", 1)
     await _snap(idea, 24, impressions=400)
@@ -397,3 +411,102 @@ async def test_no_warning_without_expand_at_or_for_a_testing_play(w1):
     assert (await _put(w1, pid2, _REDDIT, {**_CORE, "status": "testing"}, 0))["warnings"] == []
     # The play itself is never its own second core play.
     assert (await _put(w1, pid2, XO, _expanding(1000), 1))["warnings"] == []
+
+
+async def test_a_failing_live_read_never_fails_a_landed_save(w1, monkeypatch):
+    pid = await _approved_play(w1, _expanding(1000))
+
+    async def boom(*_: Any) -> None:
+        raise RuntimeError("live is down")
+
+    monkeypatch.setattr(live, "for_blueprint", boom)
+    state = await _put(w1, pid, _REDDIT, _CORE, 0)
+    assert state["warnings"] == [] and state["draft"] is not None
+    assert (await _ok(w1, pid, _REDDIT))["warnings"] == []
+
+
+# --- status route: races, reads, tenancy -----------------------------------------------------
+
+
+async def test_a_draft_saved_during_the_mirror_is_retried_never_a_409(w1, monkeypatch):
+    pid = await _approved_play(w1)
+    await _put(w1, pid, XO, {"status": "core", "formats": _FORMATS}, 1)
+    real = social_blueprint._set_if
+    raced = []
+
+    async def racing(match: dict, fields: dict) -> bool:
+        if match.get("status") == "draft" and not raced:
+            raced.append(1)  # another tab saves the draft between our read and write
+            await UnitDoc.get_pymongo_collection().update_one(
+                {"_id": match["_id"]}, {"$set": {"body.role": "Other tab"}, "$inc": {"rev": 1}}
+            )
+        return await real(match, fields)
+
+    monkeypatch.setattr(social_blueprint, "_set_if", racing)
+    state = await _status(w1, pid, XO, "x_thread", "dropped", await _approved_rev(pid))
+    assert raced
+    assert state["draft"]["body"]["role"] == "Other tab"
+    assert state["draft"]["body"]["formats"][1] == {"name": "x_thread", "status": "dropped"}
+    monkeypatch.setattr(social_blueprint, "_set_if", real)
+    approved = await _ok(w1, pid, XO)
+    assert approved["approved"]["body"]["formats"][1] == {"name": "x_thread", "status": "dropped"}
+
+
+async def test_a_draft_that_keeps_losing_the_race_is_logged_not_a_409(w1, monkeypatch):
+    pid = await _approved_play(w1)
+    await _put(w1, pid, XO, {"status": "core", "formats": _FORMATS}, 1)
+    real = social_blueprint._set_if
+
+    async def always_lose(match: dict, fields: dict) -> bool:
+        return False if match.get("status") == "draft" else await real(match, fields)
+
+    monkeypatch.setattr(social_blueprint, "_set_if", always_lose)
+    state = await _status(w1, pid, XO, "x_thread", "dropped", await _approved_rev(pid))
+    assert state["approved"]["body"]["formats"][1]["status"] == "dropped"
+
+
+async def test_old_string_formats_read_as_entries_on_the_wire(w1):
+    pid = await _approved_play(w1)
+    await UnitDoc.get_pymongo_collection().update_one(
+        {"profile_id": pid, "unit": XO, "status": "approved"},
+        {"$set": {"body": {"status": "core", "formats": ["x_post"]}}},
+    )
+    units = (await w1.get(UNITS, params={"profile_id": pid})).json()["units"]
+    play = next(u for u in units if u["unit"] == XO)
+    assert play["approved"]["body"]["formats"] == [{"name": "x_post", "status": "testing"}]
+
+
+async def test_another_workspace_cannot_touch_the_play(w1, w2):
+    pid = await _approved_play(w1)
+    rev = await _approved_rev(pid)
+    await _status(w2, pid, XO, "x_thread", "dropped", rev, 404)
+    approved = await UnitDoc.find_one({"profile_id": pid, "unit": XO, "status": "approved"})
+    assert approved.rev == rev
+    assert approved.body["formats"][1] == {"name": "x_thread", "status": "testing"}
+
+
+# --- every format dropped --------------------------------------------------------------------
+
+
+_ALL_DROPPED = {
+    "status": "core",
+    "posts_per_week": 5,
+    "formats": [{"name": "x_post", "status": "dropped"}, {"name": "x_thread", "status": "dropped"}],
+}
+
+
+async def test_ideas_refuse_a_platform_whose_every_format_is_dropped(w1):
+    pid = await _profile(onboarding_completed_at=datetime.now(UTC), active=True)
+    await _blueprint(w1, pid, {XO: _ALL_DROPPED})
+    set_production_ideas_fn(_NoCall())
+    with pytest.raises(ValidationError) as err:
+        await social_service.generate_ideas(_ctx(), GenerateIdeasRequest(platform="x"), pid)
+    assert err.value.code == "social.ideas_formats_all_dropped"
+    assert "Set one back to testing" in err.value.message
+    made = await social_service.draft_daily_for_profile("w1", pid, now=datetime.now(UTC))
+    assert made == []
+
+
+class _NoCall:
+    async def __call__(self, *_: Any, **__: Any) -> tuple:
+        raise AssertionError("the ideas agent ran for a platform with every format dropped")

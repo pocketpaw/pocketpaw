@@ -61,7 +61,7 @@ from pocketpaw_ee.cloud.growth.social.analyst import (
     owner_lines,
     run_pinned_agent,
 )
-from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import format_entries
+from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import format_entries, format_key
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text
 from pocketpaw_ee.cloud.growth.social.domain import (
     PLATFORM_FORMATS,
@@ -230,10 +230,6 @@ def build_ideas_prompt(
     return "\n".join(lines)
 
 
-def _key(value: str) -> str:
-    return re.sub(r"[\s\-]+", "_", value.strip().lower())
-
-
 def allowed_formats(
     platform: str | None, blueprint: GrowthBlueprint | None = None
 ) -> tuple[str, ...]:
@@ -244,7 +240,7 @@ def allowed_formats(
     if blueprint is None or not platform:
         return table
     dropped = {
-        _key(name)
+        format_key(name)
         for play_id in play_catalog.acting_post_plays(blueprint.plays).get(platform, [])
         for name, status in format_entries(blueprint.plays[play_id].get("formats"))
         if status == "dropped"
@@ -255,7 +251,7 @@ def allowed_formats(
 def _format(value: Any, allowed: tuple[str, ...]) -> str | None:
     if not isinstance(value, str):
         return None
-    key = _key(value)
+    key = format_key(value)
     return key if key in allowed else None
 
 

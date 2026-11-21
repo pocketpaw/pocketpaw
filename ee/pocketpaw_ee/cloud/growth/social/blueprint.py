@@ -71,6 +71,7 @@ from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import (
     SaveUnitDraftRequest,
     SetFormatStatusRequest,
     format_entries,
+    format_key,
 )
 from pocketpaw_ee.cloud.growth.social.domain import (
     BLUEPRINT_CHANNELS,
@@ -670,6 +671,14 @@ def acting_post_plays(bp: GrowthBlueprint) -> dict[str, list[str]]:
     return play_catalog.acting_post_plays(bp.plays)
 
 
+def _wire_body(unit: str, body: dict[str, Any]) -> dict[str, Any]:
+    """A play body in its model's shape (formats always ``{name, status}``, an old
+    plain string read as testing); other units as stored."""
+    if unit.startswith(_PLAY) and play_catalog.play(unit[len(_PLAY) :]) is not None:
+        return _normal(unit, body)
+    return body
+
+
 def _unit_row(doc: _UnitDoc | None) -> BlueprintUnitRowResponse | None:
     if doc is None:
         return None
@@ -679,7 +688,7 @@ def _unit_row(doc: _UnitDoc | None) -> BlueprintUnitRowResponse | None:
         version=doc.version,
         rev=doc.rev,
         status=doc.status,
-        body=doc.body,
+        body=_wire_body(doc.unit, doc.body),
         created_by=doc.created_by,
         approved_by=doc.approved_by,
         approved_at=iso_utc(doc.approved_at),
@@ -1153,7 +1162,7 @@ async def save_unit_draft(
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     result = await _unit_result(workspace_id, profile.id, unit)
     if kind == "play":
-        result.warnings = await _second_core_warnings(ctx, workspace_id, profile.id, unit, new_body)
+        result.warnings = await _second_core_warnings(workspace_id, profile, unit, new_body)
     return result
 
 
@@ -1181,9 +1190,7 @@ async def approve_unit(
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     result = await _unit_result(workspace_id, profile.id, unit)
     if kind == "play":
-        result.warnings = await _second_core_warnings(
-            ctx, workspace_id, profile.id, unit, draft.body
-        )
+        result.warnings = await _second_core_warnings(workspace_id, profile, unit, draft.body)
     return result
 
 
@@ -1223,14 +1230,23 @@ def _num(value: float) -> str:
 
 
 async def _second_core_warnings(
-    ctx: RequestContext, workspace_id: str, profile_id: str, unit: str, body: dict[str, Any]
+    workspace_id: str, profile: SocialProfile, unit: str, body: dict[str, Any]
 ) -> list[str]:
     """For a core play: one line per OTHER approved core play whose live KPI value is
     under its ``expand_at``, or that has an ``expand_at`` and no live value yet. A
-    play with no ``expand_at`` never warns. Numbers come from ``live``."""
+    play with no ``expand_at`` never warns. Numbers come from ``live``. Runs after the
+    write landed, so any error is logged and reads as no warnings: it never blocks."""
     if body.get("status") != "core":
         return []
-    bp = await approved_for(workspace_id, profile_id)
+    try:
+        return await _core_warnings(workspace_id, profile, unit)
+    except Exception:  # noqa: BLE001
+        logger.warning("growth blueprint: second-core warning check failed", exc_info=True)
+        return []
+
+
+async def _core_warnings(workspace_id: str, profile: SocialProfile, unit: str) -> list[str]:
+    bp = await approved_for(workspace_id, profile.id)
     if bp is None:
         return []
     others = {
@@ -1243,7 +1259,7 @@ async def _second_core_warnings(
         return []
     from pocketpaw_ee.cloud.growth.social import live as social_live
 
-    plays = (await social_live.get(ctx, profile_id)).plays
+    plays = (await social_live.for_blueprint(workspace_id, profile, bp)).plays
     out = []
     for other, expand_at in sorted(others.items()):
         value = plays[other].value if other in plays else None
@@ -1263,11 +1279,34 @@ def _with_format_status(body: dict[str, Any], name: str, status: str) -> tuple[d
     out, old = copy.deepcopy(body), None
     entries = []
     for n, s in format_entries(out.get("formats")):
-        if n.lower() == name.strip().lower():
+        if format_key(n) == format_key(name):
             old, s = s, status
         entries.append({"name": n, "status": s})
     out["formats"] = entries
     return out, old
+
+
+_MIRROR_TRIES = 3
+
+
+async def _mirror_format_status(
+    workspace_id: str, profile_id: str, unit: str, name: str, status: str
+) -> None:
+    """Give the unit's open draft the same format status, so approving it later keeps
+    the change. Runs after the approved write landed, so it never fails the request:
+    a draft saved meanwhile is re-read and retried, and after ``_MIRROR_TRIES`` lost
+    races it is logged and left. The bumped draft rev makes a stale editor's next
+    save a 409, so it cannot write the old status back unseen."""
+    for _ in range(_MIRROR_TRIES):
+        draft = (await _rows(workspace_id, profile_id)).get(unit, {}).get("draft")
+        if draft is None:
+            return
+        mirrored, listed = _with_format_status(_normal(unit, draft.body), name, status)
+        if listed is None:
+            return
+        if await _set_if(_draft_match(workspace_id, profile_id, draft), {"body": mirrored}):
+            return
+    logger.warning("growth blueprint: format status not mirrored onto the %s draft", unit)
 
 
 async def set_format_status(
@@ -1316,12 +1355,7 @@ async def set_format_status(
         target_id=f"{profile.id}:{unit}",
         metadata={"unit": unit, "format": name, "old": old, "new": body.status},
     )
-    draft = mine.get("draft")
-    if draft is not None:
-        mirrored, listed = _with_format_status(_normal(unit, draft.body), name, body.status)
-        if listed is not None:
-            if not await _set_if(_draft_match(workspace_id, profile.id, draft), {"body": mirrored}):
-                raise _stale()
+    await _mirror_format_status(workspace_id, profile.id, unit, name, body.status)
     # no-event: Growth › Social has no realtime subscriber; the audit row is the record.
     return await _unit_result(workspace_id, profile.id, unit)
 
@@ -1654,7 +1688,7 @@ async def unit_diff(
         unit=unit,
         from_version=from_version,
         to_version=to_version,
-        fields=_key_diff(_flat(old.body), _flat(new.body)),
+        fields=_key_diff(_flat(_wire_body(unit, old.body)), _flat(_wire_body(unit, new.body))),
     )
 
 

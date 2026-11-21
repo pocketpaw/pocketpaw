@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, get_args
 from urllib.parse import urlsplit
@@ -31,6 +32,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -222,8 +224,20 @@ class PillarShare(_Body):
     weight: int = Field(default=0, ge=0, le=100)
 
 
-def _unset(v: Any) -> bool:
-    return v is None
+def _drop_unset(out: Any, keys: tuple[str, ...]) -> Any:
+    """A dump without ``keys`` whose value is None (works on pydantic 2.10, which has
+    no ``exclude_if``), so a body that never set them dumps as it did before."""
+    if isinstance(out, dict):
+        for k in keys:
+            if out.get(k) is None:
+                out.pop(k, None)
+    return out
+
+
+def format_key(name: str) -> str:
+    """A format name as the fixed table spells it: lower case, runs of spaces,
+    hyphens or underscores as one ``_`` (``X Thread`` and ``x-thread`` are ``x_thread``)."""
+    return re.sub(r"[\s\-_]+", "_", name.strip().lower())
 
 
 class Kpi(_Body):
@@ -233,8 +247,12 @@ class Kpi(_Body):
     metric_key: MetricKey | None = None
     # Owner-only decision marks: the play passes its test at ``pass_mark`` and earns
     # a second core play at ``expand_at``.
-    pass_mark: _Amount | None = Field(default=None, exclude_if=_unset)
-    expand_at: _Amount | None = Field(default=None, exclude_if=_unset)
+    pass_mark: _Amount | None = None
+    expand_at: _Amount | None = None
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler: Any) -> Any:
+        return _drop_unset(handler(self), ("pass_mark", "expand_at"))
 
 
 class FormatEntry(_Body):
@@ -323,12 +341,16 @@ class PlayBody(_Body):
     seo: SeoExtras | None = None
     paid: PaidExtras | None = None
     creator: CreatorExtras | None = None
-    decide_by: date | None = Field(default=None, exclude_if=_unset)
+    decide_by: date | None = None
 
     @model_validator(mode="after")
     def _distinct(self) -> PlayBody:
-        _unique([f.name for f in self.formats], "format names")
+        _unique([format_key(f.name) for f in self.formats], "format names")
         return self
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler: Any) -> Any:
+        return _drop_unset(handler(self), ("decide_by",))
 
 
 BODY_MODELS: dict[str, type[_Body]] = {
