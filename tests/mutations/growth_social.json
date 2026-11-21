@@ -923,8 +923,8 @@
   {
     "label": "blueprint: a generated idea is not stamped with the Blueprint version",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "            status=\"new\",\n            blueprint_version=bp.version if bp is not None else None,\n        )\n        await idea.insert()",
-    "replace": "            status=\"new\",\n        )\n        await idea.insert()",
+    "find": "            status=\"new\",\n            blueprint_version=bp.version if bp is not None else None,\n            play_id=pick(item.platform),\n        )\n        await idea.insert()",
+    "replace": "            status=\"new\",\n            play_id=pick(item.platform),\n        )\n        await idea.insert()",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]

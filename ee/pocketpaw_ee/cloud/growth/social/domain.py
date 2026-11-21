@@ -286,6 +286,7 @@ class SocialIdea:
     hook_type: str = ""
     experiment_id: str = ""
     blueprint_version: int | None = None
+    play_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -353,7 +354,8 @@ class PostMetrics:
 @dataclass(frozen=True)
 class LivePost:
     """One published idea as the Blueprint live values read it: its platform, when
-    it went live, every metric snapshot, and each tracked link's clicks per UTC day."""
+    it went live, every metric snapshot, each tracked link's clicks per UTC day, and
+    its format and ``play:<id>`` (None on ideas stamped with no play)."""
 
     workspace_id: str
     idea_id: str
@@ -361,6 +363,8 @@ class LivePost:
     published_at: datetime
     snapshots: tuple[PostMetrics, ...] = ()
     link_clicks: tuple[dict[str, int], ...] = ()
+    format: str = ""
+    play_id: str | None = None
 
 
 @dataclass(frozen=True)
