@@ -378,8 +378,25 @@ class LiveValueResponse(BaseModel):
     posts_counted: int = 0
 
 
+class LiveFormatResponse(BaseModel):
+    """One format's numbers within a play: measured posts, engagement per post, and a
+    suggestion once it has enough posts to call."""
+
+    name: str
+    posts: int = 0
+    avg: float | None = None
+    suggestion: Literal["double_down", "drop"] | None = None
+    reason: str | None = None
+
+
+class LivePlayResponse(LiveValueResponse):
+    """A play's KPI value plus its per-format numbers."""
+
+    formats: list[LiveFormatResponse] = Field(default_factory=list)
+
+
 class BlueprintLiveResponse(BaseModel):
     """``GET /blueprint/live``: per objective id and per ``play:<id>`` unit."""
 
     objectives: dict[str, LiveValueResponse] = Field(default_factory=dict)
-    plays: dict[str, LiveValueResponse] = Field(default_factory=dict)
+    plays: dict[str, LivePlayResponse] = Field(default_factory=dict)

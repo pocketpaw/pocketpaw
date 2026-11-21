@@ -10307,7 +10307,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `DELETE /api/v1/growth/social/blueprint/units/{unit}/draft` | `?rev=`: drop one unit's draft (it becomes `superseded`); `404` without a draft, `409` on a stale `rev`, `422` for a core unit never approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
-| `GET /api/v1/growth/social/blueprint/live` | Live numbers per approved objective id and play unit: `{value, as_of, posts_counted}`, `value` null when unmeasured (see Blueprint units). |
+| `GET /api/v1/growth/social/blueprint/live` | Live numbers per approved objective id and play unit: `{value, as_of, posts_counted}`, `value` null when unmeasured; each play adds per-format `formats[]` with a suggestion (see Blueprint units). |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
 | `POST /api/v1/growth/social/setup-status/skip` | `{key, skipped?}`: skip one checklist row, or un-skip it with `skipped: false`. Idempotent; an unknown key is a 422. Returns the checklist. |
 | `GET /api/v1/growth/social/plan` | `?week=YYYY-Www`: the week's post slots per day, computed from the approved blueprint and the ideas (see Weekly Plan). |
@@ -10494,6 +10494,7 @@ stored with `status: "new"` and returned as `{items}`:
       "hook_type": "question",
       "experiment_id": "",
       "blueprint_version": 3,
+      "play_id": "play:x-organic",
       "created_at": "2026-10-06T10:05:00+00:00",
       "updated_at": "2026-10-06T10:05:00+00:00"
     }
@@ -10502,6 +10503,14 @@ stored with `status: "new"` and returned as `{items}`:
 ```
 
 `format` is `hook_demo | slideshow | wall_of_text | meme | talking_head`.
+`play_id` is the `play:<id>` unit the idea was made for, stamped at creation on
+every new idea (`generate_ideas`, the daily X drafts, memes and pulse picks) from
+the approved Blueprint: the idea's
+platform's one active (`core` / `testing`) acting post play; with two or more,
+the one with the most posts left this ISO week (`posts_per_week` minus the brand's
+ideas already stamped with it since Monday UTC), a tie going to the `core` play,
+then the lower id. `null` when the platform has no acting play, with no approved
+Blueprint, and on ideas made before the field existed.
 
 | Status | Code | When |
 |---|---|---|
@@ -11010,8 +11019,14 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
 
 ```json
 {"objectives": {"g1": {"value": 3100.0, "as_of": "2026-11-21T05:00:00Z", "posts_counted": 4}},
- "plays": {"play:x-organic": {"value": 3100.0, "as_of": "2026-11-21T05:00:00Z", "posts_counted": 4},
-           "play:cold-email": {"value": null, "as_of": null, "posts_counted": 0}}}
+ "plays": {"play:x-organic": {"value": 3100.0, "as_of": "2026-11-21T05:00:00Z", "posts_counted": 4,
+                              "formats": [{"name": "x_thread", "posts": 6, "avg": 21.0,
+                                           "suggestion": "double_down",
+                                           "reason": "6 posts, 2.1x the play average"},
+                                          {"name": "meme", "posts": 3, "avg": 4.0,
+                                           "suggestion": null,
+                                           "reason": "3 posts, needs 5 for a call"}]},
+           "play:cold-email": {"value": null, "as_of": null, "posts_counted": 0, "formats": []}}}
 ```
 
 - `impressions_per_week`: the sum over posts published in the last 7 days, each at
@@ -11031,19 +11046,33 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
   the newest data point counted (the read time for clicks, which count live).
 - Scope: workspace and brand always. An objective with a `channel` counts only
   ideas on that platform, one without counts the whole brand. A play counts only
-  ideas on its own platform. Ideas carry no play yet, so an idea counts toward a
-  play only when that play is the platform's one active (`core` / `testing`)
-  acting post play; with two (`x-organic` and `x-authority` both on), each play's
-  post-based values are null and only the objectives show the platform's number.
-  `github_stars` is brand-wide for every play.
+  ideas on its own platform. An idea with a `play_id` (see Ideas) counts toward
+  exactly that play, and only when the play is on the idea's platform. An older
+  idea with no `play_id` counts toward a play only when that play is the
+  platform's one active (`core` / `testing`) acting post play; with two
+  (`x-organic` and `x-authority` both on), it counts toward neither and only the
+  objectives show it. `github_stars` is brand-wide for every play.
 - Per platform: the numbers of a post measured through Postiz (step 3 of the post
   metrics job) count on the channel of its Postiz provider, so a LinkedIn Page
   post counts toward `linkedin` and its plays. It counts at its own publish time,
-  separately from its idea. An idea's X-API snapshots count only on the idea's own
-  platform. An X idea cross-posted to a LinkedIn Page therefore counts once toward
-  the X play and once toward the LinkedIn play. A brand-wide objective counts
-  both. Tracked-link clicks stay with the idea's own platform. Personal LinkedIn
-  reports no stats in Postiz, so a LinkedIn play gets numbers only from Page posts.
+  separately from its idea, and carries its idea's `play_id` and `format`. On a
+  channel the `play_id`'s play is not on (an X idea cross-posted to a LinkedIn
+  Page), it counts as an idea with no `play_id` there. An idea's X-API snapshots
+  count only on the idea's own platform. An X idea cross-posted to a LinkedIn Page
+  therefore counts once toward the X play and once toward the LinkedIn play. A
+  brand-wide objective counts both. Tracked-link clicks stay with the idea's own
+  platform. Personal LinkedIn reports no stats in Postiz, so a LinkedIn play gets
+  numbers only from Page posts.
+- `formats` (plays only): one row per format seen on the play's counted ideas,
+  most `posts` first. `posts` is how many of them have a 7-day snapshot, `avg` their
+  engagement per post (the `engagement_per_post` rule above, whatever the play's
+  KPI key, since it is the only per-post key), `null` with none measured. The play
+  average is the same number over all the play's counted posts. Under 5 posts
+  `suggestion` is null and `reason` reads `"3 posts, needs 5 for a call"`; from 5,
+  the ratio to the play average is rounded to 2 places, a format at 1.3x or more
+  is `double_down`, at 0.7x or less is `drop`, anything between is null, and
+  `reason` gives that same rounded ratio (`"6 posts, 2.1x the play average"`). A play average
+  of 0 or null gives no suggestion and a null `reason`.
 
 ### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`
 

@@ -15,10 +15,16 @@
 # No key, or no data, is ``value: null``, never 0; a measured 0 is a number.
 # ``as_of`` is the newest data point counted (now for clicks, which count live).
 # Scope: an objective with a ``channel`` counts only ideas on that platform, one
-# without counts the whole brand. A play counts only ideas on its platform, and an
-# idea with no ``play_id`` counts toward a play only when that play is its
-# platform's one active acting post play (two or more: the play's post values are
-# null). Stars are brand-wide.
+# without counts the whole brand. A play counts only ideas on its platform: an idea
+# with a ``play_id`` counts toward exactly that play, and an old one with none only
+# when the play is its platform's one active acting post play (two or more: none of
+# them gets it). A Postiz entry carries its idea's ``play_id``; on a platform that
+# play is not on (a cross-post) it counts as unstamped. Stars are brand-wide.
+# Each play also lists ``formats``: per format seen on its counted ideas, the posts
+# with a 7-day snapshot and their engagement per post, and a suggestion against the
+# play's own average once a format has ``FORMAT_MIN_POSTS`` (the ratio, rounded to
+# 2 places, at or over ``DOUBLE_DOWN_RATIO`` is double_down, at or under
+# ``DROP_RATIO`` is drop).
 
 from __future__ import annotations
 
@@ -32,13 +38,17 @@ from pocketpaw_ee.cloud.growth.social import play_catalog
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import (
     BlueprintLiveResponse,
+    LiveFormatResponse,
+    LivePlayResponse,
     LiveValueResponse,
 )
 from pocketpaw_ee.cloud.growth.social.domain import GrowthBlueprint, LivePost, PostMetrics
 
 WEEK_DAYS = 7
 ENGAGEMENT_BUCKET = 7
-_ACTIVE = ("core", "testing")
+FORMAT_MIN_POSTS = 5
+DOUBLE_DOWN_RATIO = 1.3
+DROP_RATIO = 0.7
 
 
 def _newest(snaps: list[PostMetrics]) -> datetime | None:
@@ -107,15 +117,71 @@ _POST_METRICS: dict[str, Callable[[list[LivePost], datetime], LiveValueResponse]
 def _play_posts(
     play_id: str, acting: dict[str, list[str]], posts: list[LivePost]
 ) -> list[LivePost] | None:
-    """The posts counted toward a play; None when they cannot be told apart."""
+    """The posts counted toward a play; None for a play with no platform."""
     q = play_catalog.play(play_id)
     if q is None or q.channel is None:
         return None
+    unit = f"play:{play_id}"
     # Old idea with no play_id: it counts toward a play only when that play is its
     # platform's single active acting post play.
-    if acting.get(q.channel) != [play_id]:
-        return None
-    return [p for p in posts if p.platform == q.channel]
+    single = acting.get(q.channel) == [play_id]
+
+    def counts(p: LivePost) -> bool:
+        own = _own_play(p)
+        return own == unit if own else single
+
+    return [p for p in posts if p.platform == q.channel and counts(p)]
+
+
+def _own_play(p: LivePost) -> str | None:
+    """The post's ``play_id`` when that play is on the post's platform. A cross-post
+    (a Postiz LinkedIn Page copy of an X idea) reads as unstamped on its platform."""
+    q = play_catalog.play((p.play_id or "").removeprefix("play:"))
+    return p.play_id if q is not None and q.channel == p.platform else None
+
+
+def _n_posts(n: int) -> str:
+    return f"{n} post" if n == 1 else f"{n} posts"
+
+
+def suggest(posts: int, avg: float | None, play_avg: float | None) -> tuple[str | None, str | None]:
+    """A format's suggestion and its plain-text reason, against the play average."""
+    if posts < FORMAT_MIN_POSTS:
+        return None, f"{_n_posts(posts)}, needs {FORMAT_MIN_POSTS} for a call"
+    if avg is None or not play_avg:
+        return None, None
+    # Rounded once: the call and the printed reason always use the same number.
+    ratio = round(avg / play_avg, 2)
+    reason = f"{_n_posts(posts)}, {ratio:g}x the play average"
+    if ratio >= DOUBLE_DOWN_RATIO:
+        return "double_down", reason
+    if ratio <= DROP_RATIO:
+        return "drop", reason
+    return None, reason
+
+
+def formats(posts: list[LivePost], now: datetime) -> list[LiveFormatResponse]:
+    """Per format on ``posts``, most measured posts first. The average is engagement
+    per post: the only per-post KPI key, and the fallback for every other key."""
+    play_avg = engagement_per_post(posts, now).value
+    groups: dict[str, list[LivePost]] = {}
+    for p in posts:
+        if p.format:
+            groups.setdefault(p.format, []).append(p)
+    out = []
+    for name, group in groups.items():
+        m = engagement_per_post(group, now)
+        suggestion, reason = suggest(m.posts_counted, m.value, play_avg)
+        out.append(
+            LiveFormatResponse(
+                name=name,
+                posts=m.posts_counted,
+                avg=m.value,
+                suggestion=suggestion,
+                reason=reason,
+            )
+        )
+    return sorted(out, key=lambda f: (-f.posts, f.name))
 
 
 def compute(
@@ -137,17 +203,14 @@ def compute(
             scoped = [p for p in posts if p.platform == channel] if channel else posts
             objectives[o["id"]] = measure(o.get("metric_key"), scoped)
 
-    acting: dict[str, list[str]] = {}
+    acting = social_blueprint.acting_post_plays(bp)
+    plays = {}
     for play_id, body in bp.plays.items():
-        q = play_catalog.play(play_id)
-        if q and q.acts and q.cadence == "posts" and q.channel and body.get("status") in _ACTIVE:
-            acting.setdefault(q.channel, []).append(play_id)
-    plays = {
-        f"play:{play_id}": measure(
-            (body.get("kpi") or {}).get("metric_key"), _play_posts(play_id, acting, posts)
+        scoped = _play_posts(play_id, acting, posts)
+        value = measure((body.get("kpi") or {}).get("metric_key"), scoped)
+        plays[f"play:{play_id}"] = LivePlayResponse(
+            **value.model_dump(), formats=formats(scoped, now) if scoped else []
         )
-        for play_id, body in bp.plays.items()
-    }
     return BlueprintLiveResponse(objectives=objectives, plays=plays)
 
 

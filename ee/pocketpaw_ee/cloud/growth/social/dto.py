@@ -425,6 +425,7 @@ class SocialIdeaResponse(BaseModel):
     hook_type: str = ""
     experiment_id: str = ""
     blueprint_version: int | None = None
+    play_id: str | None = None
     created_at: str | None
     updated_at: str | None
 
