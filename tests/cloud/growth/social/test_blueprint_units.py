@@ -647,7 +647,7 @@ async def test_discarding_a_mis_added_play_removes_it_from_the_list(w1):
     assert "play:x-organic" in await _listed(w1, pid)
 
     state = await _drop(w1, pid, "play:x-organic", await _rev(pid, "play:x-organic"))
-    assert state == {"unit": "play:x-organic", "approved": None, "draft": None}
+    assert state == {"unit": "play:x-organic", "approved": None, "draft": None, "warnings": []}
     assert await _listed(w1, pid) == ["brand", "strategy"]
     assert await _chain(pid, "play:x-organic") == {1: "superseded"}
     # Adding it again opens the next version; the discarded one stays diffable.

@@ -9,6 +9,11 @@
 # goals). Objective ``baseline`` and ``deadline`` are optional because legacy
 # goals carry neither. An objective or play KPI may name a ``metric_key`` (one of
 # ``METRIC_KEYS``) that ``live`` knows how to measure; ``metric`` stays the label.
+# A play's ``formats`` are ``FormatEntry`` (name + winning / testing / dropped); a
+# stored plain string reads as a testing entry, so old rows need no migration
+# (``format_entries`` is the same tolerant read over a raw stored body). The play
+# decision fields (KPI ``pass_mark`` / ``expand_at``, ``decide_by``) are owner-only
+# and left out of a dump when unset, so an untouched old body dumps as it did.
 # Creator extras require a disclosure and usage rights (FTC).
 # ``BODY_MODELS`` maps a unit kind to its model; ``blueprint.py`` validates a body
 # against it and checks cross-unit goal references there (they need the store).
@@ -17,7 +22,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -31,6 +36,7 @@ from pydantic import (
 
 from pocketpaw_ee.cloud.growth.social.domain import (
     MAX_BLUEPRINT_GOALS,
+    MAX_BLUEPRINT_ITEMS,
     MAX_BLUEPRINT_LEARNINGS,
     MAX_BLUEPRINT_PILLARS,
     BlueprintChannelName,
@@ -42,6 +48,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     BlueprintPillarModel,
     BlueprintRoadmapModel,
     BlueprintSectionDiff,
+    _BlueprintItem,
     _BlueprintItems,
     _BlueprintText,
     _unique,
@@ -55,6 +62,8 @@ MetricKey = Literal[
     "impressions_per_week", "engagement_per_post", "link_clicks_per_week", "github_stars"
 ]
 METRIC_KEYS: tuple[str, ...] = get_args(MetricKey)
+FormatStatus = Literal["winning", "testing", "dropped"]
+FORMAT_STATUSES: tuple[str, ...] = get_args(FormatStatus)
 
 _Short = Annotated[str, StringConstraints(strip_whitespace=True, max_length=120)]
 _Id = Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)]
@@ -213,11 +222,42 @@ class PillarShare(_Body):
     weight: int = Field(default=0, ge=0, le=100)
 
 
+def _unset(v: Any) -> bool:
+    return v is None
+
+
 class Kpi(_Body):
     metric: _Short = ""
     baseline: _Amount | None = None
     target: _Amount | None = None
     metric_key: MetricKey | None = None
+    # Owner-only decision marks: the play passes its test at ``pass_mark`` and earns
+    # a second core play at ``expand_at``.
+    pass_mark: _Amount | None = Field(default=None, exclude_if=_unset)
+    expand_at: _Amount | None = Field(default=None, exclude_if=_unset)
+
+
+class FormatEntry(_Body):
+    name: _BlueprintItem
+    status: FormatStatus = "testing"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _plain_string(cls, v: Any) -> Any:
+        return {"name": v} if isinstance(v, str) else v
+
+
+def format_entries(raw: Any) -> list[tuple[str, str]]:
+    """``(name, status)`` per entry of a stored ``formats`` list, which may hold plain
+    strings (old rows) or ``{name, status}`` dicts; anything unreadable is skipped."""
+    out = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str) and item.strip():
+            out.append((item.strip(), "testing"))
+        elif isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip():
+            status = item.get("status")
+            out.append((item["name"].strip(), status if status in FORMAT_STATUSES else "testing"))
+    return out
 
 
 class SeoExtras(_Body):
@@ -264,7 +304,9 @@ class PlayBody(_Body):
     role: _BlueprintText = ""
     goal_id: _Id | None = None
     audience: _BlueprintText = ""
-    formats: _BlueprintItems = Field(default_factory=list)
+    formats: Annotated[list[FormatEntry], Field(max_length=MAX_BLUEPRINT_ITEMS)] = Field(
+        default_factory=list
+    )
     pillar_mix: Annotated[list[PillarShare], Field(max_length=MAX_BLUEPRINT_PILLARS)] = Field(
         default_factory=list
     )
@@ -281,6 +323,12 @@ class PlayBody(_Body):
     seo: SeoExtras | None = None
     paid: PaidExtras | None = None
     creator: CreatorExtras | None = None
+    decide_by: date | None = Field(default=None, exclude_if=_unset)
+
+    @model_validator(mode="after")
+    def _distinct(self) -> PlayBody:
+        _unique([f.name for f in self.formats], "format names")
+        return self
 
 
 BODY_MODELS: dict[str, type[_Body]] = {
@@ -321,9 +369,23 @@ class BlueprintUnitRowResponse(BaseModel):
 
 
 class BlueprintUnitStateResponse(BaseModel):
+    """``warnings``: plain-text notes that never block the write (a second core
+    play while another is under its ``expand_at``)."""
+
     unit: str
     approved: BlueprintUnitRowResponse | None
     draft: BlueprintUnitRowResponse | None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SetFormatStatusRequest(BaseModel):
+    """``POST /blueprint/units/{unit}/formats/{name}/status``: the new status and the
+    ``rev`` of the approved row it was read at (stale is a 409)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: FormatStatus
+    rev: int = Field(ge=0)
 
 
 class BranchResponse(BaseModel):

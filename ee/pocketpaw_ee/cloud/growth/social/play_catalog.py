@@ -11,6 +11,7 @@
 # cadence it feeds (``cadence`` says which number: posts or sends). ``peso`` is a
 # hidden tag used only for a coverage check.
 # ``DEFAULT_BRANCHES`` is what a brand sees when its ``growth_branches`` is empty.
+# ``acting_post_plays`` groups a Blueprint's active acting post plays by platform.
 # Pure Python, no Pydantic or Beanie, so dto, service and agents may import it.
 
 from __future__ import annotations
@@ -232,6 +233,18 @@ def acting_plays() -> tuple[Play, ...]:
     return tuple(p for p in PLAYS if p.acts)
 
 
+def acting_post_plays(plays: dict[str, dict]) -> dict[str, list[str]]:
+    """Per platform, the ids among ``plays`` (play id -> stored body) of the active
+    (core / testing) acting post plays."""
+    out: dict[str, list[str]] = {}
+    for play_id, body in plays.items():
+        q = play(play_id)
+        active = body.get("status") in ("core", "testing")
+        if q and q.acts and q.cadence == "posts" and q.channel and active:
+            out.setdefault(q.channel, []).append(play_id)
+    return out
+
+
 __all__ = [
     "BRANCHES",
     "BRANCH_IDS",
@@ -241,5 +254,6 @@ __all__ = [
     "Branch",
     "Play",
     "acting_plays",
+    "acting_post_plays",
     "play",
 ]
