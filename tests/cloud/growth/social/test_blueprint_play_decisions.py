@@ -11,7 +11,10 @@
 # (role, audience there, formats by status, the rule); dropped formats leave the
 # allowed list and the parsed ideas, and when every listed format is dropped the
 # rest of the table stays; the status route (ok, stale 409, unknown 404, non-play
-# 422, audit event, draft mirrored so a later approve keeps it); seed, a channel
+# 422, audit event, draft mirrored so a later approve keeps it; a fixed-table format
+# the play does not list is appended in the table's spelling, on the approved row
+# and on an open draft only when it was appended, audited as old None under the
+# stored spelling); seed, a channel
 # save and regenerate never set or lose the decision marks; an old string-format
 # play row opens no draft on an unrelated whole-page save; the second-core warning
 # (no live value, under, at or over, no expand_at, a testing play, on approve).
@@ -312,6 +315,83 @@ async def test_status_route_leaves_a_draft_that_does_not_list_the_format(w1):
     assert state["draft"]["rev"] == rev
 
 
+# A play listing no formats (the live brand's only play): Results marks the formats
+# its posts used, which are fixed-table formats the play does not list yet.
+_EMPTY = {"status": "core", "formats": []}
+
+
+async def test_status_route_appends_a_table_format_the_play_does_not_list(w1):
+    pid = await _approved_play(w1, _EMPTY)
+    state = await _status(w1, pid, XO, "x_thread", "dropped", await _approved_rev(pid))
+    assert state["approved"]["body"]["formats"] == [{"name": "x_thread", "status": "dropped"}]
+    assert state["draft"] is None
+    events = await audit_service.list_target_events(
+        "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
+    )
+    assert [e.metadata for e in events] == [
+        {"unit": XO, "format": "x_thread", "old": None, "new": "dropped"}
+    ]
+    bp = await social_blueprint.approved_for("w1", pid)
+    assert allowed_formats("x", bp) == ("x_post",)
+
+
+async def test_an_appended_format_takes_the_table_spelling_and_is_never_doubled(w1):
+    pid = await _approved_play(w1, _EMPTY)
+    await _status(w1, pid, XO, "X Post", "winning", await _approved_rev(pid))
+    state = await _status(w1, pid, XO, "x-post", "dropped", await _approved_rev(pid))
+    assert state["approved"]["body"]["formats"] == [{"name": "x_post", "status": "dropped"}]
+    events = await audit_service.list_target_events(
+        "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
+    )
+    assert {(e.metadata["format"], e.metadata["old"]) for e in events} == {
+        ("x_post", None),
+        ("x_post", "winning"),
+    }
+
+
+async def test_an_open_draft_gets_the_appended_format_so_approve_keeps_it(w1):
+    pid = await _approved_play(w1, _EMPTY)
+    await _put(w1, pid, XO, {**_EMPTY, "role": "Edited"}, 1)
+    state = await _status(w1, pid, XO, "X_Thread", "dropped", await _approved_rev(pid))
+    assert state["draft"]["body"]["formats"] == [{"name": "x_thread", "status": "dropped"}]
+    assert state["draft"]["body"]["role"] == "Edited"
+    approved = await _ok(w1, pid, XO)
+    assert approved["approved"]["body"]["formats"] == [{"name": "x_thread", "status": "dropped"}]
+
+
+async def test_a_play_holding_the_most_formats_refuses_another(w1):
+    full = {"status": "core", "formats": [f"f{i:02d}" for i in range(20)]}
+    pid = await _approved_play(w1, full)
+    rev = await _approved_rev(pid)
+    resp = await w1.post(
+        f"{UNITS}/{XO}/formats/x_post/status",
+        params={"profile_id": pid},
+        json={"status": "dropped", "rev": rev},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "social.blueprint_formats_full" in resp.text
+    approved = await UnitDoc.find_one({"profile_id": pid, "unit": XO, "status": "approved"})
+    assert (approved.rev, len(approved.body["formats"])) == (rev, 20)
+    events = await audit_service.list_target_events(
+        "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
+    )
+    assert events == []
+
+
+async def test_a_name_outside_the_platform_table_is_still_a_404(w1):
+    pid = await _approved_play(w1, _EMPTY)
+    rev = await _approved_rev(pid)
+    await _status(w1, pid, XO, "reels", "dropped", rev, 404)
+    await _status(w1, pid, XO, "hook_demo", "dropped", rev, 404)  # a video format, not X's
+    await _status(w1, pid, XO, "reddit_post", "dropped", rev, 404)
+    approved = await UnitDoc.find_one({"profile_id": pid, "unit": XO, "status": "approved"})
+    assert (approved.rev, approved.body["formats"]) == (rev, [])
+    events = await audit_service.list_target_events(
+        "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
+    )
+    assert events == []
+
+
 # --- owner-only decision marks ---------------------------------------------------------------
 
 
@@ -483,6 +563,14 @@ async def test_another_workspace_cannot_touch_the_play(w1, w2):
     approved = await UnitDoc.find_one({"profile_id": pid, "unit": XO, "status": "approved"})
     assert approved.rev == rev
     assert approved.body["formats"][1] == {"name": "x_thread", "status": "testing"}
+
+
+async def test_another_workspace_cannot_append_a_format_either(w1, w2):
+    pid = await _approved_play(w1, _EMPTY)
+    rev = await _approved_rev(pid)
+    await _status(w2, pid, XO, "x_thread", "dropped", rev, 404)
+    approved = await UnitDoc.find_one({"profile_id": pid, "unit": XO, "status": "approved"})
+    assert (approved.rev, approved.body["formats"]) == (rev, [])
 
 
 # --- every format dropped --------------------------------------------------------------------
