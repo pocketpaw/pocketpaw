@@ -10595,6 +10595,25 @@ It only reads; nothing in it posts or writes to X.
    that age is already stored. Snapshots are append-only (one per idea and age,
    never updated); a missed smaller age is not filled in later. A post X did
    not return gets no snapshot that day.
+3. When Postiz is configured (the X token is not needed), each post of an idea
+   created in the last 61 days that Postiz shows as published on a platform it
+   has per-post stats for gets the same age snapshots, read from Postiz's
+   `GET /public/v1/analytics/post/{postId}`. Those platforms are LinkedIn Pages,
+   Facebook, Instagram, Threads, YouTube, TikTok, Pinterest, Dribbble and Google
+   Business. X posts stay on step 2. Personal LinkedIn reports no stats in
+   Postiz v2.25.0 and is skipped. Postiz labels map onto our columns
+   (Impressions or Views to impressions, Likes or Reactions to likes, Replies or
+   Comments to replies, Reposts, Retweets or Shares to reposts, Quotes, and
+   Bookmarks or Saves to bookmarks). Other labels are dropped, and a post with
+   no known label gets no row. The step makes at most 50 stats calls a run;
+   whatever is left waits for the next run. One posts-list read per profile is
+   shared with step 1.
+
+Each snapshot row carries `platform` (`"x"`, or the Postiz provider id such as
+`"linkedin-page"`) and either `x_post_id` or `postiz_post_id`. Rows written
+before `platform` existed read as `"x"`. A row is unique per idea, platform,
+Postiz post and age. The weekly review and the morning summary below read only
+the X rows for now.
 
 X is read with `POCKETPAW_GROWTH_X_BEARER_TOKEN` (an X API app bearer token;
 unset means no reads and no snapshots), in batches of up to 100 posts, one read

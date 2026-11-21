@@ -38,8 +38,8 @@
   {
     "label": "tenancy: the review's snapshot read drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "        return []\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():",
-    "replace": "        return []\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"idea\": {\"$in\": ids}}).to_list():",
+    "find": "    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find(\n        {\"workspace\": workspace_id, \"idea\": {\"$in\": ids}, **_X_ROWS}\n",
+    "replace": "    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find(\n        {\"idea\": {\"$in\": ids}, **_X_ROWS}\n",
     "tests": [
       "tests/cloud/growth/social/test_learning_loop.py"
     ]
@@ -354,8 +354,8 @@
   {
     "label": "tenancy: latest_metrics drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    rows = await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": idea_ids}}).to_list()",
-    "replace": "    rows = await _MetricDoc.find({\"idea\": {\"$in\": idea_ids}}).to_list()",
+    "find": "    rows = await _MetricDoc.find(\n        {\"workspace\": workspace_id, \"idea\": {\"$in\": idea_ids}, **_X_ROWS}\n",
+    "replace": "    rows = await _MetricDoc.find(\n        {\"idea\": {\"$in\": idea_ids}, **_X_ROWS}\n",
     "tests": [
       "tests/cloud/growth/social/test_metrics.py"
     ]
@@ -1080,6 +1080,60 @@
     "replace": "        weekly = {c.channel: c.posts_per_week for c in phase.cadence}\n",
     "tests": [
       "tests/cloud/growth/social/test_roadmap_plan.py"
+    ]
+  },
+  {
+    "label": "postiz stats: an empty payload stores a row of zeros",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            if not counts:\n                continue  # no stats (unsupported, not ready, lost): never store zeros\n",
+    "replace": "            if False:\n                continue\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: an unknown label is kept under its own name",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/metrics.py",
+    "find": "        ours = POSTIZ_LABELS.get(label.strip().lower())\n",
+    "replace": "        ours = POSTIZ_LABELS.get(label.strip().lower(), label)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: the per-run call cap is ignored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            if budget[0] <= 0:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: X posts are read through Postiz as well",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/metrics.py",
+    "find": "        \"linkedin-page\",\n        \"facebook\",\n",
+    "replace": "        \"x\",\n        \"linkedin\",\n        \"linkedin-page\",\n        \"facebook\",\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: the superseded unique index is never dropped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    await _drop_legacy_metric_index()\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
+    ]
+  },
+  {
+    "label": "postiz stats: latest_metrics returns a non-X row as the X snapshot",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    rows = await _MetricDoc.find(\n        {\"workspace\": workspace_id, \"idea\": {\"$in\": idea_ids}, **_X_ROWS}\n",
+    "replace": "    rows = await _MetricDoc.find(\n        {\"workspace\": workspace_id, \"idea\": {\"$in\": idea_ids}}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_postiz_metrics.py"
     ]
   }
 ]

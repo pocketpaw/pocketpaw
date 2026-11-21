@@ -29,7 +29,9 @@
 # retry; ``run_reply_drafts`` drafts reply cards a person posts by hand from an
 # intent link; ``run_repo_metrics`` stores one RepoMetric per repo and day
 # (reruns refresh in place); ``run_post_metrics`` stores append-only X snapshots
-# through the capped, read-only ``x_api``. Nothing here posts to X on its own.
+# through the capped, read-only ``x_api``, plus snapshots of other platforms' posts
+# from Postiz post stats (at most ``POSTIZ_STATS_MAX_CALLS`` a run). The review and
+# ``latest_metrics`` read X rows only. Nothing here posts to X on its own.
 #
 # Accounts and posting: each profile has its own Postiz org (created on first
 # connect, never on a read; API key stored encrypted and checked first, since org
@@ -1448,7 +1450,9 @@ async def _post_rows(
         return []
     ids = [str(d.id) for d in ideas]
     snaps: dict[str, list[PostMetrics]] = {}
-    for m in await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}}).to_list():
+    for m in await _MetricDoc.find(
+        {"workspace": workspace_id, "idea": {"$in": ids}, **_X_ROWS}
+    ).to_list():
         snaps.setdefault(m.idea, []).append(
             PostMetrics(
                 workspace_id=m.workspace,
@@ -3255,6 +3259,12 @@ async def list_posts(
 
 PUBLISHED_LOOKBACK = timedelta(days=30)
 METRIC_LATE_DAYS = 3
+# ponytail: one global cap per run, first come first served; per-org budgets if one
+# brand's backlog ever starves the others.
+POSTIZ_STATS_MAX_CALLS = 50
+# X snapshot rows; rows written before ``platform`` existed have no key and are X.
+_X_ROWS: dict[str, Any] = {"platform": {"$in": ["x", None]}}
+_LEGACY_METRIC_INDEX = "workspace_1_idea_1_age_bucket_1"
 _X_STATUS_URL = re.compile(r"^https?://(?:[\w-]+\.)?(?:x|twitter)\.com/(?:[^/?#]+/)*status/(\d+)")
 
 
@@ -3280,19 +3290,45 @@ def due_bucket(published_at: datetime, now: datetime) -> int | None:
     return reached[-1] if reached else None
 
 
+_ProfilePosts = dict[tuple[str, str], tuple[str, dict[str, dict[str, Any]]] | None]
+
+
+async def _profile_posts(
+    postiz: PostizClient, workspace_id: str, profile: str, now: datetime, cache: _ProfilePosts
+) -> tuple[str, dict[str, dict[str, Any]]] | None:
+    """``(api_key, {post_id: post})`` for one profile's Postiz org, read once per sweep
+    and shared by its steps; None when the profile has no org. The window reaches back
+    far enough for both the published lookup and the last metrics bucket."""
+    key = (workspace_id, profile)
+    if key not in cache:
+        org = await _postiz_org(workspace_id, profile)
+        if org is None:
+            cache[key] = None
+        else:
+            api_key = decrypt(org.api_key_enc)
+            back = max(
+                PUBLISHED_LOOKBACK, timedelta(days=METRIC_AGE_BUCKETS[-1] + METRIC_LATE_DAYS)
+            )
+            raw = await postiz.list_posts(
+                api_key, (now - back).isoformat(), (now + POSTS_LOOKAHEAD).isoformat()
+            )
+            cache[key] = (api_key, {str(p.get("id")): p for p in raw if p.get("id")})
+    return cache[key]
+
+
 async def _fill_published(
-    postiz: PostizClient, workspace_id: str, profile: str, docs: list[_IdeaDoc], now: datetime
+    postiz: PostizClient,
+    workspace_id: str,
+    profile: str,
+    docs: list[_IdeaDoc],
+    now: datetime,
+    cache: _ProfilePosts,
 ) -> int:
     """Record the live X post of each idea Postiz reports as published. Returns how many."""
-    org = await _postiz_org(workspace_id, profile)
-    if org is None:
+    read = await _profile_posts(postiz, workspace_id, profile, now, cache)
+    if read is None:
         return 0
-    raw = await postiz.list_posts(
-        decrypt(org.api_key_enc),
-        (now - PUBLISHED_LOOKBACK).isoformat(),
-        (now + POSTS_LOOKAHEAD).isoformat(),
-    )
-    posts = {str(p.get("id")): p for p in raw if p.get("id")}
+    _, posts = read
     filled = 0
     for doc in docs:
         for pid in doc.post_ids:
@@ -3322,7 +3358,9 @@ async def _snapshot_workspace(
     ids = [str(d.id) for d in docs]
     stored = {
         (m.idea, m.age_bucket)
-        for m in await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}}).to_list()
+        for m in await _MetricDoc.find(
+            {"workspace": workspace_id, "idea": {"$in": ids}, **_X_ROWS}
+        ).to_list()
     }
     due: list[tuple[_IdeaDoc, int]] = []
     for doc in docs:
@@ -3354,25 +3392,157 @@ async def _snapshot_workspace(
     return len(due), saved
 
 
+async def _drop_legacy_metric_index() -> None:
+    """Drop the (workspace, idea, age_bucket) unique index the platform-aware key
+    replaced. Beanie never drops an index a model stopped declaring, and the old one
+    would reject an idea's second post in a bucket (its X row and its LinkedIn Page
+    row) as a DuplicateKeyError the sweep swallows. Exact shape only; idempotent."""
+    coll = _MetricDoc.get_pymongo_collection()
+    legacy = (await coll.index_information()).get(_LEGACY_METRIC_INDEX)
+    if (
+        legacy
+        and list(legacy.get("key", [])) == [("workspace", 1), ("idea", 1), ("age_bucket", 1)]
+        and legacy.get("unique") is True
+    ):
+        await coll.drop_index(_LEGACY_METRIC_INDEX)
+        logger.warning("post metrics: dropped superseded index %s", _LEGACY_METRIC_INDEX)
+
+
+async def _snapshot_postiz_profile(
+    postiz: PostizClient,
+    workspace_id: str,
+    profile: str,
+    docs: list[_IdeaDoc],
+    now: datetime,
+    budget: list[int],
+    cache: _ProfilePosts,
+) -> tuple[int, int]:
+    """Store the due bucket of each published non-X post of these ideas that Postiz
+    has stats for, from one posts-list read and one stats call per post (``budget[0]``
+    calls left this run, spent even when a call fails). Returns (due, stored)."""
+    from pocketpaw_ee.cloud.growth.social.metrics import POSTIZ_STATS_PLATFORMS, postiz_counts
+
+    read = await _profile_posts(postiz, workspace_id, profile, now, cache)
+    if read is None:
+        return 0, 0
+    api_key, posts = read
+    stored = {
+        (m.idea, m.postiz_post_id, m.age_bucket)
+        for m in await _MetricDoc.find(
+            {
+                "workspace": workspace_id,
+                "idea": {"$in": [str(d.id) for d in docs]},
+                "platform": {"$nin": ["x", None]},
+            }
+        ).to_list()
+    }
+    due = saved = 0
+    for doc in docs:
+        for pid in doc.post_ids:
+            post = posts.get(pid) or {}
+            integration = post.get("integration")
+            platform = (
+                str(integration.get("providerIdentifier") or "")
+                if isinstance(integration, dict)
+                else ""
+            )
+            if post.get("state") != "PUBLISHED" or platform not in POSTIZ_STATS_PLATFORMS:
+                continue
+            bucket = due_bucket(_parse_iso(post.get("publishDate"), now), now)
+            if bucket is None or (str(doc.id), pid, bucket) in stored:
+                continue
+            due += 1
+            if budget[0] <= 0:
+                continue
+            budget[0] -= 1
+            try:
+                counts = postiz_counts(await postiz.post_analytics(api_key, pid, bucket))
+            except PostizError as exc:
+                logger.warning("post metrics: stats for a %s post failed (%s)", platform, exc.code)
+                continue
+            if not counts:
+                continue  # no stats (unsupported, not ready, lost): never store zeros
+            try:
+                await _MetricDoc(
+                    workspace=workspace_id,
+                    profile=doc.profile,
+                    idea=str(doc.id),
+                    platform=platform,
+                    postiz_post_id=pid,
+                    age_bucket=bucket,
+                    captured_at=now,
+                    **{k: counts.get(k, 0) for k in METRIC_FIELDS},
+                ).insert()
+                saved += 1
+            except DuplicateKeyError:
+                pass  # another run stored this bucket first; snapshots are never overwritten
+    # no-event: an append-only metrics log; nothing listens, the Today strip re-fetches.
+    return due, saved
+
+
+async def _run_postiz_metrics(
+    postiz: PostizClient, now: datetime, counts: dict[str, int], cache: _ProfilePosts
+) -> None:
+    """The non-X step: snapshot the published non-X posts of every idea with Postiz
+    ``post_ids`` created recently enough for a post to still have a bucket due."""
+    await _drop_legacy_metric_index()
+    window = PUBLISHED_LOOKBACK + timedelta(days=METRIC_AGE_BUCKETS[-1] + METRIC_LATE_DAYS)
+    # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+    ideas = await _IdeaDoc.find(
+        {"post_ids.0": {"$exists": True}, "createdAt": {"$gte": now - window}}
+    ).to_list()
+    groups: dict[tuple[str, str], list[_IdeaDoc]] = {}
+    for doc in ideas:
+        groups.setdefault((doc.workspace, doc.profile), []).append(doc)
+    budget = [POSTIZ_STATS_MAX_CALLS]
+    for (workspace_id, profile), docs in groups.items():
+        try:
+            due, saved = await _snapshot_postiz_profile(
+                postiz, workspace_id, profile, docs, now, budget, cache
+            )
+            counts["postiz_due"] += due
+            counts["postiz_stored"] += saved
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("post metrics: postiz stats %s failed", workspace_id, exc_info=True)
+
+
 async def run_post_metrics(now: datetime | None = None) -> dict[str, int]:
-    """Record what got published and snapshot its X metrics, for every workspace.
+    """Record what got published and snapshot its metrics, for every workspace.
 
     Step A: X ideas with Postiz ``post_ids`` and no ``x_post_id`` (created in the last
     ``PUBLISHED_LOOKBACK``) get ``published_url`` / ``published_at`` / ``x_post_id`` from
     the published Postiz post, when Postiz is configured. Step B: X ideas published within
     the last 28 + ``METRIC_LATE_DAYS`` days get one snapshot of their ``due_bucket`` when
-    that bucket is not stored yet, read in one batched call per workspace. A failing
-    profile or workspace never stops the rest. Read-only towards X. Runs from the growth
-    worker's 07:00 UTC cron."""
+    that bucket is not stored yet, read in one batched call per workspace. Step C (needs
+    Postiz, not the X fn): every published post of a recent idea on a platform Postiz
+    has stats for (not X) gets its due bucket from ``post_analytics``, at most
+    ``POSTIZ_STATS_MAX_CALLS`` calls a run. A failing profile or workspace never stops
+    the rest. Read-only towards X. Runs from the growth worker's 07:00 UTC cron."""
     from pocketpaw_ee.cloud.growth.social import metrics as social_metrics
 
     now = now or datetime.now(UTC)
-    counts = {"filled": 0, "workspaces": 0, "due": 0, "stored": 0, "failed": 0}
+    counts = {
+        "filled": 0,
+        "workspaces": 0,
+        "due": 0,
+        "stored": 0,
+        "failed": 0,
+        "postiz_due": 0,
+        "postiz_stored": 0,
+    }
+    postiz = resolve_postiz()
+    cache: _ProfilePosts = {}
+    if postiz is not None:
+        try:
+            await _run_postiz_metrics(postiz, now, counts, cache)
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("post metrics: postiz stats step failed", exc_info=True)
     metrics_fn = social_metrics.resolve_metrics_fn()
     if metrics_fn is None:
         return counts
 
-    postiz = resolve_postiz()
     if postiz is not None:
         # global-read: the sweep runs for every workspace; each doc carries its own tenant.
         pending = await _IdeaDoc.find(
@@ -3388,7 +3558,9 @@ async def run_post_metrics(now: datetime | None = None) -> dict[str, int]:
             groups.setdefault((doc.workspace, doc.profile), []).append(doc)
         for (workspace_id, profile), docs in groups.items():
             try:
-                counts["filled"] += await _fill_published(postiz, workspace_id, profile, docs, now)
+                counts["filled"] += await _fill_published(
+                    postiz, workspace_id, profile, docs, now, cache
+                )
             except Exception:  # noqa: BLE001
                 counts["failed"] += 1
                 logger.warning("post metrics: lookup %s failed", workspace_id, exc_info=True)
@@ -3416,12 +3588,15 @@ async def run_post_metrics(now: datetime | None = None) -> dict[str, int]:
             counts["failed"] += 1
             logger.warning("post metrics: workspace=%s failed", workspace_id, exc_info=True)
     logger.info(
-        "post metrics: filled=%d workspaces=%d due=%d stored=%d failed=%d",
+        "post metrics: filled=%d workspaces=%d due=%d stored=%d failed=%d "
+        "postiz_due=%d postiz_stored=%d",
         counts["filled"],
         counts["workspaces"],
         counts["due"],
         counts["stored"],
         counts["failed"],
+        counts["postiz_due"],
+        counts["postiz_stored"],
     )
     return counts
 
@@ -3429,7 +3604,9 @@ async def run_post_metrics(now: datetime | None = None) -> dict[str, int]:
 async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, PostMetrics]:
     """The most recently captured snapshot of each idea, within ``workspace_id`` only."""
     latest: dict[str, _MetricDoc] = {}
-    rows = await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": idea_ids}}).to_list()
+    rows = await _MetricDoc.find(
+        {"workspace": workspace_id, "idea": {"$in": idea_ids}, **_X_ROWS}
+    ).to_list()
     for m in rows:
         if m.idea not in latest or _aware(m.captured_at) > _aware(latest[m.idea].captured_at):
             latest[m.idea] = m

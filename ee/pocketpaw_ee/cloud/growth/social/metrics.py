@@ -9,6 +9,12 @@
 # contributes nothing: the caller must not store zeros for a post it could not
 # read, because snapshots are append-only. Read-only; nothing here writes to X.
 # ``resolve_metrics_fn`` is None until the worker or a test installs one.
+#
+# Other platforms are read through Postiz (``PostizClient.post_analytics``):
+# ``POSTIZ_STATS_PLATFORMS`` are the providers whose Postiz v2.25.0 integration
+# reports per-post stats (X stays on its direct API; personal LinkedIn reports
+# none), and ``postiz_counts`` maps Postiz labels onto ``METRIC_FIELDS``
+# (exact, case-insensitive; unknown labels dropped).
 
 from __future__ import annotations
 
@@ -27,6 +33,52 @@ METRIC_FIELDS: dict[str, str] = {
     "quotes": "quote_count",
     "bookmarks": "bookmark_count",
 }
+
+# Postiz provider ids with per-post stats, minus "x" (read from X directly).
+POSTIZ_STATS_PLATFORMS = frozenset(
+    {
+        "linkedin-page",
+        "facebook",
+        "instagram",
+        "instagram-standalone",
+        "threads",
+        "youtube",
+        "tiktok",
+        "tiktok-business",
+        "pinterest",
+        "dribbble",
+        "gmb",
+    }
+)
+
+# Postiz series label (lowercased) -> our name. Several platforms name one metric
+# differently (Views / Impressions, Comments / Replies, Shares / Reposts).
+POSTIZ_LABELS: dict[str, str] = {
+    "impressions": "impressions",
+    "views": "impressions",
+    "likes": "likes",
+    "reactions": "likes",
+    "replies": "replies",
+    "comments": "replies",
+    "reposts": "reposts",
+    "retweets": "reposts",
+    "shares": "reposts",
+    "quotes": "quotes",
+    "bookmarks": "bookmarks",
+    "saves": "bookmarks",
+}
+
+
+def postiz_counts(totals: dict[str, int]) -> dict[str, int]:
+    """Our metric counts from Postiz ``{label: total}``; ``{}`` when no label is known.
+    When two labels land on one name, the first one Postiz sent wins."""
+    out: dict[str, int] = {}
+    for label, total in totals.items():
+        ours = POSTIZ_LABELS.get(label.strip().lower())
+        if ours is not None and ours not in out:
+            out[ours] = _count(total)
+    return out
+
 
 XMetricsFn = Callable[[str, list[str]], Awaitable[dict[str, dict[str, int]]]]
 
@@ -68,8 +120,11 @@ def resolve_metrics_fn() -> XMetricsFn | None:
 
 __all__ = [
     "METRIC_FIELDS",
+    "POSTIZ_LABELS",
+    "POSTIZ_STATS_PLATFORMS",
     "X_BATCH_SIZE",
     "XMetricsFn",
+    "postiz_counts",
     "resolve_metrics_fn",
     "set_production_metrics_fn",
     "x_post_metrics",
