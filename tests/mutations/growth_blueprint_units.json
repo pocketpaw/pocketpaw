@@ -672,5 +672,104 @@
       "tests/cloud/growth/social/test_blueprint_live.py",
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
+  },
+  {
+    "label": "formats: a plain string format no longer reads as a testing entry",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint_units_dto.py",
+    "find": "        return {\"name\": v} if isinstance(v, str) else v\n",
+    "replace": "        return v\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: a stale rev writes anyway",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if body.rev != approved.rev:\n        raise _stale()\n",
+    "replace": "    pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: an unknown format name is not a 404",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if old is None:\n        raise NotFound(\"social_blueprint_format\", name)\n",
+    "replace": "    pass\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: the open draft is not mirrored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if listed is not None:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "format status: no audit event recorded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    await audit_service.record(\n        workspace_id,\n",
+    "replace": "    0 and await audit_service.record(\n        workspace_id,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "second core: a play at its expand_at still warns",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if value is not None and value >= expand_at:\n",
+    "replace": "        if value is not None and value > expand_at:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "second core: the play warns about itself",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if f\"{_PLAY}{pid}\" != unit and b.get(\"status\") == \"core\"\n",
+    "replace": "        if b.get(\"status\") == \"core\"\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "whole-page save: an old string-format play opens a draft",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "        if unit not in bodies or new_body != _normal(unit, bodies[unit])\n",
+    "replace": "        if new_body != bodies.get(unit)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: dropped formats stay allowed",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "        if status == \"dropped\"\n",
+    "replace": "        if status == \"never\"\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: every format dropped brings the whole table back",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "    return tuple(f for f in table if f not in dropped)\n",
+    "replace": "    return tuple(f for f in table if f not in dropped) or table\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
+    "label": "ideas: a play with no formats changes the prompt",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "        if not entries:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
   }
 ]
