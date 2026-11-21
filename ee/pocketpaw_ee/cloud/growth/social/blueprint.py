@@ -1361,7 +1361,9 @@ async def set_format_status(
         raise NotFound("social_blueprint_format", name)
     if len(new_body["formats"]) > MAX_BLUEPRINT_ITEMS:
         raise ValidationError(
-            "social.blueprint_formats_full", "This play already tracks the most formats", {}
+            "social.blueprint_formats_full",
+            "This play already tracks the most formats",
+            {"unit": unit},
         )
     match = {
         "_id": approved.id,

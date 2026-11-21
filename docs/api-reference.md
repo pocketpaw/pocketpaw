@@ -11030,8 +11030,8 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   seed never sets them, a channel edit carries them, regenerate never writes a play.
 - `POST …/{unit}/formats/{name}/status` with `{status, rev}`, `rev` being the APPROVED
   row's: writes that status into the approved play straight away and returns the
-  unit's `{unit, approved, draft, warnings}`. `name` matches ignoring case, spaces,
-  hyphens and underscores (`X Post`, `x-post` and `x_post` are one format). A name
+  unit's `{unit, approved, draft, warnings}`. `name` matches ignoring case, with
+  spaces, hyphens and underscores treated alike (`X Post`, `x-post` and `x_post` are one format). A name
   the play does not list but its platform's fixed format table has (`x_post` /
   `x_thread` on X, `reddit_post` on Reddit, the video formats elsewhere: the table
   the ideas agent picks from) is appended as `{name, status}`, spelled as the table

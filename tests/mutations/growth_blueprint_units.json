@@ -836,6 +836,15 @@
     ]
   },
   {
+    "label": "format status: a play past the format cap takes one more",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
+    "find": "    if len(new_body[\"formats\"]) > MAX_BLUEPRINT_ITEMS:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_decisions.py"
+    ]
+  },
+  {
     "label": "units read: an old string-format play goes out raw",
     "file": "ee/pocketpaw_ee/cloud/growth/social/blueprint.py",
     "find": "        body=_wire_body(doc.unit, doc.body),\n",

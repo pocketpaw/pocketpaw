@@ -354,6 +354,25 @@ async def test_an_open_draft_gets_the_appended_format_so_approve_keeps_it(w1):
     assert approved["approved"]["body"]["formats"] == [{"name": "x_thread", "status": "dropped"}]
 
 
+async def test_a_play_holding_the_most_formats_refuses_another(w1):
+    full = {"status": "core", "formats": [f"f{i:02d}" for i in range(20)]}
+    pid = await _approved_play(w1, full)
+    rev = await _approved_rev(pid)
+    resp = await w1.post(
+        f"{UNITS}/{XO}/formats/x_post/status",
+        params={"profile_id": pid},
+        json={"status": "dropped", "rev": rev},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "social.blueprint_formats_full" in resp.text
+    approved = await UnitDoc.find_one({"profile_id": pid, "unit": XO, "status": "approved"})
+    assert (approved.rev, len(approved.body["formats"])) == (rev, 20)
+    events = await audit_service.list_target_events(
+        "w1", target_type="growth_blueprint_unit", target_id=f"{pid}:{XO}"
+    )
+    assert events == []
+
+
 async def test_a_name_outside_the_platform_table_is_still_a_404(w1):
     pid = await _approved_play(w1, _EMPTY)
     rev = await _approved_rev(pid)
