@@ -272,6 +272,11 @@ async def test_a_play_with_no_counted_ideas_has_no_formats(w1):
         (5, 7.0, 10.0, ("drop", "5 posts, 0.7x the play average")),
         (5, 12.9, 10.0, (None, "5 posts, 1.29x the play average")),
         (5, 7.1, 10.0, (None, "5 posts, 0.71x the play average")),
+        # Ratios that are not exact in floating point still hit the edge.
+        (5, 117 / 5, 126 / 7, ("double_down", "5 posts, 1.3x the play average")),
+        (5, 21 / 5, 36 / 6, ("drop", "5 posts, 0.7x the play average")),
+        (5, 12.96, 10.0, ("double_down", "5 posts, 1.3x the play average")),
+        (5, 12.94, 10.0, (None, "5 posts, 1.29x the play average")),
         (6, 21.0, 10.0, ("double_down", "6 posts, 2.1x the play average")),
         (4, 30.0, 10.0, (None, "4 posts, needs 5 for a call")),
         (1, 0.0, 10.0, (None, "1 post, needs 5 for a call")),

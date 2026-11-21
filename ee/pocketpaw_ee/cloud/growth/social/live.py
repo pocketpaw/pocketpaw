@@ -21,8 +21,9 @@
 # them gets it). Stars are brand-wide.
 # Each play also lists ``formats``: per format seen on its counted ideas, the posts
 # with a 7-day snapshot and their engagement per post, and a suggestion against the
-# play's own average once a format has ``FORMAT_MIN_POSTS`` (ratio at or over
-# ``DOUBLE_DOWN_RATIO`` is double_down, at or under ``DROP_RATIO`` is drop).
+# play's own average once a format has ``FORMAT_MIN_POSTS`` (the ratio, rounded to
+# 2 places, at or over ``DOUBLE_DOWN_RATIO`` is double_down, at or under
+# ``DROP_RATIO`` is drop).
 
 from __future__ import annotations
 
@@ -138,8 +139,9 @@ def suggest(posts: int, avg: float | None, play_avg: float | None) -> tuple[str 
         return None, f"{_n_posts(posts)}, needs {FORMAT_MIN_POSTS} for a call"
     if avg is None or not play_avg:
         return None, None
-    ratio = avg / play_avg
-    reason = f"{_n_posts(posts)}, {round(ratio, 2):g}x the play average"
+    # Rounded once: the call and the printed reason always use the same number.
+    ratio = round(avg / play_avg, 2)
+    reason = f"{_n_posts(posts)}, {ratio:g}x the play average"
     if ratio >= DOUBLE_DOWN_RATIO:
         return "double_down", reason
     if ratio <= DROP_RATIO:
