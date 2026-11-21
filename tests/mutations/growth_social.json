@@ -38,8 +38,8 @@
   {
     "label": "tenancy: the review's snapshot read drops its workspace filter",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():",
-    "replace": "    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"idea\": {\"$in\": ids}}).to_list():",
+    "find": "        return []\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():",
+    "replace": "        return []\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"idea\": {\"$in\": ids}}).to_list():",
     "tests": [
       "tests/cloud/growth/social/test_learning_loop.py"
     ]

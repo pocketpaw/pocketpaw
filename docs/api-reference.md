@@ -10307,6 +10307,7 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `DELETE /api/v1/growth/social/blueprint/units/{unit}/draft` | `?rev=`: drop one unit's draft (it becomes `superseded`); `404` without a draft, `409` on a stale `rev`, `422` for a core unit never approved. `growth.manage`. |
 | `POST /api/v1/growth/social/blueprint/units/{unit}/approve` | One unit's draft becomes its approved version. `growth.manage`. |
 | `GET /api/v1/growth/social/blueprint/units/{unit}/diff` | `?from_version=&to_version=`: field-level `added`, `removed`, `changed` body paths. |
+| `GET /api/v1/growth/social/blueprint/live` | Live numbers per approved objective id and play unit: `{value, as_of, posts_counted}`, `value` null when unmeasured (see Blueprint units). |
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
 | `POST /api/v1/growth/social/setup-status/skip` | `{key, skipped?}`: skip one checklist row, or un-skip it with `skipped: false`. Idempotent; an unknown key is a 422. Returns the checklist. |
 | `GET /api/v1/growth/social/plan` | `?week=YYYY-Www`: the week's post slots per day, computed from the approved blueprint and the ideas (see Weekly Plan). |
@@ -10933,14 +10934,15 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
   interview_notes, trends, baseline, tam_sam_som}`, `positioning {job_to_be_done,
   value_proposition, usp, category, statement}`, `gtm {icp {target, segments,
   not_for, triggers, icp_sentences}, pricing_notes, launch_plan}`, `goals
-  {business_goal, objectives [{id, metric, baseline, target, deadline, channel}]}`,
+  {business_goal, objectives [{id, metric, baseline, target, deadline, channel,
+  metric_key}]}`,
   `choices {guiding_policy, growth_engine, core_play, tests, not_doing}`,
   `content_pillars [{name, weight, hooks, kind?}]`, `learning_ids`.
   `plan`: `roadmap` (as above), `budget {money_per_month, hours_per_week}`.
   `play:<id>`: `status` (`core`, `testing` default, `parked`), `role`, `goal_id`,
   `audience`, `formats`, `pillar_mix [{pillar, weight}]`, `posts_per_week` 0..50,
   `sends_per_week` 0..5000, `voice_tweak`, `cta`, `repurpose_from`, `kpi {metric,
-  baseline, target}`, `budget`, `hours`, `rules`, `autonomy`, and optional extras
+  baseline, target, metric_key}`, `budget`, `hours`, `rules`, `autonomy`, and optional extras
   `seo {topic_clusters, article_queue, ai_search_targets}`, `paid {objective,
   audience, daily_budget, creative_angles (at most 3), landing_url}`, `creator
   {program_type, creator_profile, payment, brief, disclosure, usage_rights}`
@@ -10972,6 +10974,43 @@ chain: at most one `approved` and one `draft`, older versions `superseded`.
 - `GET …/{unit}/diff?from_version=&to_version=` returns `{unit, from_version,
   to_version, fields: {added, removed, changed}}` with dotted body paths
   (`gtm.icp.segments`); empty values count as absent, lists are compared whole.
+- `metric_key` (objectives and play `kpi`) is `null` or one of `impressions_per_week`,
+  `engagement_per_post`, `link_clicks_per_week`, `github_stars`; anything else is
+  `422 social.blueprint_invalid_body`. `metric` stays the free-text label. Only the
+  owner sets it: a regenerate carries every objective's `metric_key` from the base
+  body (whatever the analyst returns) and never writes a play.
+
+#### Live values: `GET /api/v1/growth/social/blueprint/live`
+
+`growth.read`, `?profile_id=` like its siblings. Read on request from the APPROVED
+Blueprint (the one the agents follow; a play on a turned-off branch is left out)
+and the brand's stored numbers; nothing is stored. No approved Blueprint gives
+`{"objectives": {}, "plays": {}}`.
+
+```json
+{"objectives": {"g1": {"value": 3100.0, "as_of": "2026-11-21T05:00:00Z", "posts_counted": 4}},
+ "plays": {"play:x-organic": {"value": 3100.0, "as_of": "2026-11-21T05:00:00Z", "posts_counted": 4},
+           "play:cold-email": {"value": null, "as_of": null, "posts_counted": 0}}}
+```
+
+- `impressions_per_week`: the sum over posts published in the last 7 days, each at
+  its latest snapshot (the largest of the 1 / 3 / 7 / 28-day buckets it has).
+- `engagement_per_post`: likes + replies + reposts at the 7-day snapshot, averaged
+  over the posts that HAVE a 7-day snapshot; younger posts are left out. No time
+  window: every such post of the brand counts. Quotes and bookmarks are left out.
+- `link_clicks_per_week`: tracked-link clicks over the last 7 UTC days (today
+  included) on the brand's published posts that have a link.
+- `github_stars`: the newest stored stars of each of the brand's repos, summed.
+- No `metric_key`, or a key with no data, is `value: null`, `as_of: null`,
+  `posts_counted: 0`; missing is never 0, while a measured 0 is `0.0`. `as_of` is
+  the newest data point counted (the read time for clicks, which count live).
+- Scope: workspace and brand always. An objective with a `channel` counts only
+  ideas on that platform, one without counts the whole brand. A play counts only
+  ideas on its own platform. Ideas carry no play yet, so an idea counts toward a
+  play only when that play is the platform's one active (`core` / `testing`)
+  acting post play; with two (`x-organic` and `x-authority` both on), each play's
+  post-based values are null and only the objectives show the platform's number.
+  `github_stars` is brand-wide for every play.
 
 ### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`
 

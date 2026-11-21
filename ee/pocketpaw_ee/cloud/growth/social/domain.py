@@ -16,14 +16,15 @@
 # ``DAILY_SLOT_HOURS_UTC`` and ``DAILY_DRAFTS_PER_DAY`` shape the daily X
 # drafting sweep; an idea's ``source`` says whether a person or that sweep
 # asked for it, and its ``post_ids`` are the Postiz posts made from it.
-# ``METRIC_AGE_BUCKETS`` are the post ages (days) a ``PostMetrics`` snapshot of
-# a published X post is taken at. Reply cards: ``ReplyCandidate`` is an X post
-# found to reply to, ``GeneratedReply`` a drafted reply, ``ReplyCard`` the stored
-# card (never posted by the server); the ``REPLY_*`` / ``MAX_REPLY_*`` constants
-# bound a profile's reply settings. The learning loop: ideas carry ``pillar`` /
-# ``hook_type`` tags (``clean_tag``, 40 characters); an experiment tests one
-# ``ExperimentVariable`` on one ``ExperimentMetric``; ``GeneratedLearning`` is a
-# model-proposed rule before it is checked and stored.
+# ``METRIC_AGE_BUCKETS`` are the post ages (days) a ``PostMetrics`` snapshot of a
+# published X post is taken at; ``LivePost`` is one published idea with its
+# snapshots and link clicks, the input to the Blueprint live values. Reply cards:
+# ``ReplyCandidate`` is an X post found to reply to, ``GeneratedReply`` a drafted
+# reply, ``ReplyCard`` the stored card (never posted by the server); the ``REPLY_*``
+# / ``MAX_REPLY_*`` constants bound a profile's reply settings. The learning loop:
+# ideas carry ``pillar`` / ``hook_type`` tags (``clean_tag``, 40 characters); an
+# experiment tests one ``ExperimentVariable`` on one ``ExperimentMetric``;
+# ``GeneratedLearning`` is a model-proposed rule before it is checked and stored.
 # ``GrowthBlueprint`` is a profile's Brand Blueprint, stitched from its per-unit
 # versions (``version`` is the strategy unit's); its numbers are never
 # model-written. ``SocialProfile.growth_branches`` are the Growth branches the
@@ -347,6 +348,19 @@ class PostMetrics:
     quotes: int = 0
     bookmarks: int = 0
     captured_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class LivePost:
+    """One published idea as the Blueprint live values read it: its platform, when
+    it went live, every metric snapshot, and each tracked link's clicks per UTC day."""
+
+    workspace_id: str
+    idea_id: str
+    platform: str
+    published_at: datetime
+    snapshots: tuple[PostMetrics, ...] = ()
+    link_clicks: tuple[dict[str, int], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -42,14 +42,15 @@
 #
 # Numbers are never model-written: pillar weights are owner-entered or an equal
 # split computed here, cadences come from the profile or the owner, goals are
-# owner-entered only. A pillar's ``kind`` (audience or product) is owner-set too;
-# regenerate keeps it, like the weight, for a pillar whose name survives. ``seed``
-# and ``regenerate`` text must pass ``ideas.check_texts`` (no em or en dash, no
-# number the owner did not type); a first two-phase roadmap is seeded when there
-# is none. Writes to an existing row
+# owner-entered only; an objective's ``metric_key`` is always the base body's
+# (``_apply_legacy``), and regenerate never writes a play. A pillar's ``kind``
+# (audience or product) is owner-set too; regenerate keeps it, like the weight, for
+# a pillar whose name survives. ``seed`` and ``regenerate`` text must pass
+# ``ideas.check_texts`` (no em or en dash, no number the owner did not type); a
+# first two-phase roadmap is seeded when there is none. Writes to an existing row
 # are conditional on its status; approve marks a draft approved before superseding
-# the rest, so a crash leaves two approved (the highest version wins on read),
-# never zero; the unique version index stops two writers forking a version.
+# the rest, so a crash leaves two approved (the highest version wins on read), never
+# zero; the unique version index stops two writers forking a version.
 # Tenancy: every query filters on ``workspace`` and ``profile_id`` (the profile
 # comes from ``social.service.require_profile``) except the migration's discovery
 # and count reads, marked ``global-read``. Writes carry ``# no-event:`` markers.
@@ -476,11 +477,13 @@ def _apply_legacy(bodies: dict[str, dict], sections: dict[str, Any]) -> dict[str
         known = {o.get("id"): o for o in _dicts(strategy["goals"].get("objectives"))}
         strategy["goals"]["objectives"] = [
             {
-                **known.get(_str(g.get("id")), {}),
+                **(base := known.get(_str(g.get("id")), {})),
                 "id": _str(g.get("id")),
                 "metric": _str(g.get("metric")),
                 "target": g.get("target") or 0,
                 "channel": _str(g.get("channel")) or None,
+                # Owner-only: never taken from ``sections`` (regenerate's analyst text).
+                "metric_key": base.get("metric_key"),
             }
             for g in _dicts(sections["goals"])
         ]

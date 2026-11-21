@@ -7,15 +7,17 @@
 # body that predates a field still validates. Caps follow the legacy Blueprint
 # (``MAX_BLUEPRINT_ITEMS`` items of 300 chars, 2000-char text, 8 pillars, 20
 # goals). Objective ``baseline`` and ``deadline`` are optional because legacy
-# goals carry neither. Creator extras require a disclosure and usage rights (FTC).
+# goals carry neither. An objective or play KPI may name a ``metric_key`` (one of
+# ``METRIC_KEYS``) that ``live`` knows how to measure; ``metric`` stays the label.
+# Creator extras require a disclosure and usage rights (FTC).
 # ``BODY_MODELS`` maps a unit kind to its model; ``blueprint.py`` validates a body
 # against it and checks cross-unit goal references there (they need the store).
 # Request and response classes are distinct (cloud rule 4).
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Annotated, Literal
+from datetime import date, datetime
+from typing import Annotated, Literal, get_args
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -49,6 +51,10 @@ UnitStatus = BlueprintStatus
 PlayStatus = Literal["core", "testing", "parked"]
 MAX_KEY_MESSAGES = 3
 MAX_CREATIVE_ANGLES = 3
+MetricKey = Literal[
+    "impressions_per_week", "engagement_per_post", "link_clicks_per_week", "github_stars"
+]
+METRIC_KEYS: tuple[str, ...] = get_args(MetricKey)
 
 _Short = Annotated[str, StringConstraints(strip_whitespace=True, max_length=120)]
 _Id = Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)]
@@ -142,6 +148,7 @@ class Objective(_Body):
     target: _Amount
     deadline: date | None = None
     channel: BlueprintChannelName | None = None
+    metric_key: MetricKey | None = None
 
 
 class Goals(_Body):
@@ -210,6 +217,7 @@ class Kpi(_Body):
     metric: _Short = ""
     baseline: _Amount | None = None
     target: _Amount | None = None
+    metric_key: MetricKey | None = None
 
 
 class SeoExtras(_Body):
@@ -359,3 +367,19 @@ class BlueprintUnitDiffResponse(BaseModel):
     from_version: int
     to_version: int
     fields: BlueprintSectionDiff
+
+
+class LiveValueResponse(BaseModel):
+    """One measured number. ``value`` is null when there is no data or no
+    ``metric_key``; a measured 0 is a number."""
+
+    value: float | None = None
+    as_of: datetime | None = None
+    posts_counted: int = 0
+
+
+class BlueprintLiveResponse(BaseModel):
+    """``GET /blueprint/live``: per objective id and per ``play:<id>`` unit."""
+
+    objectives: dict[str, LiveValueResponse] = Field(default_factory=dict)
+    plays: dict[str, LiveValueResponse] = Field(default_factory=dict)
