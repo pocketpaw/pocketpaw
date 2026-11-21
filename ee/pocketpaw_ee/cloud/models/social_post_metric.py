@@ -1,10 +1,19 @@
 # ee/pocketpaw_ee/cloud/models/social_post_metric.py — one snapshot of a
-# published Growth › Social X post's public metrics at a fixed age (1, 3, 7 or
-# 28 days after it went live), scoped to a workspace, profile and idea.
+# published Growth › Social post's metrics at a fixed age (1, 3, 7 or 28 days
+# after it went live), scoped to a workspace, profile and idea. ``platform`` is
+# the network it went out on: "x" rows come from X's API and carry
+# ``x_post_id``; other rows come from Postiz post stats and carry
+# ``postiz_post_id`` plus the post's ``published_at`` (an X row's lives on its
+# idea). Rows written before ``platform`` existed are X rows and read as "x" (the
+# stored doc has no key; queries for X match a missing key too). A count is None
+# on a Postiz row whose platform did not report it (missing is never 0); X rows
+# always carry every count.
 #
-# Append-only: the unique (workspace, idea, age_bucket) index means a bucket is
-# written once and never updated or deleted; a second write for the same bucket
-# is a DuplicateKeyError the metrics sweep skips.
+# Append-only: the unique (workspace, idea, platform, postiz_post_id, age_bucket)
+# index means each post's bucket is written once and never updated or deleted; a
+# second write is a DuplicateKeyError the metrics sweep skips. It replaced the
+# (workspace, idea, age_bucket) index, which ``shared.db.init_cloud_db`` drops at
+# boot, since Beanie never drops an index itself.
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).
@@ -19,23 +28,35 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
 class SocialPostMetric(TimestampedDocument):
-    """An X post's public metrics at one age bucket."""
+    """One published post's metrics at one age bucket."""
 
     workspace: str
     profile: str = ""
     idea: str
-    x_post_id: str
+    platform: str = "x"
+    x_post_id: str = ""
+    postiz_post_id: str | None = None
+    published_at: datetime | None = None
     age_bucket: int
-    impressions: int = 0
-    likes: int = 0
-    replies: int = 0
-    reposts: int = 0
-    quotes: int = 0
-    bookmarks: int = 0
+    impressions: int | None = 0
+    likes: int | None = 0
+    replies: int | None = 0
+    reposts: int | None = 0
+    quotes: int | None = 0
+    bookmarks: int | None = 0
     captured_at: datetime
 
     class Settings(TimestampedDocument.Settings):
         name = "growth_social_post_metrics"
         indexes = [
-            IndexModel([("workspace", 1), ("idea", 1), ("age_bucket", 1)], unique=True),
+            IndexModel(
+                [
+                    ("workspace", 1),
+                    ("idea", 1),
+                    ("platform", 1),
+                    ("postiz_post_id", 1),
+                    ("age_bucket", 1),
+                ],
+                unique=True,
+            ),
         ]

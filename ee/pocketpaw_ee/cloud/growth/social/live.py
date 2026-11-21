@@ -5,9 +5,10 @@
 # numbers from ``service.live_posts`` / ``service.latest_repo_stars``, scoped to
 # the workspace and brand. Each objective or play KPI may name a ``metric_key``:
 # - ``impressions_per_week``: posts published in the last 7 days, each at its
-#   largest age bucket, summed.
-# - ``engagement_per_post``: likes + replies + reposts at the 7-day snapshot,
-#   averaged over the posts that have one (younger posts are left out; no window).
+#   largest age bucket, summed (a snapshot with no impressions is left out).
+# - ``engagement_per_post``: likes + replies + reposts at the 7-day snapshot (the
+#   ones reported), averaged over the posts that have one with any of the three
+#   (younger posts are left out; no window).
 # - ``link_clicks_per_week``: tracked-link clicks over the last 7 UTC days, today
 #   included, on published posts that have a link.
 # - ``github_stars``: each brand repo's newest stored stars, summed.
@@ -51,21 +52,30 @@ def impressions_per_week(posts: list[LivePost], now: datetime) -> LiveValueRespo
         for p in posts
         if p.snapshots and p.published_at >= since
     ]
+    latest = [s for s in latest if s.impressions is not None]
     if not latest:
         return LiveValueResponse()
     return LiveValueResponse(
-        value=float(sum(s.impressions for s in latest)),
+        value=float(sum(s.impressions or 0 for s in latest)),
         as_of=_newest(latest),
         posts_counted=len(latest),
     )
 
 
 def engagement_per_post(posts: list[LivePost], now: datetime) -> LiveValueResponse:
-    """Only posts with a 7-day snapshot count; a younger post is left out."""
-    week = [s for p in posts for s in p.snapshots if s.age_bucket == ENGAGEMENT_BUCKET]
+    """Only posts with a 7-day snapshot count; a younger post is left out. A count the
+    platform did not report (None) adds nothing, and a snapshot with none of likes,
+    replies and reposts is left out (its engagement is unknown, not 0)."""
+    week = [
+        s
+        for p in posts
+        for s in p.snapshots
+        if s.age_bucket == ENGAGEMENT_BUCKET
+        and not (s.likes is None and s.replies is None and s.reposts is None)
+    ]
     if not week:
         return LiveValueResponse()
-    total = sum(s.likes + s.replies + s.reposts for s in week)
+    total = sum((s.likes or 0) + (s.replies or 0) + (s.reposts or 0) for s in week)
     return LiveValueResponse(value=total / len(week), as_of=_newest(week), posts_counted=len(week))
 
 

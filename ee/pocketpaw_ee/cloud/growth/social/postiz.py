@@ -18,6 +18,11 @@
 # post (Postiz v2.25.0 ``DELETE /public/v1/posts/:id`` deletes the post's whole
 # group, so its sibling posts go with it), and ``trigger_tool`` runs a provider
 # helper such as Slack's channel list.
+#
+# ``post_analytics`` reads one post's stats (``GET /public/v1/analytics/post/:id``,
+# v2.25.0, not rate limited by Postiz) and returns ``{label: total}`` from the
+# last point of each series. Postiz answers ``[]`` for a provider without stats
+# and ``{"missing": true}`` when it lost the release id: both read as ``{}``.
 
 from __future__ import annotations
 
@@ -222,6 +227,32 @@ class PostizClient:
         if not isinstance(posts, list):
             raise PostizError("postiz.bad_response", "Postiz returned an unexpected post list.")
         return [item for item in posts if isinstance(item, dict)]
+
+    async def post_analytics(self, api_key: str, post_id: str, days: int) -> dict[str, int]:
+        """``{label: total}`` for one post: the last point of each series. Totals that
+        are not numbers are dropped; an empty or ``missing`` answer is ``{}``."""
+        resp = await self._request(
+            "GET",
+            f"/public/v1/analytics/post/{quote(post_id, safe='')}?{urlencode({'date': days})}",
+            api_key=api_key,
+        )
+        data = self._json(resp)
+        if isinstance(data, dict) and data.get("missing"):
+            return {}
+        if not isinstance(data, list):
+            raise PostizError("postiz.bad_response", "Postiz returned unexpected post stats.")
+        out: dict[str, int] = {}
+        for series in data:
+            label = series.get("label") if isinstance(series, dict) else None
+            points = series.get("data") if isinstance(series, dict) else None
+            if not (isinstance(label, str) and label and isinstance(points, list) and points):
+                continue
+            last = points[-1] if isinstance(points[-1], dict) else {}
+            try:
+                out[label] = int(float(last.get("total")))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return out
 
 
 TelegramUpdatesFn = Callable[..., Awaitable[list[dict[str, Any]]]]

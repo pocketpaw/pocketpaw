@@ -10595,6 +10595,27 @@ It only reads; nothing in it posts or writes to X.
    that age is already stored. Snapshots are append-only (one per idea and age,
    never updated); a missed smaller age is not filled in later. A post X did
    not return gets no snapshot that day.
+3. When Postiz is configured (the X token is not needed), each post of an idea
+   created in the last 61 days that Postiz shows as published on a platform it
+   has per-post stats for gets the same age snapshots, read from Postiz's
+   `GET /public/v1/analytics/post/{postId}`. Those platforms are LinkedIn Pages,
+   Facebook, Instagram, Threads, YouTube, TikTok, Pinterest, Dribbble and Google
+   Business. X posts stay on step 2. Personal LinkedIn reports no stats in
+   Postiz v2.25.0 and is skipped. Postiz labels map onto our columns
+   (Impressions or Views to impressions, Likes or Reactions to likes, Replies or
+   Comments to replies, Reposts, Retweets or Shares to reposts, Quotes, and
+   Bookmarks or Saves to bookmarks). Other labels are dropped, and a post with
+   no known label gets no row. A column the platform did not report (or reported
+   as a non-number) is stored as `null`, never 0. The step pools every profile's
+   due posts, shuffles them, and makes at most 50 stats calls a run; whatever is
+   left waits for the next run. One posts-list read per profile is
+   shared with step 1.
+
+Each snapshot row carries `platform` (`"x"`, or the Postiz provider id such as
+`"linkedin-page"`) and either `x_post_id` or `postiz_post_id`. Rows written
+before `platform` existed read as `"x"`. A row is unique per idea, platform,
+Postiz post and age. The weekly review and the morning summary below read only
+the X rows; the Blueprint live values read both (see Live values).
 
 X is read with `POCKETPAW_GROWTH_X_BEARER_TOKEN` (an X API app bearer token;
 unset means no reads and no snapshots), in batches of up to 100 posts, one read
@@ -10994,10 +11015,14 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
 ```
 
 - `impressions_per_week`: the sum over posts published in the last 7 days, each at
-  its latest snapshot (the largest of the 1 / 3 / 7 / 28-day buckets it has).
+  its latest snapshot (the largest of the 1 / 3 / 7 / 28-day buckets it has). A
+  snapshot whose platform did not report impressions is left out, and
+  `posts_counted` counts only the measured posts.
 - `engagement_per_post`: likes + replies + reposts at the 7-day snapshot, averaged
   over the posts that HAVE a 7-day snapshot; younger posts are left out. No time
   window: every such post of the brand counts. Quotes and bookmarks are left out.
+  A count the platform did not report adds nothing, and a post reporting none of
+  the three is left out (its engagement is unknown, not 0).
 - `link_clicks_per_week`: tracked-link clicks over the last 7 UTC days (today
   included) on the brand's published posts that have a link.
 - `github_stars`: the newest stored stars of each of the brand's repos, summed.
@@ -11011,6 +11036,14 @@ and the brand's stored numbers; nothing is stored. No approved Blueprint gives
   acting post play; with two (`x-organic` and `x-authority` both on), each play's
   post-based values are null and only the objectives show the platform's number.
   `github_stars` is brand-wide for every play.
+- Per platform: the numbers of a post measured through Postiz (step 3 of the post
+  metrics job) count on the channel of its Postiz provider, so a LinkedIn Page
+  post counts toward `linkedin` and its plays. It counts at its own publish time,
+  separately from its idea. An idea's X-API snapshots count only on the idea's own
+  platform. An X idea cross-posted to a LinkedIn Page therefore counts once toward
+  the X play and once toward the LinkedIn play. A brand-wide objective counts
+  both. Tracked-link clicks stay with the idea's own platform. Personal LinkedIn
+  reports no stats in Postiz, so a LinkedIn play gets numbers only from Page posts.
 
 ### Weekly Plan — `GET /api/v1/growth/social/plan?week=YYYY-Www`
 

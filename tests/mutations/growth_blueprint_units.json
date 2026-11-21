@@ -290,8 +290,8 @@
   {
     "label": "live: engagement counts posts younger than 7 days",
     "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
-    "find": "    week = [s for p in posts for s in p.snapshots if s.age_bucket == ENGAGEMENT_BUCKET]\n",
-    "replace": "    week = [s for p in posts for s in p.snapshots]\n",
+    "find": "        if s.age_bucket == ENGAGEMENT_BUCKET\n        and not (s.likes is None and s.replies is None and s.reposts is None)\n",
+    "replace": "        if not (s.likes is None and s.replies is None and s.reposts is None)\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
@@ -326,8 +326,8 @@
   {
     "label": "live: the snapshot read leaks across workspaces",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "        await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}})\n        .project(_LiveMetricRow)\n",
-    "replace": "        await _MetricDoc.find({\"idea\": {\"$in\": ids}})\n        .project(_LiveMetricRow)\n",
+    "find": "        await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}, **_X_ROWS})\n",
+    "replace": "        await _MetricDoc.find({\"idea\": {\"$in\": ids}, **_X_ROWS})\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
@@ -355,6 +355,51 @@
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
     "find": "            {\"workspace\": workspace_id, \"profile\": profile_id, \"published_at\": {\"$ne\": None}}\n        )\n        .project(_LiveIdeaRow)\n",
     "replace": "            {\"workspace\": workspace_id, \"published_at\": {\"$ne\": None}}\n        )\n        .project(_LiveIdeaRow)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: an X idea's Postiz rows double count into its X play",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}, **_X_ROWS})\n",
+    "replace": "        await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}})\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: LinkedIn Page rows never reach the LinkedIn play",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/metrics.py",
+    "find": "POSTIZ_CHANNELS: dict[str, str] = {\"linkedin-page\": \"linkedin\"}\n",
+    "replace": "POSTIZ_CHANNELS: dict[str, str] = {}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "tenancy: live Postiz rows of another brand count",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            {\"workspace\": workspace_id, \"profile\": profile_id, \"platform\": {\"$nin\": [\"x\", None]}}\n",
+    "replace": "            {\"workspace\": workspace_id, \"platform\": {\"$nin\": [\"x\", None]}}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: an unreported impressions count reads as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    latest = [s for s in latest if s.impressions is not None]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: a post with no engagement counts reported reads as 0",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "        and not (s.likes is None and s.replies is None and s.reposts is None)\n",
+    "replace": "",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
