@@ -3692,7 +3692,8 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
     """Every published idea of one brand (an idea with no platform counts as ``x``)
     with its X snapshots and its tracked links' clicks per UTC day, plus one entry per
     Postiz-measured post (its idea, its provider's channel via ``postiz_channel``,
-    its own publish time and snapshots, no clicks), within ``workspace_id`` only. So
+    its own publish time and snapshots, its idea's format and play_id, no clicks),
+    within ``workspace_id`` only. So
     an X idea cross-posted to a LinkedIn Page counts once on X and once on LinkedIn.
     A pure read; ``live`` does the math."""
     from pocketpaw_ee.cloud.growth.social.metrics import postiz_channel
@@ -3733,6 +3734,22 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
         .to_list()
     ):
         postiz.setdefault((m.idea, m.postiz_post_id or ""), []).append(m)
+    # A Postiz entry follows its idea's play_id and format, published on X or not.
+    by_id = {str(d.id): d for d in ideas}
+    missing = [i for i, _ in postiz if i not in by_id and PydanticObjectId.is_valid(i)]
+    if missing:
+        for d in (
+            await _IdeaDoc.find(
+                {
+                    "workspace": workspace_id,
+                    "profile": profile_id,
+                    "_id": {"$in": [PydanticObjectId(i) for i in missing]},
+                }
+            )
+            .project(_LiveIdeaRow)
+            .to_list()
+        ):
+            by_id[str(d.id)] = d
     clicks: dict[str, list[dict[str, int]]] = {}
     for link in (
         await _LinkDoc.find({"workspace": workspace_id, "idea": {"$in": ids}})
@@ -3764,6 +3781,8 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
                 rows[0].published_at or rows[0].captured_at - timedelta(days=rows[0].age_bucket)
             ),
             snapshots=tuple(_snapshot(m) for m in rows),
+            format=by_id[idea].format if idea in by_id else "",
+            play_id=by_id[idea].play_id if idea in by_id else None,
         )
         for (idea, _), rows in postiz.items()
     ]

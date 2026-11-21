@@ -36,7 +36,15 @@ from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as PulseDoc
 
 from tests.cloud.growth.social.test_blueprint import _profile
 from tests.cloud.growth.social.test_blueprint_live import NOW as LIVE_NOW
-from tests.cloud.growth.social.test_blueprint_live import NULL, _blueprint, _ctx, _live
+from tests.cloud.growth.social.test_blueprint_live import (
+    NULL,
+    _blueprint,
+    _ctx,
+    _live,
+    _page_row,
+    _page_snap,
+    _snap,
+)
 from tests.cloud.growth.social.test_blueprint_live import _play as _live_play
 from tests.cloud.growth.social.test_router import MEME_SVG, _client
 
@@ -230,6 +238,43 @@ async def test_an_old_idea_still_counts_toward_the_single_play(w1):
     plays = (await _live(pid))["plays"]
     assert plays["play:x-organic"]["value"] == 10.0  # the fallback; the stamped one is not
     assert plays["play:x-authority"]["value"] == 30.0
+
+
+async def test_a_postiz_post_follows_its_ideas_play_id(w1):
+    """A Page post of an idea stamped for the LinkedIn play counts toward it, even
+    with the play parked (so the no-play_id fallback would not) and with the idea
+    never published on X; it brings the idea's format."""
+    pid = await _profile()
+    await _blueprint(w1, pid, {"play:linkedin-content": _eng("parked")})
+    idea = IdeaDoc(
+        workspace="w1", profile=pid, format="wall_of_text", hook="h", platform="linkedin",
+        play_id="play:linkedin-content",
+    )  # fmt: skip
+    await idea.insert()
+    await _page_row(str(idea.id), pid, "p-1", 7, 8, impressions=40, likes=6)
+    play = (await _live(pid))["plays"]["play:linkedin-content"]
+    assert (play["value"], play["posts_counted"]) == (6.0, 1)
+    assert [(f["name"], f["posts"], f["avg"]) for f in play["formats"]] == [
+        ("wall_of_text", 1, 6.0)
+    ]
+
+
+async def test_a_stamped_x_idea_cross_posted_to_linkedin_counts_on_each(w1):
+    pid = await _profile()
+    await _blueprint(
+        w1, pid, {"play:x-organic": _live_play(), "play:linkedin-content": _live_play()}
+    )
+    idea = IdeaDoc(
+        workspace="w1", profile=pid, format="x_post", hook="h", platform="x",
+        published_at=LIVE_NOW - timedelta(days=2), play_id="play:x-organic",
+    )  # fmt: skip
+    await idea.insert()
+    await _snap(str(idea.id), 1, impressions=300)
+    await _page_snap(str(idea.id), pid, "p-lp", 3, 4)
+    plays = (await _live(pid))["plays"]
+    assert plays["play:x-organic"]["value"] == 300.0
+    # Its play_id is an X play, so on LinkedIn it counts as unstamped: the one play.
+    assert plays["play:linkedin-content"]["value"] == 1520.0
 
 
 async def test_formats_carry_numbers_and_suggestions_at_the_edges(w1):

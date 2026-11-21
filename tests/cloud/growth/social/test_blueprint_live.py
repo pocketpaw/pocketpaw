@@ -410,7 +410,8 @@ async def test_a_linkedin_play_counts_linkedin_page_rows(w1):
     await _page_snap(idea, pid, "p-lp", 1, 2)
     await _page_snap(idea, pid, "p-old", 7, 12)  # outside the week
     out = await _live(pid)
-    assert out["plays"]["play:linkedin-content"] == {
+    play = out["plays"]["play:linkedin-content"]
+    assert {k: play[k] for k in NULL} == {
         "value": 1520.0,
         "as_of": "2026-11-21T03:00:00Z",
         "posts_counted": 1,
@@ -459,7 +460,8 @@ async def test_impressions_without_engagement_leave_engagement_null(w1):
     await _blueprint(w1, pid, {"play:linkedin-content": _play(key="engagement_per_post")})
     idea = await _idea(pid, "reddit", 8)
     await _page_row(idea, pid, "p-imp", 7, 8, impressions=900)
-    assert (await _live(pid))["plays"]["play:linkedin-content"] == NULL  # unknown, not 0.0
+    play = (await _live(pid))["plays"]["play:linkedin-content"]
+    assert {k: play[k] for k in NULL} == NULL  # unknown, not 0.0
     # A post that reports likes only counts with what it reported.
     await _page_row(idea, pid, "p-likes", 7, 8, likes=8)
     play = (await _live(pid))["plays"]["play:linkedin-content"]
@@ -471,7 +473,8 @@ async def test_likes_without_impressions_leave_reach_null(w1):
     await _blueprint(w1, pid, {"play:linkedin-content": _play()})
     idea = await _idea(pid, "reddit", 2)
     await _page_row(idea, pid, "p-likes", 1, 2, likes=8)
-    assert (await _live(pid))["plays"]["play:linkedin-content"] == NULL  # unknown, not 0.0
+    play = (await _live(pid))["plays"]["play:linkedin-content"]
+    assert {k: play[k] for k in NULL} == NULL  # unknown, not 0.0
     await _page_row(idea, pid, "p-imp", 1, 2, impressions=40)
     play = (await _live(pid))["plays"]["play:linkedin-content"]
     assert (play["value"], play["posts_counted"]) == (40.0, 1)

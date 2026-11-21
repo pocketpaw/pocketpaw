@@ -18,7 +18,8 @@
 # without counts the whole brand. A play counts only ideas on its platform: an idea
 # with a ``play_id`` counts toward exactly that play, and an old one with none only
 # when the play is its platform's one active acting post play (two or more: none of
-# them gets it). Stars are brand-wide.
+# them gets it). A Postiz entry carries its idea's ``play_id``; on a platform that
+# play is not on (a cross-post) it counts as unstamped. Stars are brand-wide.
 # Each play also lists ``formats``: per format seen on its counted ideas, the posts
 # with a 7-day snapshot and their engagement per post, and a suggestion against the
 # play's own average once a format has ``FORMAT_MIN_POSTS`` (the ratio, rounded to
@@ -124,9 +125,19 @@ def _play_posts(
     # Old idea with no play_id: it counts toward a play only when that play is its
     # platform's single active acting post play.
     single = acting.get(q.channel) == [play_id]
-    return [
-        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)
-    ]
+
+    def counts(p: LivePost) -> bool:
+        own = _own_play(p)
+        return own == unit if own else single
+
+    return [p for p in posts if p.platform == q.channel and counts(p)]
+
+
+def _own_play(p: LivePost) -> str | None:
+    """The post's ``play_id`` when that play is on the post's platform. A cross-post
+    (a Postiz LinkedIn Page copy of an X idea) reads as unstamped on its platform."""
+    q = play_catalog.play((p.play_id or "").removeprefix("play:"))
+    return p.play_id if q is not None and q.channel == p.platform else None
 
 
 def _n_posts(n: int) -> str:

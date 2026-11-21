@@ -299,8 +299,8 @@
   {
     "label": "live: a play sums every platform's ideas",
     "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
-    "find": "        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)\n",
-    "replace": "        p for p in posts if (p.play_id == unit if p.play_id else single)\n",
+    "find": "    return [p for p in posts if p.platform == q.channel and counts(p)]\n",
+    "replace": "    return [p for p in posts if counts(p)]\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py",
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
@@ -508,8 +508,8 @@
   {
     "label": "live: a stamped idea falls back to the single-play rule",
     "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
-    "find": "        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)\n",
-    "replace": "        p for p in posts if p.platform == q.channel and single\n",
+    "find": "        return own == unit if own else single\n",
+    "replace": "        return single\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py",
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
@@ -518,8 +518,8 @@
   {
     "label": "live: an old idea with no play_id counts toward no play",
     "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
-    "find": "        p for p in posts if p.platform == q.channel and (p.play_id == unit if p.play_id else single)\n",
-    "replace": "        p for p in posts if p.platform == q.channel and p.play_id == unit\n",
+    "find": "        return own == unit if own else single\n",
+    "replace": "        return own == unit\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py",
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
@@ -630,6 +630,46 @@
     "find": "    ratio = round(avg / play_avg, 2)\n",
     "replace": "    ratio = avg / play_avg\n",
     "tests": [
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: a Postiz entry drops its idea's play_id",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            play_id=by_id[idea].play_id if idea in by_id else None,\n",
+    "replace": "            play_id=None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: a Postiz entry drops its idea's format",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            format=by_id[idea].format if idea in by_id else \"\",\n",
+    "replace": "            format=\"\",\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: a Postiz entry of an idea not live on X gets no play_id",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    missing = [i for i, _ in postiz if i not in by_id and PydanticObjectId.is_valid(i)]\n",
+    "replace": "    missing: list[str] = []\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
+      "tests/cloud/growth/social/test_blueprint_play_formats.py"
+    ]
+  },
+  {
+    "label": "live: a cross-post keeps its X play_id on LinkedIn",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/live.py",
+    "find": "    return p.play_id if q is not None and q.channel == p.platform else None\n",
+    "replace": "    return p.play_id\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py",
       "tests/cloud/growth/social/test_blueprint_play_formats.py"
     ]
   }
