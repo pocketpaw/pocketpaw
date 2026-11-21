@@ -1425,10 +1425,12 @@ async def save_draft(
             "No play carries this cadence; set it to 0 or remove the channel",
             {"fields": unmapped},
         )
+    # Compared in full shape: a stored body that predates a field (a plain-string
+    # format, a new default) is not a change, so it opens no draft.
     changed = {
         unit: new_body
         for unit, new_body in _apply_legacy(bodies, edit).items()
-        if new_body != bodies.get(unit)
+        if unit not in bodies or new_body != _normal(unit, bodies[unit])
     }
     await _check_unchanged(workspace_id, profile.id, rows, changed)
     for unit, new_body in changed.items():
