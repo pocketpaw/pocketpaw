@@ -12,8 +12,9 @@ a row already in the new shape is left as it is. Superseded rows are not touched
 A dry run (the default) writes nothing to Mongo. It prints each row's before and
 after (target, not_for, alternatives) and writes every row it would touch (``_id``,
 workspace, profile, status, version, rev and the full body before) as JSON to
-``--dump <path>``, which a dry run requires; keep that file outside the repo. A
-real run (``--apply``) rewrites changed rows in place, each conditional on the rev
+``--dump <path>``, which every run requires (the real run's is the restore copy, since
+the fold cuts a target at the text cap); keep that file outside the repo. A real
+run (``--apply``) rewrites changed rows in place, each conditional on the rev
 it read, and bumps ``rev`` so an editor open on the old body gets a 409 and reloads.
 
 It ends with the count check: rows processed must equal the strategy rows that are
@@ -135,8 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--apply", action="store_true", help="Rewrite the strategy rows.")
     parser.add_argument("--dump", help="Write the rows it would touch as JSON here.")
     args = parser.parse_args(argv)
-    if not args.apply and not args.dump:
-        parser.error("a dry run needs --dump <path> (keep it outside the repo)")
+    if not args.dump:
+        parser.error("--dump <path> is required, for a real run too (keep it outside the repo)")
 
     uri = os.environ.get("CLOUD_MONGODB_URI") or os.environ.get("POCKETPAW_CLOUD_MONGO_URI")
     if not uri:

@@ -486,7 +486,7 @@ class BlueprintUnitsResponse(BaseModel):
 
 
 class BlueprintUnitDiffResponse(BaseModel):
-    """Field-level: dotted body paths (``gtm.icp.segments``) added, removed or
+    """Field-level: dotted body paths (``gtm.icp.target``) added, removed or
     changed between two versions of one unit. Empty values count as absent."""
 
     unit: str

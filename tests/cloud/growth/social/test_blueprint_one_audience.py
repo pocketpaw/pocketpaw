@@ -24,6 +24,8 @@ import pytest_asyncio
 from pocketpaw_ee.cloud.growth.social import blueprint as social_blueprint
 from pocketpaw_ee.cloud.growth.social.analyst import blueprint_lines
 from pocketpaw_ee.cloud.growth.social.blueprint_units_dto import StrategyBody, fold_strategy
+from pocketpaw_ee.cloud.growth.social.domain import SocialAnalysis
+from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as BlueprintDoc
 from pocketpaw_ee.cloud.models.growth_blueprint_unit import GrowthBlueprintUnit as UnitDoc
 
 from tests.cloud.growth.social.test_blueprint import _profile
@@ -101,7 +103,38 @@ def test_a_repeat_fold_does_not_append_the_same_part_twice():
     assert again["gtm"]["icp"]["target"] == _TARGET
 
 
+def test_regenerate_seeds_only_an_empty_target_so_a_repeat_never_grows_it():
+    analysis = SocialAnalysis(audience="studio owners")
+    empty = social_blueprint._regenerated({"audience": {}}, analysis, "")
+    assert empty["audience"] == {"target": "Segments: studio owners", "not_for": []}
+    owned = {"audience": {"target": "Indie devs", "not_for": ["banks"]}}
+    once = social_blueprint._regenerated(owned, analysis, "")
+    twice = social_blueprint._regenerated(once, analysis, "")
+    assert once["audience"] == twice["audience"] == owned["audience"]
+
+
 # --- reads fold a stored old-shape row ------------------------------------------------------
+
+
+async def test_an_old_shape_legacy_row_folds_for_the_agents_and_through_the_migration(w1):
+    pid = await _profile()
+    await BlueprintDoc(
+        workspace="w1",
+        profile_id=pid,
+        version=4,
+        status="approved",
+        identity={"summary": "Acme", "product": "", "problem": ""},
+        audience={"segments": ["design studios"], "icp_sentences": ["We bill late"]},
+        voice={"tone": "calm", "avoid": []},
+        pillars=[],
+    ).insert()
+    folded = "Segments: design studios; In their words: We bill late"
+    bp = await social_blueprint.approved_for("w1", pid)  # unmigrated: the legacy row
+    assert bp.audience.target == folded
+    await social_blueprint.migrate_profile("w1", pid)
+    strategy = await UnitDoc.find_one({"profile_id": pid, "unit": "strategy"})
+    assert strategy.body["gtm"]["icp"]["target"] == folded
+    assert "segments" not in strategy.body["gtm"]["icp"]
 
 
 async def _old_approved_strategy(client, pid: str) -> None:
@@ -244,8 +277,9 @@ def test_the_count_check_fails_when_a_row_could_not_be_written(capsys):
     assert "NOT WRITTEN" in out and "1 still old-shape -> MISMATCH" in out
 
 
-def test_a_dry_run_needs_a_dump_path(monkeypatch):
+@pytest.mark.parametrize("argv", [[], ["--dry-run"], ["--apply"]])
+def test_every_run_needs_a_dump_path(monkeypatch, argv):
     monkeypatch.setenv("CLOUD_MONGODB_URI", "mongodb://localhost:1/paw-cloud")
     with pytest.raises(SystemExit) as exc:
-        _script().main([])
+        _script().main(argv)
     assert exc.value.code == 2
