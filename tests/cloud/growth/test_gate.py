@@ -1065,6 +1065,9 @@ class TestGrowthRouteRbac:
             ("PUT", "/growth/social/blueprint/units/{unit}/draft"): "growth.manage",
             ("DELETE", "/growth/social/blueprint/units/{unit}/draft"): "growth.manage",
             ("POST", "/growth/social/blueprint/units/{unit}/approve"): "growth.manage",
+            ("POST", "/growth/social/blueprint/units/{unit}/formats/{name}/status"): (
+                "growth.manage"
+            ),
             ("GET", "/growth/social/blueprint/units/{unit}/diff"): "growth.read",
             ("GET", "/growth/social/blueprint/live"): "growth.read",
             ("GET", "/growth/social/setup-status"): "growth.read",
