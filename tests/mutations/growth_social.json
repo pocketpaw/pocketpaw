@@ -966,19 +966,19 @@
     ]
   },
   {
-    "label": "blueprint: Blueprint audience segments reach the prompt unfenced",
+    "label": "blueprint: Blueprint audience target reaches the prompt unfenced",
     "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
-    "find": "\"; \".join(fence(s) for s in bp.audience.segments)",
-    "replace": "\"; \".join(bp.audience.segments)",
+    "find": "f\"Audience: {fence(bp.audience.target)}\"",
+    "replace": "f\"Audience: {bp.audience.target}\"",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]
   },
   {
-    "label": "blueprint: Blueprint ICP sentences reach the prompt unfenced",
+    "label": "blueprint: Blueprint not-for list reaches the prompt unfenced",
     "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
-    "find": "\"; \".join(fence(s) for s in bp.audience.icp_sentences)",
-    "replace": "\"; \".join(bp.audience.icp_sentences)",
+    "find": "\"; \".join(fence(s) for s in bp.audience.not_for)",
+    "replace": "\"; \".join(bp.audience.not_for)",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_agents.py"
     ]

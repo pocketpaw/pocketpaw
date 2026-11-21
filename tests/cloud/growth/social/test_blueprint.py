@@ -142,8 +142,9 @@ async def test_seed_maps_every_section_and_is_idempotent(w1):
         "problem": "Chasing late payments",
     }
     assert draft["audience"] == {
-        "segments": ["freelance designers", "small agencies"],
-        "icp_sentences": ["This brand", "Studios with 2 to 10 people"],
+        "target": "Segments: freelance designers, small agencies; "
+        "In their words: This brand, Studios with 2 to 10 people",
+        "not_for": [],
     }
     assert draft["voice"] == {"tone": "plain and warm", "avoid": ["hype"]}
     assert draft["pillars"] == [
@@ -580,7 +581,7 @@ async def test_every_doc_field_survives_domain_and_response(mongo_db):
         version=4,
         status="approved",
         identity={"summary": "s", "product": "p", "problem": "q"},
-        audience={"segments": ["a"], "icp_sentences": ["i"]},
+        audience={"target": "a", "not_for": ["i"]},
         voice={"tone": "t", "avoid": ["v"]},
         pillars=[{"name": "n", "weight": 40, "hooks": ["h"]}],
         channels=[{"channel": "email", "posts_per_week": 1, "sends_per_week": 9}],

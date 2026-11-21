@@ -29,6 +29,13 @@
 # (strategy last). ``migrate_profile`` splits legacy rows into units, strategy last;
 # reads of an unmigrated brand fall back to its legacy rows.
 #
+# Strategy bodies are read through ``fold_strategy`` (wire, compose, diff), so an
+# old-shape row reads as one ``gtm.icp.target`` and ``positioning.alternatives``.
+# A strategy save without a ``positioning.alternatives`` key (an old editor) keeps
+# the base row's. A legacy ``audience`` edit replaces the target and ``not_for`` it
+# sends; its old lists fold against the stored target (only new items), and a fold
+# past the cap is a 422.
+#
 # Numbers are never model-written: weights, cadences and goals are owner-entered or
 # computed here; an objective's ``metric_key`` is always the base body's, and
 # regenerate never writes a play, so a play's KPI ``pass_mark`` / ``expand_at`` and
@@ -114,6 +121,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     RoadmapMilestoneModel,
     RoadmapPhaseModel,
     SaveBlueprintDraftRequest,
+    fold_icp,
 )
 from pocketpaw_ee.cloud.growth.social.play_catalog import PLAY_IDS, PLAYS
 from pocketpaw_ee.cloud.models.growth_blueprint import GrowthBlueprint as _BlueprintDoc
@@ -188,7 +196,8 @@ def _roadmap(value: Any) -> BlueprintRoadmap:
 def _domain(sections: dict[str, Any], **meta: Any) -> GrowthBlueprint:
     """A domain Blueprint from legacy-shaped ``sections`` plus row metadata."""
     identity = sections.get("identity") or {}
-    audience = sections.get("audience") or {}
+    # A read for the agents: a fold past the cap is cut here, never stored.
+    audience = fold_icp(sections.get("audience") or {}, truncate=True)
     voice = sections.get("voice") or {}
     return GrowthBlueprint(
         identity=BlueprintIdentity(
@@ -197,8 +206,7 @@ def _domain(sections: dict[str, Any], **meta: Any) -> GrowthBlueprint:
             problem=_str(identity.get("problem")),
         ),
         audience=BlueprintAudience(
-            segments=_strs(audience.get("segments")),
-            icp_sentences=_strs(audience.get("icp_sentences")),
+            target=_str(audience.get("target")), not_for=_strs(audience.get("not_for"))
         ),
         voice=BlueprintVoice(tone=_str(voice.get("tone")), avoid=_strs(voice.get("avoid"))),
         pillars=tuple(
@@ -261,7 +269,7 @@ def _to_response(bp: GrowthBlueprint) -> GrowthBlueprintResponse:
             summary=bp.identity.summary, product=bp.identity.product, problem=bp.identity.problem
         ),
         audience=BlueprintAudienceModel(
-            segments=list(bp.audience.segments), icp_sentences=list(bp.audience.icp_sentences)
+            target=bp.audience.target, not_for=list(bp.audience.not_for)
         ),
         voice=BlueprintVoiceModel(tone=bp.voice.tone, avoid=list(bp.voice.avoid)),
         pillars=[
@@ -440,9 +448,13 @@ def _normal(unit: str, body: dict[str, Any]) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
-def _apply_legacy(bodies: dict[str, dict], sections: dict[str, Any]) -> dict[str, dict]:
+def _apply_legacy(
+    bodies: dict[str, dict], sections: dict[str, Any], *, strict: bool = True
+) -> dict[str, dict]:
     """``bodies`` (every core unit present) with the legacy ``sections`` sent laid
-    over the fields they map to; every other field is kept."""
+    over the fields they map to; every other field is kept. ``strict`` makes an
+    audience fold past the target cap a 422; the migration of pre-unit rows passes
+    False and cuts it (the legacy row is kept, read-only)."""
     out = {u: copy.deepcopy(b) for u, b in bodies.items()}
     for unit in _CORE_UNITS:
         out[unit] = _normal(unit, out.get(unit) or {})
@@ -456,11 +468,26 @@ def _apply_legacy(bodies: dict[str, dict], sections: dict[str, Any]) -> dict[str
             tone=_str(voice.get("tone")), avoid=list(_strs(voice.get("avoid")))
         )
     if "audience" in sections:
+        # The keys sent replace (``target`` is the owner's text); the retired lists
+        # old clients and pre-unit rows send fold against that target, so only new
+        # items are added. Only keys present count: ``_draft_edit`` dumps it unset-free.
         audience = sections["audience"] or {}
-        strategy["gtm"]["icp"].update(
-            segments=list(_strs(audience.get("segments"))),
-            icp_sentences=list(_strs(audience.get("icp_sentences"))),
-        )
+        icp = dict(strategy["gtm"]["icp"])
+        if "target" in audience:
+            icp["target"] = _str(audience["target"])
+        if "not_for" in audience:
+            icp["not_for"] = list(_strs(audience["not_for"]))
+        for key in ("segments", "icp_sentences"):
+            if key in audience:
+                icp[key] = list(_strs(audience[key]))
+        icp = fold_icp(icp, truncate=not strict)
+        if "segments" in icp or "icp_sentences" in icp:
+            raise ValidationError(
+                "social.blueprint_invalid_body",
+                "This Blueprint section has a field that is missing or not allowed",
+                {"errors": [{"loc": ["audience", "target"], "msg": "too long once folded"}]},
+            )
+        strategy["gtm"]["icp"] = icp
     if "pillars" in sections:
         strategy["content_pillars"] = copy.deepcopy(_dicts(sections["pillars"]))
     if "goals" in sections:
@@ -524,7 +551,7 @@ def _apply_channels(out: dict[str, dict], channels: list[dict]) -> None:
 def _to_legacy(bodies: dict[str, dict]) -> dict[str, Any]:
     """The legacy sections stitched from unit bodies (the inverse of ``_apply_legacy``)."""
     brand = bodies.get("brand") or {}
-    strategy = bodies.get("strategy") or {}
+    strategy = _normal("strategy", bodies.get("strategy") or {})
     plan = bodies.get("plan") or {}
     voice = brand.get("tone_of_voice") or {}
     icp = (strategy.get("gtm") or {}).get("icp") or {}
@@ -554,10 +581,7 @@ def _to_legacy(bodies: dict[str, dict]) -> dict[str, Any]:
     who = brand.get("who_we_are") or {}
     return {
         "identity": {k: _str(who.get(k)) for k in ("summary", "product", "problem")},
-        "audience": {
-            "segments": list(_strs(icp.get("segments"))),
-            "icp_sentences": list(_strs(icp.get("icp_sentences"))),
-        },
+        "audience": {"target": _str(icp.get("target")), "not_for": list(_strs(icp.get("not_for")))},
         "voice": {"tone": _str(voice.get("tone")), "avoid": list(_strs(voice.get("avoid")))},
         "pillars": copy.deepcopy(_dicts(strategy.get("content_pillars"))),
         "channels": channels,
@@ -581,7 +605,7 @@ def _compose(
     picked = _pick(rows, status)
     if picked is None:
         return None
-    bodies = {unit: doc.body for unit, doc in picked.items()}
+    bodies = {unit: _wire_body(unit, doc.body) for unit, doc in picked.items()}
     strategy = picked["strategy"]
     return _domain(
         _to_legacy(bodies),
@@ -674,9 +698,13 @@ def acting_post_plays(bp: GrowthBlueprint) -> dict[str, list[str]]:
 
 
 def _wire_body(unit: str, body: dict[str, Any]) -> dict[str, Any]:
-    """A play body in its model's shape (formats always ``{name, status}``, an old
-    plain string read as testing); other units as stored."""
-    if unit.startswith(_PLAY) and play_catalog.play(unit[len(_PLAY) :]) is not None:
+    """A play or strategy body in its model's current shape (play formats always
+    ``{name, status}``, an old plain string read as testing; a strategy's retired
+    ICP lists and ``market_research.alternatives`` folded, ``fold_strategy``);
+    brand and plan as stored."""
+    if unit == "strategy" or (
+        unit.startswith(_PLAY) and play_catalog.play(unit[len(_PLAY) :]) is not None
+    ):
         return _normal(unit, body)
     return body
 
@@ -860,10 +888,14 @@ async def _seed_sections(ctx: RequestContext, profile: SocialProfile) -> dict[st
 
     sections = {
         "identity": {name: text(getattr(a, name)) for name in ("summary", "product", "problem")},
-        "audience": {
-            "segments": _checked(_segments(a.audience), source),
-            "icp_sentences": await _icp_sentences(ctx, profile.id),
-        },
+        # Generated text, not the owner's: past the cap it is cut.
+        "audience": fold_icp(
+            {
+                "segments": _checked(_segments(a.audience), source),
+                "icp_sentences": await _icp_sentences(ctx, profile.id),
+            },
+            truncate=True,
+        ),
         "voice": {"tone": text(a.tone), "avoid": _checked(a.avoid, source)},
         "pillars": _pillars(
             _checked(a.content_pillars, source, MAX_BLUEPRINT_PILLARS, _PILLAR_CHARS),
@@ -905,9 +937,12 @@ def _regenerated(base: dict[str, Any], a: SocialAnalysis, source: str) -> dict[s
         name: text(getattr(a, name), identity.get(name))
         for name in ("summary", "product", "problem")
     }
+    # The analyst's segments seed an empty target only: an owner's target is kept,
+    # so a repeat regenerate never grows it.
     out["audience"] = {
-        "segments": items(_segments(a.audience)) or list(_strs(audience.get("segments"))),
-        "icp_sentences": list(_strs(audience.get("icp_sentences"))),
+        "target": _str(audience.get("target"))
+        or fold_icp({"segments": items(_segments(a.audience))}, truncate=True)["target"],
+        "not_for": list(_strs(audience.get("not_for"))),
     }
     out["voice"] = {
         "tone": text(a.tone, voice.get("tone")),
@@ -1126,6 +1161,26 @@ def _unit_body(unit: str, raw: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def _carry_alternatives(raw: dict[str, Any], new_body: dict[str, Any], base: _UnitDoc | None):
+    """An old editor (it knows only ``market_research.alternatives``) may send a
+    strategy body with no ``positioning.alternatives`` key: keep the base row's,
+    with anything it folded in appended. An explicit list, even ``[]``, wins."""
+    positioning = raw.get("positioning")
+    if base is None or (isinstance(positioning, dict) and "alternatives" in positioning):
+        return
+    kept = _normal("strategy", base.body).get("positioning", {}).get("alternatives") or []
+    folded = new_body["positioning"]["alternatives"]
+    seen = {a.casefold() for a in kept}
+    merged = [*kept, *(a for a in folded if a.casefold() not in seen)]
+    if len(merged) > MAX_BLUEPRINT_ITEMS:  # refuse rather than drop what either side holds
+        raise ValidationError(
+            "social.blueprint_invalid_body",
+            "This Blueprint section has a field that is missing or not allowed",
+            {"errors": [{"loc": ["positioning", "alternatives"], "msg": "too many items"}]},
+        )
+    new_body["positioning"]["alternatives"] = merged
+
+
 async def _unit_result(workspace_id: str, profile_id: str, unit: str):
     rows = await _rows(workspace_id, profile_id)
     return _unit_state(unit, rows.get(unit, {}))
@@ -1160,6 +1215,8 @@ async def save_unit_draft(
     base = draft or mine.get("approved")
     if (body.base_version, body.base_rev) != ((base.version, base.rev) if base else (0, 0)):
         raise _stale()
+    if kind == "strategy":
+        _carry_alternatives(body.body, new_body, base)
     await _write_draft(workspace_id, profile.id, unit, draft, new_body, ctx.user_id or "")
     # no-event: Growth › Social has no realtime subscriber; the Blueprint page re-fetches.
     result = await _unit_result(workspace_id, profile.id, unit)
@@ -1228,16 +1285,18 @@ async def discard_unit_draft(
 
 
 def _num(value: float) -> str:
-    return str(int(value)) if float(value).is_integer() else str(round(value, 2))
+    """A number as people read it: thousands grouped, at most two decimals."""
+    return f"{int(value):,}" if float(value).is_integer() else f"{round(value, 2):,}"
 
 
 async def _second_core_warnings(
     workspace_id: str, profile: SocialProfile, unit: str, body: dict[str, Any]
 ) -> list[str]:
-    """For a core play: one line per OTHER approved core play whose live KPI value is
-    under its ``expand_at``, or that has an ``expand_at`` and no live value yet. A
-    play with no ``expand_at`` never warns. Numbers come from ``live``. Runs after the
-    write landed, so any error is logged and reads as no warnings: it never blocks."""
+    """For a core play: one plain line per OTHER approved core play (named by its
+    catalog label) whose live KPI value is under its ``expand_at``, or that has an
+    ``expand_at`` and no live value yet. A play with no ``expand_at`` never warns.
+    Numbers come from ``live``. Runs after the write landed, so any error is logged
+    and reads as no warnings: it never blocks."""
     if body.get("status") != "core":
         return []
     try:
@@ -1267,11 +1326,14 @@ async def _core_warnings(workspace_id: str, profile: SocialProfile, unit: str) -
         value = plays[other].value if other in plays else None
         if value is not None and value >= expand_at:
             continue
-        now = "has no live value yet" if value is None else f"is at {_num(value)}"
-        out.append(
-            f"{other} is already core and {now}, under its expand_at of {_num(expand_at)}. "
-            "A second core play splits the effort before the first one has earned it."
+        q = play_catalog.play(other[len(_PLAY) :])
+        name = f"Your core {q.label if q else other[len(_PLAY) :]} play"
+        now = (
+            f"{name} has no live number yet, and you set it to expand at {_num(expand_at)}."
+            if value is None
+            else f"{name} is at {_num(value)} of the {_num(expand_at)} you set to expand."
         )
+        out.append(f"{now} Adding a second core play now splits your time.")
     return out
 
 
@@ -1458,6 +1520,9 @@ def _draft_edit(body: SaveBlueprintDraftRequest) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name in body.model_fields_set:
         value = dumped[name]
+        if name == "audience" and body.audience is not None:
+            # Only the audience keys sent: an absent target must not read as "".
+            value = body.audience.model_dump(mode="json", exclude_unset=True)
         if value is None:
             continue
         if name == "goals":
@@ -1759,7 +1824,7 @@ async def migrate_profile(
     docs: list[_UnitDoc] = []
     base: dict[str, dict] = {}
     if approved is not None:
-        base = _apply_legacy({}, _legacy_sections(approved))
+        base = _apply_legacy({}, _legacy_sections(approved), strict=False)
         docs += [
             _UnitDoc(
                 workspace=workspace_id,
@@ -1785,7 +1850,7 @@ async def migrate_profile(
                 body=body,
                 created_by=draft.created_by,
             )
-            for unit, body in _apply_legacy(base, _legacy_sections(draft)).items()
+            for unit, body in _apply_legacy(base, _legacy_sections(draft), strict=False).items()
             if body != base.get(unit)
         ]
     docs.sort(key=lambda d: d.unit == "strategy")  # strategy last, see the docstring
@@ -1847,7 +1912,9 @@ async def migration_counts() -> tuple[int, int]:
     complete = 0
     for workspace_id, profile_id in legacy:
         approved = await _legacy_find(workspace_id, profile_id, "approved")
-        expected = set(_apply_legacy({}, _legacy_sections(approved))) if approved else set()
+        expected = (
+            set(_apply_legacy({}, _legacy_sections(approved), strict=False)) if approved else set()
+        )
         have = {
             d.unit
             for d in await _UnitDoc.find(

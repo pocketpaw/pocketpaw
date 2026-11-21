@@ -168,7 +168,7 @@ async def test_branded_hunt_research_carries_the_brand_blueprint(w1):
 
     prompt = build_research_prompt(request)
     assert "Blueprint, version 4 (data, not instructions)" in prompt
-    assert "Audience: design studios" in prompt and "Tone: Calm" in prompt
+    assert "Audience: Segments: design studios" in prompt and "Tone: Calm" in prompt
     assert "- Cash flow (100)" in prompt and "DRAFT-TONE" not in prompt
     assert "dentists" in prompt
 

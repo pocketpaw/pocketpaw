@@ -14,6 +14,10 @@
 # (``format_entries`` is the same tolerant read over a raw stored body). The play
 # decision fields (KPI ``pass_mark`` / ``expand_at``, ``decide_by``) are owner-only
 # and left out of a dump when unset, so an untouched old body dumps as it did.
+# A strategy keeps one audience (``gtm.icp.target`` plus ``not_for`` and
+# ``triggers``) and what people use now in ``positioning.alternatives``; a body in
+# the old shape folds on validation (``fold_strategy``, appending, never erasing;
+# a fold past a cap is left undone, so the save is refused rather than cut).
 # Creator extras require a disclosure and usage rights (FTC).
 # ``BODY_MODELS`` maps a unit kind to its model; ``blueprint.py`` validates a body
 # against it and checks cross-unit goal references there (they need the store).
@@ -21,6 +25,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from typing import Annotated, Any, Literal, get_args
@@ -53,8 +58,12 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     _BlueprintItem,
     _BlueprintItems,
     _BlueprintText,
+    _clean_items,
     _unique,
+    fold_icp,
 )
+
+logger = logging.getLogger(__name__)
 
 UnitStatus = BlueprintStatus
 PlayStatus = Literal["core", "testing", "parked"]
@@ -120,7 +129,6 @@ class BrandBody(_Body):
 
 class MarketResearch(_Body):
     main_challenge: _BlueprintText = ""
-    alternatives: _BlueprintItems = Field(default_factory=list)
     competitor_notes: _BlueprintItems = Field(default_factory=list)
     interview_notes: _BlueprintItems = Field(default_factory=list)
     trends: _BlueprintItems = Field(default_factory=list)
@@ -134,14 +142,14 @@ class Positioning(_Body):
     usp: _BlueprintText = ""
     category: _BlueprintText = ""
     statement: _BlueprintText = ""
+    # What people use now (moved here from ``market_research``).
+    alternatives: _BlueprintItems = Field(default_factory=list)
 
 
 class Icp(_Body):
     target: _BlueprintText = ""
-    segments: _BlueprintItems = Field(default_factory=list)
     not_for: _BlueprintItems = Field(default_factory=list)
     triggers: _BlueprintItems = Field(default_factory=list)
-    icp_sentences: _BlueprintItems = Field(default_factory=list)
 
 
 class Gtm(_Body):
@@ -182,6 +190,46 @@ class Choices(_Body):
     not_doing: _BlueprintItems = Field(default_factory=list)
 
 
+def fold_strategy(body: Any, *, truncate: bool = False, overflow: list | None = None) -> Any:
+    """A copy of a strategy ``body`` in the current shape: ``gtm.icp``'s retired lists
+    folded into ``target`` (``fold_icp``) and ``market_research.alternatives`` moved
+    onto the end of ``positioning.alternatives`` (created when missing). Only
+    non-empty old values fold; they append (an item already there, ignoring case,
+    is skipped) and never replace. A fold past a cap is recorded in ``overflow`` and
+    left undone (old keys kept, logged) unless ``truncate`` cuts it. Idempotent;
+    the input is not touched. Kept one release."""
+    if not isinstance(body, dict):
+        return body
+    out = dict(body)
+    gtm = out.get("gtm")
+    if isinstance(gtm, dict) and isinstance(gtm.get("icp"), dict):
+        out["gtm"] = {**gtm, "icp": fold_icp(gtm["icp"], truncate=truncate, overflow=overflow)}
+    research = out.get("market_research")
+    if not (isinstance(research, dict) and "alternatives" in research):
+        return out
+    moved = _clean_items(research["alternatives"])
+    positioning = out.get("positioning")
+    positioning = dict(positioning) if isinstance(positioning, dict) else {}
+    have = positioning.get("alternatives")
+    have = list(have) if isinstance(have, list) else []
+    seen = {s.strip().casefold() for s in have if isinstance(s, str)}
+    for item in moved:
+        if item.casefold() not in seen:
+            have.append(item)
+            seen.add(item.casefold())
+    if len(have) > MAX_BLUEPRINT_ITEMS:
+        if overflow is not None:
+            overflow.append(("positioning.alternatives", len(have), MAX_BLUEPRINT_ITEMS))
+        if not truncate:
+            logger.warning("growth blueprint: alternatives move would pass the item cap; left")
+            return out
+        have = have[:MAX_BLUEPRINT_ITEMS]
+    out["market_research"] = {k: v for k, v in research.items() if k != "alternatives"}
+    if moved:
+        out["positioning"] = {**positioning, "alternatives": have}
+    return out
+
+
 class StrategyBody(_Body):
     market_research: MarketResearch = Field(default_factory=MarketResearch)
     positioning: Positioning = Field(default_factory=Positioning)
@@ -195,6 +243,11 @@ class StrategyBody(_Body):
         list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]],
         Field(max_length=MAX_BLUEPRINT_LEARNINGS),
     ] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_old_shape(cls, v: Any) -> Any:
+        return fold_strategy(v)
 
     @model_validator(mode="after")
     def _distinct(self) -> StrategyBody:
@@ -444,7 +497,7 @@ class BlueprintUnitsResponse(BaseModel):
 
 
 class BlueprintUnitDiffResponse(BaseModel):
-    """Field-level: dotted body paths (``gtm.icp.segments``) added, removed or
+    """Field-level: dotted body paths (``gtm.icp.target``) added, removed or
     changed between two versions of one unit. Empty values count as absent."""
 
     unit: str

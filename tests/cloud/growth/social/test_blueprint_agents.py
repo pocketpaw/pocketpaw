@@ -341,7 +341,7 @@ async def test_reply_mappers_carry_blueprint_version(mongo_db):
 
 # --- every Blueprint text field is fenced in every prompt ----------------------------------
 
-_FIELDS = ("summary", "product", "problem", "segment", "icp", "tone", "avoid", "pillar", "hook")
+_FIELDS = ("summary", "product", "problem", "target", "notfor", "tone", "avoid", "pillar", "hook")
 
 
 def _evil(name: str) -> str:
@@ -370,7 +370,7 @@ def test_every_blueprint_field_is_fenced_in_all_four_prompts():
         version=7,
         status="approved",
         identity=BlueprintIdentity(_evil("summary"), _evil("product"), _evil("problem")),
-        audience=BlueprintAudience((_evil("segment"),), (_evil("icp"),)),
+        audience=BlueprintAudience(_evil("target"), (_evil("notfor"),)),
         voice=BlueprintVoice(_evil("tone"), (_evil("avoid"),)),
         pillars=(BlueprintPillar(_evil("pillar"), 100, (_evil("hook"),)),),
     )
