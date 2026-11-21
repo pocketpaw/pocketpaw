@@ -59,6 +59,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
+from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.context import RequestContext
@@ -3445,17 +3446,52 @@ async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, Po
     }
 
 
+class _LiveIdeaRow(BaseModel):
+    """Projection: the idea fields ``live_posts`` reads, never the text or media."""
+
+    id: PydanticObjectId = Field(alias="_id")
+    platform: str = ""
+    published_at: datetime | None = None
+
+
+class _LiveMetricRow(BaseModel):
+    workspace: str
+    idea: str
+    x_post_id: str
+    age_bucket: int
+    captured_at: datetime
+    impressions: int = 0
+    likes: int = 0
+    replies: int = 0
+    reposts: int = 0
+    quotes: int = 0
+    bookmarks: int = 0
+
+
+class _LiveLinkRow(BaseModel):
+    idea: str
+    clicks_by_day: dict[str, int] = Field(default_factory=dict)
+
+
 async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
     """Every published idea of one brand (an idea with no platform counts as ``x``)
     with all its metric snapshots and its tracked links' clicks per UTC day, within
     ``workspace_id`` only. A pure read; ``live`` does the math."""
     # ponytail: reads the brand's whole published history; add a window if it grows large.
-    ideas = await _IdeaDoc.find(
-        {"workspace": workspace_id, "profile": profile_id, "published_at": {"$ne": None}}
-    ).to_list()
+    ideas = (
+        await _IdeaDoc.find(
+            {"workspace": workspace_id, "profile": profile_id, "published_at": {"$ne": None}}
+        )
+        .project(_LiveIdeaRow)
+        .to_list()
+    )
     ids = [str(d.id) for d in ideas]
     snaps: dict[str, list[PostMetrics]] = {}
-    for m in await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}}).to_list():
+    for m in (
+        await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}})
+        .project(_LiveMetricRow)
+        .to_list()
+    ):
         snaps.setdefault(m.idea, []).append(
             PostMetrics(
                 workspace_id=m.workspace,
@@ -3467,7 +3503,11 @@ async def live_posts(workspace_id: str, profile_id: str) -> list[LivePost]:
             )
         )
     clicks: dict[str, list[dict[str, int]]] = {}
-    for link in await _LinkDoc.find({"workspace": workspace_id, "idea": {"$in": ids}}).to_list():
+    for link in (
+        await _LinkDoc.find({"workspace": workspace_id, "idea": {"$in": ids}})
+        .project(_LiveLinkRow)
+        .to_list()
+    ):
         clicks.setdefault(link.idea, []).append(dict(link.clicks_by_day))
     return [
         LivePost(

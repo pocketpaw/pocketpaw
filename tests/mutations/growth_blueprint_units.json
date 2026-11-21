@@ -326,8 +326,8 @@
   {
     "label": "live: the snapshot read leaks across workspaces",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    ).to_list()\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():\n",
-    "replace": "    ).to_list()\n    ids = [str(d.id) for d in ideas]\n    snaps: dict[str, list[PostMetrics]] = {}\n    for m in await _MetricDoc.find({\"idea\": {\"$in\": ids}}).to_list():\n",
+    "find": "        await _MetricDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}})\n        .project(_LiveMetricRow)\n",
+    "replace": "        await _MetricDoc.find({\"idea\": {\"$in\": ids}})\n        .project(_LiveMetricRow)\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
@@ -335,8 +335,8 @@
   {
     "label": "live: the link read leaks across workspaces",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
-    "find": "    for link in await _LinkDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}}).to_list():\n        clicks.setdefault(",
-    "replace": "    for link in await _LinkDoc.find({\"idea\": {\"$in\": ids}}).to_list():\n        clicks.setdefault(",
+    "find": "        await _LinkDoc.find({\"workspace\": workspace_id, \"idea\": {\"$in\": ids}})\n        .project(_LiveLinkRow)\n",
+    "replace": "        await _LinkDoc.find({\"idea\": {\"$in\": ids}})\n        .project(_LiveLinkRow)\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
@@ -346,6 +346,15 @@
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
     "find": "            await _RepoMetricDoc.find({\"workspace\": workspace_id, \"repo\": repo})\n            .sort([(\"day\", -1)])\n            .first_or_none()\n",
     "replace": "            await _RepoMetricDoc.find({\"repo\": repo})\n            .sort([(\"day\", -1)])\n            .first_or_none()\n",
+    "tests": [
+      "tests/cloud/growth/social/test_blueprint_live.py"
+    ]
+  },
+  {
+    "label": "live: the idea read drops its brand filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            {\"workspace\": workspace_id, \"profile\": profile_id, \"published_at\": {\"$ne\": None}}\n        )\n        .project(_LiveIdeaRow)\n",
+    "replace": "            {\"workspace\": workspace_id, \"published_at\": {\"$ne\": None}}\n        )\n        .project(_LiveIdeaRow)\n",
     "tests": [
       "tests/cloud/growth/social/test_blueprint_live.py"
     ]
