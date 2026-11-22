@@ -48,6 +48,9 @@
 # A profile upsert may set ``growth_branches`` (catalog branch ids, checked in dto);
 # ``growth_branches()`` is the read the approved Blueprint uses to pause plays.
 # ``scheduled_ideas`` / ``waiting_ideas`` are the weekly Plan's idea reads.
+# By-hand tasks: this module also owns the SocialTask doc. A brand holds at most
+# ``MAX_TASKS_PER_PROFILE``; ticking one adds or removes today's UTC date in
+# ``done_on`` (newest ``MAX_TASK_DONE_DAYS`` kept); "now" is injectable for tests.
 
 from __future__ import annotations
 
@@ -88,6 +91,8 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MAX_EVIDENCE_CHARS,
     MAX_LEARNING_CHARS,
     MAX_PROPOSED_LEARNINGS,
+    MAX_TASK_DONE_DAYS,
+    MAX_TASKS_PER_PROFILE,
     MEDIA_EXTENSIONS,
     METRIC_AGE_BUCKETS,
     POSTABLE_PLATFORMS,
@@ -105,6 +110,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     SocialAnalysis,
     SocialIdea,
     SocialProfile,
+    SocialTask,
     is_public_media_url,
     media_kind,
 )
@@ -123,10 +129,12 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     CreateExperimentRequest,
     CreateSocialPostRequest,
     CreateSocialPostResponse,
+    CreateSocialTaskRequest,
     DescriptionResponse,
     GenerateIdeasRequest,
     MakeMediaRequest,
     MakeMemeRequest,
+    MarkSocialTaskDoneRequest,
     MemeFormatListResponse,
     MemeFormatResponse,
     MetricsPostResponse,
@@ -163,10 +171,13 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialProfileResponse,
     SocialPulseResponse,
     SocialReviewResponse,
+    SocialTaskListResponse,
+    SocialTaskResponse,
     TelegramConnectCode,
     UpdateIdeaRequest,
     UpdateLearningRequest,
     UpdateReplyRequest,
+    UpdateSocialTaskRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
 )
@@ -200,6 +211,7 @@ from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as _Me
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as _ProfileDoc
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as _PulseDoc
+from pocketpaw_ee.cloud.models.social_task import SocialTask as _TaskDoc
 from pocketpaw_ee.sites.public_assets import kind_for_mime, max_bytes_for_mime, sniff_media_mime
 
 logger = logging.getLogger(__name__)
@@ -3876,6 +3888,147 @@ async def skip_setup(
     return await setup_status(ctx, profile.id)
 
 
+# ---------------------------------------------------------------------------
+# By-hand tasks
+# ---------------------------------------------------------------------------
+
+
+def _task_today(now: datetime | None) -> date:
+    return _aware(now or datetime.now(UTC)).astimezone(UTC).date()
+
+
+def _task_to_domain(doc: _TaskDoc) -> SocialTask:
+    return SocialTask(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        profile_id=doc.profile,
+        title=doc.title,
+        repeat=doc.repeat,
+        link=doc.link,
+        weekday=doc.weekday,
+        done_on=tuple(doc.done_on),
+        created_at=doc.createdAt,
+    )
+
+
+def _task_to_response(t: SocialTask, today: date) -> SocialTaskResponse:
+    return SocialTaskResponse(
+        id=t.id,
+        profile_id=t.profile_id,
+        title=t.title,
+        link=t.link,
+        repeat=t.repeat,  # type: ignore[arg-type]
+        weekday=t.weekday,
+        due_today=t.due_on(today),
+        done_today=t.done_on_day(today),
+    )
+
+
+async def _fetch_task_in_workspace(workspace_id: str, task_id: str) -> _TaskDoc:
+    try:
+        oid = PydanticObjectId(task_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("social_task", task_id) from exc
+    doc = await _TaskDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("social_task", task_id)
+    return doc
+
+
+async def list_tasks(
+    ctx: RequestContext, profile_id: str | None = None, now: datetime | None = None
+) -> SocialTaskListResponse:
+    """One brand's by-hand tasks, oldest first. A foreign profile is a 404."""
+    workspace_id = _require_workspace(ctx)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    docs = (
+        await _TaskDoc.find({"workspace": workspace_id, "profile": str(profile.id)})
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(MAX_TASKS_PER_PROFILE)
+        .to_list()
+    )
+    today = _task_today(now)
+    items = [_task_to_response(_task_to_domain(d), today) for d in docs]
+    return SocialTaskListResponse(items=items)
+
+
+async def create_task(
+    ctx: RequestContext, body: CreateSocialTaskRequest, now: datetime | None = None
+) -> SocialTaskResponse:
+    body = CreateSocialTaskRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    profile = await _require_profile_doc(workspace_id, body.profile_id)
+    profile_key = str(profile.id)
+    # ponytail: count-then-insert can let two racing creates reach 21; harmless for a to-do list.
+    count = await _TaskDoc.find({"workspace": workspace_id, "profile": profile_key}).count()
+    if count >= MAX_TASKS_PER_PROFILE:
+        raise ValidationError(
+            "social.task_limit",
+            f"A brand can have at most {MAX_TASKS_PER_PROFILE} by-hand tasks. "
+            "Delete one to add another.",
+        )
+    doc = _TaskDoc(
+        workspace=workspace_id,
+        profile=profile_key,
+        title=body.title,
+        link=body.link,
+        repeat=body.repeat,
+        weekday=body.weekday,
+    )
+    await doc.insert()
+    # no-event: Growth › Social has no realtime subscriber; Today re-fetches.
+    return _task_to_response(_task_to_domain(doc), _task_today(now))
+
+
+async def update_task(
+    ctx: RequestContext, task_id: str, body: UpdateSocialTaskRequest, now: datetime | None = None
+) -> SocialTaskResponse:
+    """Edit a task. Switching to daily clears ``weekday``; weekly without one is a 422."""
+    body = UpdateSocialTaskRequest.model_validate(body)
+    doc = await _fetch_task_in_workspace(_require_workspace(ctx), task_id)
+    sent = body.model_fields_set
+    if body.title is not None:
+        doc.title = body.title
+    if "link" in sent:
+        doc.link = body.link
+    repeat = body.repeat or doc.repeat
+    weekday = body.weekday if "weekday" in sent else doc.weekday
+    if repeat == "daily":
+        weekday = None
+    elif weekday is None:
+        raise ValidationError(
+            "social.task_weekday_required", "A weekly task needs a weekday (0 = Monday)."
+        )
+    doc.repeat, doc.weekday = repeat, weekday
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; Today re-fetches.
+    return _task_to_response(_task_to_domain(doc), _task_today(now))
+
+
+async def delete_task(ctx: RequestContext, task_id: str) -> None:
+    doc = await _fetch_task_in_workspace(_require_workspace(ctx), task_id)
+    await doc.delete()
+    # no-event: Growth › Social has no realtime subscriber; Today re-fetches.
+
+
+async def mark_task_done(
+    ctx: RequestContext, task_id: str, body: MarkSocialTaskDoneRequest, now: datetime | None = None
+) -> SocialTaskResponse:
+    """Tick (``done: true``) or untick today's UTC date on a task. Idempotent."""
+    body = MarkSocialTaskDoneRequest.model_validate(body)
+    doc = await _fetch_task_in_workspace(_require_workspace(ctx), task_id)
+    today = _task_today(now)
+    days = set(doc.done_on)
+    if body.done:
+        days.add(today)
+    else:
+        days.discard(today)
+    doc.done_on = sorted(days)[-MAX_TASK_DONE_DAYS:]
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; Today re-fetches.
+    return _task_to_response(_task_to_domain(doc), today)
+
+
 __all__ = [
     "close_experiment",
     "create_experiment",
@@ -3927,6 +4080,11 @@ __all__ = [
     "get_profile",
     "list_ideas",
     "update_idea",
+    "list_tasks",
+    "create_task",
+    "update_task",
+    "delete_task",
+    "mark_task_done",
     "upsert_profile",
     "setup_status",
     "skip_setup",

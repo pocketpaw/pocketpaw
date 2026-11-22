@@ -33,6 +33,8 @@
 # ``POST_CHANNELS`` are the channels the weekly Plan gives slots to (email /
 # whatsapp sends stay in the Blueprint). ``SETUP_KEYS`` are the "Set up"
 # checklist rows in order.
+# ``SocialTask`` is one recurring "By hand" to-do on a brand (``TaskRepeat``,
+# at most ``MAX_TASKS_PER_PROFILE``, ``done_on`` capped at ``MAX_TASK_DONE_DAYS``).
 
 from __future__ import annotations
 
@@ -542,3 +544,34 @@ class GrowthBlueprint:
     plan: dict = field(default_factory=dict)
     plays: dict = field(default_factory=dict)
     unit_versions: dict = field(default_factory=dict)
+
+
+# --- By-hand tasks ----------------------------------------------------------------------
+
+TaskRepeat = Literal["daily", "weekly"]
+MAX_TASKS_PER_PROFILE = 20
+MAX_TASK_TITLE_CHARS = 80
+# The newest UTC dates a task keeps in ``done_on``.
+MAX_TASK_DONE_DAYS = 60
+
+
+@dataclass(frozen=True)
+class SocialTask:
+    """One recurring task a person does by hand for a brand. ``weekday`` is
+    0 = Monday (``date.weekday()``), set only when ``repeat`` is weekly."""
+
+    id: str
+    workspace_id: str
+    profile_id: str
+    title: str
+    repeat: str
+    link: str | None = None
+    weekday: int | None = None
+    done_on: tuple[date, ...] = ()
+    created_at: datetime | None = None
+
+    def due_on(self, day: date) -> bool:
+        return self.repeat == "daily" or day.weekday() == self.weekday
+
+    def done_on_day(self, day: date) -> bool:
+        return day in self.done_on

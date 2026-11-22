@@ -44,6 +44,10 @@
 # blueprint audience is ``{target, not_for}`` (a request may still carry the retired
 # ``segments`` / ``icp_sentences``); ``fold_icp`` folds those into ``target``
 # (shared with the unit bodies).
+# A by-hand task has a trimmed title of 1..80 characters, an optional http(s)
+# ``link`` ("" reads as none) and ``weekday`` 0..6; on create, weekly needs a
+# weekday and daily refuses one. A task edit needs at least one field; the
+# service checks the merged repeat/weekday pair.
 
 from __future__ import annotations
 
@@ -78,6 +82,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MAX_REPLY_QUERY_CHARS,
     MAX_REPLY_WATCH_HANDLES,
     MAX_ROADMAP_PHASES,
+    MAX_TASK_TITLE_CHARS,
     MIN_POSTS_PER_ARM_DEFAULT,
     PLATFORM_FORMATS,
     AnalysisStatus,
@@ -99,6 +104,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     SetupKey,
     SetupState,
     SocialRole,
+    TaskRepeat,
     TeamSize,
     clean_tag,
 )
@@ -1299,3 +1305,88 @@ class PlanDayModel(BaseModel):
 class WeekPlanResponse(BaseModel):
     week: str
     days: list[PlanDayModel]
+
+
+# --- By-hand tasks ----------------------------------------------------------------------
+
+_TaskTitle = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_TASK_TITLE_CHARS)
+]
+_TaskLink = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None
+_Weekday = Annotated[int, Field(ge=0, le=6)]
+
+
+def _task_link(v: str | None) -> str | None:
+    if not v:
+        return None
+    parts = urlsplit(v)
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        raise ValueError("link must be an http(s) URL")
+    return v
+
+
+class CreateSocialTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str
+    title: _TaskTitle
+    link: _TaskLink = None
+    repeat: TaskRepeat
+    weekday: _Weekday | None = None
+
+    @field_validator("link")
+    @classmethod
+    def _http_link(cls, v: str | None) -> str | None:
+        return _task_link(v)
+
+    @model_validator(mode="after")
+    def _weekday_matches_repeat(self) -> CreateSocialTaskRequest:
+        if self.repeat == "weekly" and self.weekday is None:
+            raise ValueError("a weekly task needs a weekday (0 = Monday .. 6 = Sunday)")
+        if self.repeat == "daily" and self.weekday is not None:
+            raise ValueError("a daily task takes no weekday")
+        return self
+
+
+class UpdateSocialTaskRequest(BaseModel):
+    """Edit a task. An explicit ``link: null`` clears the link; an omitted field is
+    left alone (the service reads ``model_fields_set``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: _TaskTitle | None = None
+    link: _TaskLink = None
+    repeat: TaskRepeat | None = None
+    weekday: _Weekday | None = None
+
+    @field_validator("link")
+    @classmethod
+    def _http_link(cls, v: str | None) -> str | None:
+        return _task_link(v)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> UpdateSocialTaskRequest:
+        if not self.model_fields_set:
+            raise ValueError("provide title, link, repeat and/or weekday")
+        return self
+
+
+class MarkSocialTaskDoneRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    done: bool
+
+
+class SocialTaskResponse(BaseModel):
+    id: str
+    profile_id: str
+    title: str
+    link: str | None
+    repeat: TaskRepeat
+    weekday: int | None
+    due_today: bool
+    done_today: bool
+
+
+class SocialTaskListResponse(BaseModel):
+    items: list[SocialTaskResponse]

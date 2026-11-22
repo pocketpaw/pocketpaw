@@ -1072,6 +1072,11 @@ class TestGrowthRouteRbac:
             ("GET", "/growth/social/blueprint/live"): "growth.read",
             ("GET", "/growth/social/setup-status"): "growth.read",
             ("POST", "/growth/social/setup-status/skip"): "growth.write",
+            ("GET", "/growth/social/tasks"): "growth.read",
+            ("POST", "/growth/social/tasks"): "growth.write",
+            ("PATCH", "/growth/social/tasks/{task_id}"): "growth.write",
+            ("DELETE", "/growth/social/tasks/{task_id}"): "growth.write",
+            ("POST", "/growth/social/tasks/{task_id}/done"): "growth.write",
             ("GET", "/growth/social/plan"): "growth.read",
         }
 

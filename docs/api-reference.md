@@ -10312,6 +10312,11 @@ the blueprint writes `growth.manage` (ADMIN), every other route `growth.write`
 | `GET /api/v1/growth/social/setup-status` | The brand's "Set up" checklist (see Setup checklist). |
 | `POST /api/v1/growth/social/setup-status/skip` | `{key, skipped?}`: skip one checklist row, or un-skip it with `skipped: false`. Idempotent; an unknown key is a 422. Returns the checklist. |
 | `GET /api/v1/growth/social/plan` | `?week=YYYY-Www`: the week's post slots per day, computed from the approved blueprint and the ideas (see Weekly Plan). |
+| `GET /api/v1/growth/social/tasks` | `?profile_id=`: the brand's by-hand tasks, oldest first: `{items}` (see By-hand tasks). |
+| `POST /api/v1/growth/social/tasks` | `{profile_id, title, link?, repeat, weekday?}`: add a by-hand task. |
+| `PATCH /api/v1/growth/social/tasks/{task_id}` | `{title?, link?, repeat?, weekday?}`: edit a task. |
+| `DELETE /api/v1/growth/social/tasks/{task_id}` | Delete a task. `204`. |
+| `POST /api/v1/growth/social/tasks/{task_id}/done` | `{done}`: tick or untick today (UTC) on a task. |
 
 **Response (`SocialProfile`)** — every profile route returns this shape:
 
@@ -11182,6 +11187,30 @@ one that plans no X, the run skips with a log line. A hunt gets its brand's
 audience, voice and pillars as context; a hunt whose brand has no approved
 Blueprint gets none. Every idea, reply card and outreach draft made with
 an approved Blueprint carries its `blueprint_version`; `null` otherwise.
+
+### By-hand tasks — `/api/v1/growth/social/tasks`
+
+Recurring to-dos the founder does by hand for one brand ("2 Reddit comments"
+daily, "Fill tracking" weekly), shown on Growth › Today. Reads are
+`growth.read`, writes `growth.write`. Every route answers with this shape (the
+list wraps it as `{items}`):
+
+```json
+{"id": "6731…", "profile_id": "6702…", "title": "Fill tracking", "link": null,
+ "repeat": "weekly", "weekday": 6, "due_today": false, "done_today": false}
+```
+
+- `title` is trimmed, 1 to 80 characters. `link` is optional and must be an
+  http(s) URL (`""` reads as none). On PATCH an explicit `link: null` clears it.
+- `repeat` is `daily` or `weekly`. `weekday` is 0 (Monday) to 6 (Sunday), Python's
+  `date.weekday()`: required for weekly, refused for daily on create. A PATCH to
+  `daily` clears it; a PATCH that leaves a weekly task with no weekday is
+  `422 social.task_weekday_required`.
+- "Today" is the UTC date. `due_today` is always true for daily and true on its
+  weekday for weekly; `done_today` is whether today was ticked. `POST .../done`
+  is idempotent, and a task keeps only its newest 60 ticked days.
+- At most 20 tasks per brand; the 21st create is `422 social.task_limit`. A task
+  or profile from another workspace, or a malformed id, is a 404.
 
 ### Accounts — `/api/v1/growth/social/accounts`
 

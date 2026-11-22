@@ -145,6 +145,7 @@ from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse
+from pocketpaw_ee.cloud.models.social_task import SocialTask
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 from pocketpaw_ee.cloud.models.studio_template import StudioTemplate
@@ -589,6 +590,8 @@ def get_all_documents():
         # import boundary.
         SocialExperiment,
         SocialLearning,
+        # Each brand's recurring "By hand" tasks; same import boundary.
+        SocialTask,
         # Each brand profile's versioned Brand Blueprint. Only
         # ``ee.cloud.growth.social.blueprint`` imports it.
         GrowthBlueprint,
