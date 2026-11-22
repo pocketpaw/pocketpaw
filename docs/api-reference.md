@@ -10413,7 +10413,7 @@ the three resets it to its default (`false`, `5`, `[]`).
 
 `reply_watch_handles` is a list of X handles: each is trimmed, a leading `@`
 is dropped, it must match `^[A-Za-z0-9_]{1,15}$`, duplicates are dropped
-ignoring case, and more than 30 is a 422. `reply_queries` is a list of X
+ignoring case, and more than 50 is a 422. `reply_queries` is a list of X
 search queries: each is trimmed (blank ones dropped, duplicates dropped), at
 most 200 characters, at most 5. `reply_cards_per_day` is an integer from 1 to
 25 (default `15`). An explicit `null` resets them to `[]`, `[]` and `15`.
@@ -10628,10 +10628,14 @@ Postiz post and age. The weekly review and the morning summary below read only
 the X rows; the Blueprint live values read both (see Live values).
 
 X is read with `POCKETPAW_GROWTH_X_BEARER_TOKEN` (an X API app bearer token;
-unset means no reads and no snapshots), in batches of up to 100 posts, one read
-per batch. `POCKETPAW_GROWTH_X_DAILY_READ_CAP` (default `100`, `0` disables) caps
-those reads per workspace per UTC day on the `growth_x_reads` daily meter; at
-the cap the remaining posts wait for the next run. One failing workspace never
+unset means no reads and no snapshots), in batches of up to 100 posts. X bills
+per post returned, so the meter counts posts, not calls.
+`POCKETPAW_GROWTH_X_DAILY_READ_CAP` (default `100`, `0` disables) caps the posts
+read per workspace per UTC day on the `growth_x_reads` daily meter; a batch is
+claimed one unit up front and the rest of its posts are counted after X answers
+(past the cap too, since X has already billed them). At the cap the remaining
+posts wait for the next run. Reply-card searches have their own meter (see Reply
+cards), so they never use this budget. One failing workspace never
 stops the others.
 
 #### Morning summary: `GET /api/v1/growth/social/metrics/summary`
@@ -10693,14 +10697,19 @@ most 500 characters. A post never gets two cards (unique per workspace,
 profile and post).
 
 **How candidates are found.** Only through the capped, read-only X reader
-(`POCKETPAW_GROWTH_X_BEARER_TOKEN`, `POCKETPAW_GROWTH_X_DAILY_READ_CAP`). The
-watch handles are packed into `(from:a OR from:b ...) -is:retweet` queries of at
-most 512 characters on `/2/tweets/search/recent`, so 30 handles cost two reads;
-each saved query is one more read. Reads cover the last 24 hours and stop once
-the day's card budget is filled. Posts that already have a card and posts by
+(`POCKETPAW_GROWTH_X_BEARER_TOKEN`). The watch handles are packed into
+`(from:a OR from:b ...) -is:retweet` queries of at most 512 characters on
+`/2/tweets/search/recent`, so 50 handles take at most three searches; each saved
+query is one more search. Each search asks for at most 25 posts from the last 24
+hours. X bills per post returned, so every post counts on the `growth_x_reply_reads`
+daily meter, capped per workspace per UTC day by
+`POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP` (default `200`, `0` disables), apart
+from the metrics sweep's `POCKETPAW_GROWTH_X_DAILY_READ_CAP`. The 05:45 UTC job
+and `POST /replies/draft` share this meter. Searching stops once the day's card budget
+is filled or at the first refused read. Posts that already have a card and posts by
 the product's own connected X account are skipped. Mentions of the connected
 account are not read yet (its X user id is not stored). A refused read (no
-token, the cap, an error) simply yields no cards.
+token, the cap, an error) ends the search; posts already found still get cards.
 
 **How drafts are made.** One agent run drafts the batch (short, specific,
 helpful, not salesy, no links unless asked, no claimed numbers; it mentions the

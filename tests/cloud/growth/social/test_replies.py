@@ -11,6 +11,9 @@
 # dash / invented-number drafts dropped, intent-link encoding and the 280 cap, the
 # edit re-check (422) and intent rebuild, status updates, tenancy, inactive and
 # source-less profiles skipped, the settings round trip and the worker's cron.
+# The X cost guard runs the real ``x_read`` over a mocked transport: searches ask
+# for 25 posts, every post returned lands on the reply meter (never the metrics
+# one), a refused read ends the search, and 50 handles pack into few queries.
 
 from __future__ import annotations
 
@@ -20,21 +23,30 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from pocketpaw_ee.cloud.growth.social import changes as social_changes
+from pocketpaw_ee.cloud.growth.social import metrics as social_metrics
 from pocketpaw_ee.cloud.growth.social import replies as social_replies
 from pocketpaw_ee.cloud.growth.social import service as social_service
 from pocketpaw_ee.cloud.growth.social import x_api
 from pocketpaw_ee.cloud.growth.social.changes import Change, set_production_changes_fn
-from pocketpaw_ee.cloud.growth.social.domain import GeneratedReply, ReplyCandidate
+from pocketpaw_ee.cloud.growth.social.domain import (
+    MAX_REPLY_QUERIES,
+    MAX_REPLY_WATCH_HANDLES,
+    GeneratedReply,
+    ReplyCandidate,
+)
 from pocketpaw_ee.cloud.growth.social.replies import (
     handle_queries,
     intent_url,
     set_production_reply_draft_fn,
 )
 from pocketpaw_ee.cloud.growth.social.x_api import set_x_read_fn
+from pocketpaw_ee.cloud.metering import service as metering
+from pocketpaw_ee.cloud.metering.domain import DailyMeter
 from pocketpaw_ee.cloud.models.reply_draft import ReplyDraft as ReplyDoc
 from pymongo.errors import DuplicateKeyError
 
@@ -81,9 +93,18 @@ class _FakeX:
         self.posts = posts
         self.refuse = refuse
         self.calls: list[tuple[str, str, dict]] = []
+        self.meters: list[DailyMeter | None] = []
 
-    async def __call__(self, workspace_id: str, path: str, params: dict | None = None):
+    async def __call__(
+        self,
+        workspace_id: str,
+        path: str,
+        params: dict | None = None,
+        *,
+        meter: DailyMeter | None = None,
+    ):
         self.calls.append((workspace_id, path, dict(params or {})))
+        self.meters.append(meter)
         if self.refuse:
             return None
         return {
@@ -348,6 +369,116 @@ def test_handle_queries_stay_under_the_search_limit_and_cover_every_handle():
     assert sum(q.count("from:") for q in queries) == 30
 
 
+def test_fifty_worst_case_handles_pack_into_few_queries_under_the_limit():
+    assert MAX_REPLY_WATCH_HANDLES == 50
+    assert social_replies.SEARCH_QUERY_CHARS <= 512
+    handles = [f"h{i:02d}{'x' * 12}" for i in range(MAX_REPLY_WATCH_HANDLES)]
+    assert all(len(h) == 15 for h in handles)
+    queries = handle_queries(handles)
+    assert len(queries) <= MAX_REPLY_QUERIES
+    assert all(len(q) <= social_replies.SEARCH_QUERY_CHARS for q in queries)
+    assert sum(q.count("from:") for q in queries) == 50
+
+
+# --- the X cost guard (real reader, mocked transport) --------------------------------------
+
+TOKEN = "test-bearer-token"
+
+
+class _XHttp:
+    """The mocked X API: a search answers ``posts`` fresh posts, a tweets lookup its ids."""
+
+    def __init__(self, posts: int = 25) -> None:
+        self.posts = posts
+        self.requests: list[httpx.Request] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real = httpx.AsyncClient
+
+        def _client(**kw: Any) -> httpx.AsyncClient:
+            return real(transport=httpx.MockTransport(self._handle), **kw)
+
+        monkeypatch.setattr(x_api.httpx, "AsyncClient", _client)
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path == "/2/tweets":
+            ids = (request.url.params.get("ids") or "").split(",")
+            return httpx.Response(200, json={"data": [{"id": i} for i in ids]})
+        base = 1000 * len(self.requests)
+        data = [{"id": str(base + n), "author_id": "u1", "text": "hi"} for n in range(self.posts)]
+        return httpx.Response(200, json={"data": data, "includes": {"users": [{"id": "u1"}]}})
+
+
+@pytest.fixture
+def real_x(monkeypatch: pytest.MonkeyPatch) -> _XHttp:
+    monkeypatch.setenv(x_api.TOKEN_ENV, TOKEN)
+    for env in ("POCKETPAW_GROWTH_X_DAILY_READ_CAP", "POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP"):
+        monkeypatch.delenv(env, raising=False)
+    http = _XHttp()
+    http.install(monkeypatch)
+    return http
+
+
+async def _used(meter: DailyMeter, workspace_id: str = "w1") -> int:
+    return await metering.used(subject_type="workspace", subject_id=workspace_id, meter=meter)
+
+
+async def _find(**kw: Any) -> list[ReplyCandidate]:
+    args: dict[str, Any] = {"handles": ["alice"], "queries": [], "limit": 100, **kw}
+    return await social_replies.find_candidates("w1", now=datetime(2026, 11, 1), **args)
+
+
+@pytest.mark.asyncio
+async def test_a_search_asks_for_25_posts_and_each_post_claims_one_reply_read(
+    mongo_db: Any, real_x: _XHttp
+):
+    found = await _find()
+    (req,) = real_x.requests
+    assert req.url.path == social_replies.SEARCH_PATH
+    assert req.url.params["max_results"] == "25"
+    assert len(found) == 25
+    assert await _used(DailyMeter.GROWTH_X_REPLY_READS) == 25
+
+
+@pytest.mark.asyncio
+async def test_reply_and_metrics_reads_never_share_a_meter(mongo_db: Any, real_x: _XHttp):
+    await _find()
+    assert await _used(DailyMeter.GROWTH_X_REPLY_READS) == 25
+    assert await _used(DailyMeter.GROWTH_X_READS) == 0
+
+    out = await social_metrics.x_post_metrics("w1", ["1", "2", "3"])
+    assert len(out) == 3
+    assert await _used(DailyMeter.GROWTH_X_READS) == 3
+    assert await _used(DailyMeter.GROWTH_X_REPLY_READS) == 25
+
+
+@pytest.mark.asyncio
+async def test_at_the_reply_cap_the_search_stops_and_fails_closed(
+    mongo_db: Any, real_x: _XHttp, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP", "10")
+    found = await _find(queries=["csv export", "onboarding"])
+    # The first search was already paid for, so its posts are kept and metered past
+    # the cap; the second search is refused before any GET, and the third never runs.
+    assert len(real_x.requests) == 1
+    assert len(found) == 25
+    assert await _used(DailyMeter.GROWTH_X_REPLY_READS) == 25
+    assert await _find() == []
+    assert len(real_x.requests) == 1
+    # The metrics sweep keeps its own budget.
+    assert await social_metrics.x_post_metrics("w1", ["1"]) != {}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_read_ends_the_search(mongo_db: Any):
+    x = _FakeX(refuse=True)
+    set_x_read_fn(x)
+    assert await _find(queries=["a", "b"]) == []
+    assert len(x.calls) == 1
+    assert x.meters == [DailyMeter.GROWTH_X_REPLY_READS]
+
+
 # --- routes -------------------------------------------------------------------------------
 
 
@@ -465,7 +596,7 @@ async def test_reply_settings_round_trip_and_reset(w1):
     [
         {"reply_watch_handles": ["has space"]},
         {"reply_watch_handles": ["a" * 16]},
-        {"reply_watch_handles": [f"h{i}" for i in range(31)]},
+        {"reply_watch_handles": [f"h{i}" for i in range(MAX_REPLY_WATCH_HANDLES + 1)]},
         {"reply_queries": ["q" * 201]},
         {"reply_queries": [f"q{i}" for i in range(6)]},
         {"reply_cards_per_day": 0},

@@ -327,10 +327,55 @@
   {
     "label": "x reader: the daily read cap is skipped",
     "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
-    "find": "        cap=metering.growth_x_read_cap(),",
-    "replace": "        cap=None,",
+    "find": "        cap = metering.growth_x_read_cap()\n",
+    "replace": "        cap = None\n",
     "tests": [
       "tests/cloud/growth/social/test_metrics.py"
+    ]
+  },
+  {
+    "label": "x reader: the reply cap is skipped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
+    "find": "        cap = metering.growth_x_reply_read_cap()\n",
+    "replace": "        cap = None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "x reader: posts past the first are not metered",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
+    "find": "    if isinstance(posts, list) and len(posts) > 1:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: searches read on the metrics meter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "            meter=DailyMeter.GROWTH_X_REPLY_READS,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: the search keeps reading after a refused read",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "        if data is None:\n            break\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: a search asks X for 100 posts",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "    \"max_results\": 25,\n",
+    "replace": "    \"max_results\": 100,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
     ]
   },
   {
