@@ -31,7 +31,6 @@
 # ``run_repo_metrics`` stores one RepoMetric per repo and day (reruns refresh);
 # ``run_post_metrics`` stores append-only snapshots, X's through the capped, read-only
 # ``x_api``, others' from Postiz; review and ``latest_metrics`` read X rows. No X posts.
-#
 # Accounts and posting: each profile has its own Postiz org (created on first
 # connect, never on a read; API key stored encrypted and checked first, since org
 # creation is not idempotent). Telegram connects by code. A post checks its media,
@@ -40,7 +39,6 @@
 # bucket, content-addressed by workspace and profile. A post's first URL becomes a
 # tracked SocialLink sent as a ``Link:`` thread part; ``record_click`` counts per
 # UTC day unless a preview bot asked, and stores nothing about the requester.
-#
 # Learning loop: one running experiment per profile; daily drafts alternate its
 # arms and are stamped. Learnings reach the ideas prompt only once approved.
 # ``setup_status`` derives the setup checklist (done beats a skip; the accounts
@@ -48,9 +46,7 @@
 # A profile upsert may set ``growth_branches`` (catalog branch ids, checked in dto);
 # ``growth_branches()`` is the read the approved Blueprint uses to pause plays.
 # ``scheduled_ideas`` / ``waiting_ideas`` are the weekly Plan's idea reads.
-# By-hand tasks: this module also owns the SocialTask doc. A brand holds at most
-# ``MAX_TASKS_PER_PROFILE``; ticking one adds or removes today's UTC date in
-# ``done_on`` (newest ``MAX_TASK_DONE_DAYS`` kept); "now" is injectable for tests.
+# By-hand tasks: also owns the SocialTask doc (cap, ``done_on`` trim; see its block).
 
 from __future__ import annotations
 
@@ -3891,6 +3887,8 @@ async def skip_setup(
 # ---------------------------------------------------------------------------
 # By-hand tasks
 # ---------------------------------------------------------------------------
+# A brand holds at most MAX_TASKS_PER_PROFILE; ticking one adds or removes today's
+# UTC date in ``done_on`` (newest MAX_TASK_DONE_DAYS kept). "now" is injectable.
 
 
 def _task_today(now: datetime | None) -> date:
@@ -3983,7 +3981,8 @@ async def create_task(
 async def update_task(
     ctx: RequestContext, task_id: str, body: UpdateSocialTaskRequest, now: datetime | None = None
 ) -> SocialTaskResponse:
-    """Edit a task. Switching to daily clears ``weekday``; weekly without one is a 422."""
+    """Edit a task. Switching to daily clears ``weekday`` (sending one with it is a
+    422); weekly without one is a 422."""
     body = UpdateSocialTaskRequest.model_validate(body)
     doc = await _fetch_task_in_workspace(_require_workspace(ctx), task_id)
     sent = body.model_fields_set
@@ -3994,6 +3993,8 @@ async def update_task(
     repeat = body.repeat or doc.repeat
     weekday = body.weekday if "weekday" in sent else doc.weekday
     if repeat == "daily":
+        if "weekday" in sent and body.weekday is not None:
+            raise ValidationError("social.task_weekday_daily", "A daily task takes no weekday.")
         weekday = None
     elif weekday is None:
         raise ValidationError(

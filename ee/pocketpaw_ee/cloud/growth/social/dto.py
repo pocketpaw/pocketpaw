@@ -44,10 +44,8 @@
 # blueprint audience is ``{target, not_for}`` (a request may still carry the retired
 # ``segments`` / ``icp_sentences``); ``fold_icp`` folds those into ``target``
 # (shared with the unit bodies).
-# A by-hand task has a trimmed title of 1..80 characters, an optional http(s)
-# ``link`` ("" reads as none) and ``weekday`` 0..6; on create, weekly needs a
-# weekday and daily refuses one. A task edit needs at least one field; the
-# service checks the merged repeat/weekday pair.
+# A by-hand task: title 1..80 chars, optional http(s) ``link``, ``weekday`` 0..6 only
+# when weekly (an edit's merged pair is the service's check).
 
 from __future__ import annotations
 
@@ -108,6 +106,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     TeamSize,
     clean_tag,
 )
+from pocketpaw_ee.cloud.growth.social.links import is_web_url
 from pocketpaw_ee.cloud.growth.social.play_catalog import BRANCH_IDS
 
 logger = logging.getLogger(__name__)
@@ -1319,8 +1318,7 @@ _Weekday = Annotated[int, Field(ge=0, le=6)]
 def _task_link(v: str | None) -> str | None:
     if not v:
         return None
-    parts = urlsplit(v)
-    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+    if not is_web_url(v):
         raise ValueError("link must be an http(s) URL")
     return v
 

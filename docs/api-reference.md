@@ -11203,8 +11203,9 @@ list wraps it as `{items}`):
 - `title` is trimmed, 1 to 80 characters. `link` is optional and must be an
   http(s) URL (`""` reads as none). On PATCH an explicit `link: null` clears it.
 - `repeat` is `daily` or `weekly`. `weekday` is 0 (Monday) to 6 (Sunday), Python's
-  `date.weekday()`: required for weekly, refused for daily on create. A PATCH to
-  `daily` clears it; a PATCH that leaves a weekly task with no weekday is
+  `date.weekday()`: required for weekly, refused for daily. A PATCH to `daily`
+  clears it (sending a weekday with it is `422 social.task_weekday_daily`); a
+  PATCH that leaves a weekly task with no weekday is
   `422 social.task_weekday_required`.
 - "Today" is the UTC date. `due_today` is always true for daily and true on its
   weekday for weekly; `done_today` is whether today was ticked. `POST .../done`

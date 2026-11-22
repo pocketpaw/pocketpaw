@@ -7,7 +7,7 @@
 # weekday; done toggle on then off; ``done_on`` trimmed to the newest 60; another
 # workspace's task or profile is a 404; the 21st task is a 422; bad link scheme,
 # blank or long title and weekly-without-weekday are 422s; PATCH to daily clears
-# the weekday, to weekly without one is a 422.
+# the weekday, to weekly without one (or daily with one) is a 422.
 
 from __future__ import annotations
 
@@ -253,6 +253,12 @@ async def test_patch_to_daily_clears_weekday_and_to_weekly_needs_one(w1):
     resp = await w1.patch(f"{TASKS}/{weekly['id']}", json={"repeat": "weekly", "weekday": 6})
     assert (resp.json()["repeat"], resp.json()["weekday"]) == ("weekly", 6)
     resp = await w1.patch(f"{TASKS}/{weekly['id']}", json={"weekday": None})
+    assert resp.status_code == 422
+
+    resp = await w1.patch(f"{TASKS}/{weekly['id']}", json={"repeat": "daily", "weekday": 2})
+    assert resp.json()["error"]["code"] == "social.task_weekday_daily"
+    daily = await _task(w1, pid)
+    resp = await w1.patch(f"{TASKS}/{daily['id']}", json={"weekday": 2})
     assert resp.status_code == 422
 
     for bad in ({}, {"link": "mailto:a@b.c"}, {"title": ""}):
