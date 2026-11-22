@@ -25,8 +25,10 @@
 # Daily caps. ``try_spend`` / ``refund`` / ``used`` over the single
 # ``DailyUsage`` collection, plus the per-meter cap resolvers, for every daily
 # budget (turn, upload, comprehension, transcription, illustration, guest
-# turn, Growth X read). One rule: ``None`` = uncapped, ``0`` = disabled,
-# ``n > 0`` = cap; each resolver maps its legacy env var onto it. See "DAILY CAPS" below.
+# turn, Growth X metrics read, Growth X reply read). One rule: ``None`` =
+# uncapped, ``0`` = disabled, ``n > 0`` = cap; each resolver maps its legacy env
+# var onto it. ``charge`` counts spend that already happened, past the cap too.
+# See "DAILY CAPS" below.
 #
 # Early-access ceiling. ``reserve_early_access`` claims a free run's estimate on
 # ``DailyMeter.EARLY_ACCESS_CREDITS`` for the one platform subject
@@ -543,9 +545,17 @@ def illustration_cap() -> int | None:
 
 
 def growth_x_read_cap() -> int | None:
-    """X API reads per workspace per UTC day for Growth › Social post metrics
-    (``POCKETPAW_GROWTH_X_DAILY_READ_CAP``, default 100). ``0`` disables."""
+    """X posts read per workspace per UTC day for Growth › Social post metrics
+    (``POCKETPAW_GROWTH_X_DAILY_READ_CAP``, default 100). X bills per post
+    returned, so one unit is one post. ``0`` disables."""
     return _env_cap("POCKETPAW_GROWTH_X_DAILY_READ_CAP", 100, zero_means_uncapped=False)
+
+
+def growth_x_reply_read_cap() -> int | None:
+    """X posts read per workspace per UTC day for Growth › Social reply cards
+    (``POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP``, default 200), on its own meter
+    so reply searches never eat the metrics sweep's budget. ``0`` disables."""
+    return _env_cap("POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP", 200, zero_means_uncapped=False)
 
 
 def today() -> str:
@@ -628,6 +638,42 @@ async def try_spend(
     # no-event: a per-day abuse counter, not domain state; nothing downstream
     # listens for it, and an event per chat turn would be pure noise.
     return True
+
+
+async def charge(
+    *,
+    subject_type: SubjectType,
+    subject_id: str | None,
+    meter: DailyMeter,
+    amount: int,
+    day: str | None = None,
+) -> None:
+    """Count ``amount`` of spend that already happened, past the cap too, so the
+    next ``try_spend`` on this meter sees it and fails closed. Best-effort and
+    silent: a storage error logs and returns."""
+    if not subject_id or amount <= 0:
+        return
+    now = datetime.now(UTC)
+    try:
+        await DailyUsage.get_pymongo_collection().update_one(
+            _key(subject_type, subject_id, meter, day or today()),
+            {
+                "$inc": {"used": int(amount)},
+                "$setOnInsert": {"createdAt": now},
+                "$set": {"updatedAt": now},
+            },
+            upsert=True,
+        )
+    except Exception:
+        logger.warning(
+            "could not charge %d to daily %s for %s=%s",
+            amount,
+            meter,
+            subject_type,
+            subject_id,
+            exc_info=True,
+        )
+    # no-event: see ``try_spend``.
 
 
 async def refund(
@@ -771,11 +817,13 @@ __all__ = [
     "PLATFORM_SUBJECT",
     "bill_run",
     "bill_run_now",
+    "charge",
     "credits_ceil",
     "early_access_credits_used_today",
     "file_comprehension_cap",
     "file_transcription_cap",
     "growth_x_read_cap",
+    "growth_x_reply_read_cap",
     "illustration_cap",
     "load_rate_card",
     "refund",

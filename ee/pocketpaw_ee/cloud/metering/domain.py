@@ -61,8 +61,10 @@ class DailyMeter(StrEnum):
     FILE_COMPREHENSION = "file_comprehension"
     FILE_TRANSCRIPTION = "file_transcription"
     ILLUSTRATION = "illustration"
-    # Platform-paid X API reads for Growth › Social post metrics.
+    # Platform-paid X API reads for Growth › Social, one unit per post X returns:
+    # the post-metrics sweep here, the reply-card search on its own meter below.
     GROWTH_X_READS = "growth_x_reads"
+    GROWTH_X_REPLY_READS = "growth_x_reply_reads"
     # Whole credits of unpaid early-access chat spend, counted on the one
     # platform subject ``("workspace", "__platform__")``: reservations at run
     # start, reconciled to the real spend at ``bill_run``.

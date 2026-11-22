@@ -14,7 +14,7 @@
 # is free text up to 60 characters. ``active`` / ``weekly_post_quota`` (0..21) /
 # ``github_repos`` (at most 5 ``owner/name`` slugs, trimmed and deduped in
 # order) reset to their defaults on an explicit ``null``; so do the reply-card
-# settings: ``reply_watch_handles`` (at most 30 X handles, leading ``@`` dropped,
+# settings: ``reply_watch_handles`` (at most 50 X handles, leading ``@`` dropped,
 # deduped ignoring case), ``reply_queries`` (at most 5, each trimmed and at most
 # 200 characters) and ``reply_cards_per_day`` (1..25, default 15).
 # ``growth_branches`` must name branches of the play catalog (deduped in order;

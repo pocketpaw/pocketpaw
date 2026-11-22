@@ -10,12 +10,16 @@
 #
 # Read pattern (cheapest found): every watch handle goes into ``from:a OR from:b``
 # search queries on ``/2/tweets/search/recent``, packed up to SEARCH_QUERY_CHARS
-# each, so 30 handles cost 2 reads instead of 60 (a user lookup plus a timeline
-# read per handle). Each saved query is one more read. All reads ask for the last
-# 24 h, skip reposts, and expand ``author_id`` to the username. Reading stops as
-# soon as the card budget is filled. Mentions of the connected account are not
-# read: the connected account's X user id is not stored anywhere, and looking it
-# up would cost a read per run.
+# each, so even 50 fifteen-character handles (MAX_REPLY_WATCH_HANDLES) take 3
+# searches instead of 100 calls (a user lookup plus a timeline read per handle).
+# Packed handle searches do not count against MAX_REPLY_QUERIES; each saved query
+# is one more search. Every search asks for at most 25 posts from the last 24 h,
+# skips reposts, and expands ``author_id`` to the username. X bills per post
+# returned, so a search costs up to 25 units on the ``GROWTH_X_REPLY_READS`` meter
+# (its own daily cap, apart from the metrics sweep's). Reading stops as soon as
+# the card budget is filled, or at the first refused read (cap, no token, error).
+# Mentions of the connected account are not read: the connected account's X user
+# id is not stored anywhere, and looking it up would cost a read per run.
 #
 # Drafts come from the ``ReplyDraftFn`` seam (production: a pinned, tool-less
 # agent, like the ideas agent). ``check_reply`` holds the hard rules in code: at
@@ -52,13 +56,14 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 )
 from pocketpaw_ee.cloud.growth.social.ideas import check_draft
 from pocketpaw_ee.cloud.growth.social.x_api import resolve_x_read_fn
+from pocketpaw_ee.cloud.metering.domain import DailyMeter
 
 logger = logging.getLogger(__name__)
 
 INTENT_BASE = "https://x.com/intent/tweet"
 CONTEXT_CHARS = 500
 SEARCH_PATH = "/2/tweets/search/recent"
-# X's recent-search query limit on the basic tier; higher tiers allow more.
+# X's recent-search query limit on the basic and pay-per-use tiers (512).
 SEARCH_QUERY_CHARS = 512
 LOOKBACK = timedelta(hours=24)
 _NO_REPOSTS = " -is:retweet"
@@ -67,7 +72,8 @@ _SEARCH_FIELDS: dict[str, Any] = {
     "tweet.fields": "created_at,author_id,text",
     "expansions": "author_id",
     "user.fields": "username",
-    "max_results": 100,
+    # X bills per post returned; 25 keeps one search at $0.125.
+    "max_results": 25,
 }
 
 
@@ -154,7 +160,7 @@ async def find_candidates(
     limit: int,
 ) -> list[ReplyCandidate]:
     """Up to ``limit`` recent posts to reply to, deduped, without ``skip_ids`` or our
-    own posts. A refused read (cap, no token, error) just contributes nothing."""
+    own posts. A refused read (cap, no token, error) ends the search with what was found."""
     if limit <= 0 or not (handles or queries):
         return []
     read = resolve_x_read_fn()
@@ -163,7 +169,15 @@ async def find_candidates(
     seen = set(skip_ids)
     out: list[ReplyCandidate] = []
     for query in [*handle_queries(handles), *(f"({q}){_NO_REPOSTS}" for q in queries)]:
-        for c in _parse_search(await read(workspace_id, SEARCH_PATH, {**base, "query": query})):
+        data = await read(
+            workspace_id,
+            SEARCH_PATH,
+            {**base, "query": query},
+            meter=DailyMeter.GROWTH_X_REPLY_READS,
+        )
+        if data is None:
+            break
+        for c in _parse_search(data):
             if c.post_id in seen or c.author.lower() in own:
                 continue
             seen.add(c.post_id)

@@ -50,8 +50,9 @@ ROWS: list[tuple[str, str, tuple[str, ...], tuple[str, ...], int, str]] = [
         r"[\"']POCKETPAW_\w*DAILY\w*[\"']",
         ("*",),
         (),
-        # 7: the Growth X read cap resolver in cloud/metering (no Entitlements field yet, BC-6).
-        7,
+        # 8: the Growth X metrics and reply read cap resolvers in cloud/metering
+        # (no Entitlements field yet, BC-6).
+        8,
         "caps from entitlements.resolve_entitlements (0 = disabled, None = uncapped)",
     ),
     (

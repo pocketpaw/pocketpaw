@@ -3,8 +3,8 @@
 # Created 2026-10-01 (fix/canon-daily-caps, CN-3). The per-meter boundary
 # behaviour is pinned in tests/cloud/test_daily_caps_characterization.py; this
 # file covers what is the primitive's own: the legacy cap translation, the
-# refund (explicit day, clamp at zero, never upserts), multi-unit claims, and
-# that an uncapped meter touches no counter.
+# refund (explicit day, clamp at zero, never upserts), multi-unit claims, the
+# past-the-cap ``charge``, and that an uncapped meter touches no counter.
 
 from __future__ import annotations
 
@@ -68,6 +68,8 @@ def test_a_legacy_zero_means_uncapped_and_says_so_once(monkeypatch, caplog, env,
         ("POCKETPAW_FILE_COMPREHENSION_DAILY", metering.file_comprehension_cap),
         ("POCKETPAW_FILE_TRANSCRIPTION_DAILY", metering.file_transcription_cap),
         ("POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS", metering.illustration_cap),
+        ("POCKETPAW_GROWTH_X_DAILY_READ_CAP", metering.growth_x_read_cap),
+        ("POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP", metering.growth_x_reply_read_cap),
     ],
 )
 def test_zero_still_disables_the_paid_extras(monkeypatch, env, resolver):
@@ -85,6 +87,8 @@ def test_the_defaults_are_unchanged(monkeypatch):
         "POCKETPAW_FILE_COMPREHENSION_DAILY",
         "POCKETPAW_FILE_TRANSCRIPTION_DAILY",
         "POCKETPAW_OTHER_HAND_DAILY_ILLUSTRATIONS",
+        "POCKETPAW_GROWTH_X_DAILY_READ_CAP",
+        "POCKETPAW_GROWTH_X_DAILY_REPLY_READ_CAP",
     ):
         monkeypatch.delenv(env, raising=False)
     assert metering.workspace_turns_cap() == 500
@@ -93,6 +97,8 @@ def test_the_defaults_are_unchanged(monkeypatch):
     assert metering.file_comprehension_cap() == 500
     assert metering.file_transcription_cap() == 100
     assert metering.illustration_cap() == 20
+    assert metering.growth_x_read_cap() == 100
+    assert metering.growth_x_reply_read_cap() == 200
 
 
 async def test_an_uncapped_meter_touches_no_counter(usage_db):
@@ -118,6 +124,23 @@ async def test_meters_and_subject_types_do_not_share_a_row(usage_db):
     assert await metering.try_spend(
         subject_type="user", subject_id="x", meter=DailyMeter.ILLUSTRATION, cap=1
     )
+
+
+async def test_charge_lands_past_the_cap_so_the_next_claim_fails_closed(usage_db):
+    kw = {**_W, "subject_id": "w1", "meter": DailyMeter.GROWTH_X_REPLY_READS}
+    assert await metering.try_spend(**kw, cap=10)
+    await metering.charge(**kw, amount=24)
+    assert await metering.used(**kw) == 25
+    assert await metering.try_spend(**kw, cap=10) is False
+    assert await metering.used(**kw) == 25, "the refused claim was rolled back"
+
+
+async def test_charge_swallows_a_storage_error(monkeypatch):
+    def _boom(*_a, **_k):
+        raise RuntimeError("mongo is down")
+
+    monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+    await metering.charge(**_W, subject_id="w1", meter=DailyMeter.GROWTH_X_READS, amount=3)
 
 
 async def test_refund_targets_the_day_it_is_given(usage_db):
