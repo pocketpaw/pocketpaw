@@ -1218,6 +1218,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.reply_draft",
     "pocketpaw_ee.cloud.models.social_experiment",
     "pocketpaw_ee.cloud.models.social_learning",
+    "pocketpaw_ee.cloud.models.social_task",
     "pocketpaw_ee.cloud.models.growth_blueprint",
     "pocketpaw_ee.cloud.models.growth_blueprint_unit",
 ]

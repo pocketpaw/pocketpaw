@@ -27,6 +27,8 @@
 # allowlist; it is never taken from the request body. ``GET /setup-status`` (growth.read)
 # is the brand's "Set up" checklist; ``POST /setup-status/skip`` (growth.write) skips
 # or un-skips one row.
+# ``/tasks`` are a brand's recurring "By hand" tasks: list (growth.read), create,
+# edit, delete and tick today done (growth.write).
 
 from __future__ import annotations
 
@@ -69,9 +71,11 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     CreateExperimentRequest,
     CreateSocialPostRequest,
     CreateSocialPostResponse,
+    CreateSocialTaskRequest,
     GenerateIdeasRequest,
     MakeMediaRequest,
     MakeMemeRequest,
+    MarkSocialTaskDoneRequest,
     MemeFormatListResponse,
     MetricsSummaryResponse,
     RefreshPulseRequest,
@@ -96,9 +100,12 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialProfileResponse,
     SocialPulseResponse,
     SocialReviewResponse,
+    SocialTaskListResponse,
+    SocialTaskResponse,
     UpdateIdeaRequest,
     UpdateLearningRequest,
     UpdateReplyRequest,
+    UpdateSocialTaskRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
     WeekPlanResponse,
@@ -914,3 +921,68 @@ async def get_plan(
 ) -> WeekPlanResponse:
     """The week's post slots per day, from the approved blueprint and the ideas."""
     return await social_plan.get_week(ctx, week, profile_id)
+
+
+# --- By-hand tasks ----------------------------------------------------------------------
+
+
+@router.get(
+    "/tasks",
+    response_model=SocialTaskListResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_tasks(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> SocialTaskListResponse:
+    """The brand's by-hand tasks, oldest first, each with today's due/done state."""
+    return await social_service.list_tasks(ctx, profile_id)
+
+
+@router.post(
+    "/tasks",
+    response_model=SocialTaskResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def create_task(
+    body: CreateSocialTaskRequest, ctx: RequestContext = Depends(request_context)
+) -> SocialTaskResponse:
+    """Add a task. 422 past the per-brand limit; a foreign profile is a 404."""
+    return await social_service.create_task(ctx, body)
+
+
+@router.patch(
+    "/tasks/{task_id}",
+    response_model=SocialTaskResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def update_task(
+    task_id: str,
+    body: UpdateSocialTaskRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialTaskResponse:
+    """Edit a task. A malformed or foreign id is a 404."""
+    return await social_service.update_task(ctx, task_id, body)
+
+
+@router.delete(
+    "/tasks/{task_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def delete_task(task_id: str, ctx: RequestContext = Depends(request_context)) -> Response:
+    await social_service.delete_task(ctx, task_id)
+    return Response(status_code=204)
+
+
+@router.post(
+    "/tasks/{task_id}/done",
+    response_model=SocialTaskResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def mark_task_done(
+    task_id: str,
+    body: MarkSocialTaskDoneRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> SocialTaskResponse:
+    """Tick or untick today (UTC) on a task."""
+    return await social_service.mark_task_done(ctx, task_id, body)

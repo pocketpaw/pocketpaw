@@ -1216,5 +1216,59 @@
     "tests": [
       "tests/cloud/growth/social/test_postiz_metrics.py"
     ]
+  },
+  {
+    "label": "tasks: a task read crosses workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    doc = await _TaskDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    doc = await _TaskDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/cloud/growth/social/test_tasks.py"
+    ]
+  },
+  {
+    "label": "tasks: a weekly task is due every day",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/domain.py",
+    "find": "        return self.repeat == \"daily\" or day.weekday() == self.weekday",
+    "replace": "        return True",
+    "tests": [
+      "tests/cloud/growth/social/test_tasks.py"
+    ]
+  },
+  {
+    "label": "tasks: done_on keeps the oldest days instead of the newest",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    doc.done_on = sorted(days)[-MAX_TASK_DONE_DAYS:]",
+    "replace": "    doc.done_on = sorted(days)[:MAX_TASK_DONE_DAYS]",
+    "tests": [
+      "tests/cloud/growth/social/test_tasks.py"
+    ]
+  },
+  {
+    "label": "tasks: the per-brand cap is off by one",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    if count >= MAX_TASKS_PER_PROFILE:",
+    "replace": "    if count > MAX_TASKS_PER_PROFILE:",
+    "tests": [
+      "tests/cloud/growth/social/test_tasks.py"
+    ]
+  },
+  {
+    "label": "tasks: switching to daily keeps the weekday",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            raise ValidationError(\"social.task_weekday_daily\", \"A daily task takes no weekday.\")\n        weekday = None\n",
+    "replace": "            raise ValidationError(\"social.task_weekday_daily\", \"A daily task takes no weekday.\")\n",
+    "tests": [
+      "tests/cloud/growth/social/test_tasks.py"
+    ]
+  },
+  {
+    "label": "tasks: a PATCH to daily silently drops a sent weekday",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if \"weekday\" in sent and body.weekday is not None:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_tasks.py"
+    ]
   }
 ]
