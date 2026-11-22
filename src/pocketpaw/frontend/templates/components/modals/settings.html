@@ -1209,6 +1209,40 @@
             >
           </div>
 
+          <!-- You.com API Key -->
+          <div class="flex flex-col gap-1.5">
+            <div class="flex justify-between items-center">
+              <label
+                class="text-[12px] font-medium text-[var(--text-secondary)]"
+                >You.com API Key</label
+              >
+              <span
+                x-show="hasYoucomKey"
+                class="text-[11px] font-medium text-[var(--success-color)] flex items-center gap-1"
+              >
+                <i data-lucide="check" class="w-3 h-3"></i> Saved
+              </span>
+            </div>
+            <div class="flex gap-2">
+              <input
+                type="password"
+                x-model="apiKeys.youcom"
+                :placeholder="hasYoucomKey ? '••••••••••••••••' : 'optional'"
+                class="flex-1 bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+              <button
+                class="bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white px-3.5 py-2 rounded-[8px] text-[12px] font-semibold transition-all active:scale-95"
+                @click="saveApiKey('youcom')"
+              >
+                Save
+              </button>
+            </div>
+            <small class="text-white/50 text-[11px]"
+              >Optional. The You.com search provider works without a key; a
+              key raises the limits</small
+            >
+          </div>
+
           <hr class="border-t border-[var(--glass-border)] opacity-30 my-1" />
           <h4
             class="text-[12px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide"
@@ -2092,6 +2126,7 @@
                 <option value="tavily">Tavily</option>
                 <option value="brave">Brave Search</option>
                 <option value="parallel">Parallel AI</option>
+                <option value="youcom">You.com</option>
               </select>
               <div
                 class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none opacity-50"

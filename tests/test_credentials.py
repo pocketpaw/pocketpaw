@@ -530,6 +530,7 @@ class TestSecretFieldsList:
             "tavily_api_key",
             "brave_search_api_key",
             "parallel_api_key",
+            "youcom_api_key",
             "elevenlabs_api_key",
             "google_api_key",
             "google_oauth_client_id",
