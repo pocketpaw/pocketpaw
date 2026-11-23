@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import re
 from typing import Any
 
@@ -46,8 +47,14 @@ SERVER_NAME = "pocketpaw_timeline"
 EDIT_TIMELINE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_timeline"
 EXPORT_TIMELINE_TOOL_ID = f"mcp__{SERVER_NAME}__export_timeline"
 ADD_MOTION_GRAPHIC_TOOL_ID = f"mcp__{SERVER_NAME}__add_motion_graphic"
+ADD_MEDIA_TOOL_ID = f"mcp__{SERVER_NAME}__add_media"
 
-TIMELINE_TOOL_IDS = (EDIT_TIMELINE_TOOL_ID, EXPORT_TIMELINE_TOOL_ID, ADD_MOTION_GRAPHIC_TOOL_ID)
+TIMELINE_TOOL_IDS = (
+    EDIT_TIMELINE_TOOL_ID,
+    EXPORT_TIMELINE_TOOL_ID,
+    ADD_MOTION_GRAPHIC_TOOL_ID,
+    ADD_MEDIA_TOOL_ID,
+)
 
 MOTION_GRAPHIC_MAX_CHARS = 200_000
 MOTION_GRAPHIC_MAX_DURATION_S = 120
@@ -424,6 +431,78 @@ async def _add_motion_graphic_handler(args: dict) -> dict:
     return _success_response({"ok": True, "motion_graphic": motion_graphic, "note": note})
 
 
+async def _add_media_handler(args: dict) -> dict:
+    """Upload a media file from the agent's own jail and hand it to the editor rail."""
+    from pocketpaw.uploads.errors import UploadError
+    from pocketpaw_ee.agent.mcp_servers import deliver
+
+    if not _current_summary().has_timeline:
+        return _error_response(
+            "No timeline is open, so there is no media rail to add to. Ask the user to "
+            "open a project in the editor."
+        )
+    workspace_id, user_id = deliver._identity()
+    if not workspace_id or not user_id:
+        return _error_response("add_media needs a cloud chat session (workspace and user).")
+
+    path_arg = str(args.get("path") or "").strip()
+    if not path_arg:
+        return _error_response("`path` is required: the media file in your working directory.")
+    try:
+        resolved = deliver._resolve_in_jail(path_arg, workspace_id)
+    except deliver._JailEscape as exc:
+        return _error_response(str(exc))
+    if not resolved.is_file():
+        return _error_response(f"No such file: {path_arg}")
+
+    mime = mimetypes.guess_type(resolved.name)[0] or ""
+    kind = mime.split("/", 1)[0]
+    if kind not in ("audio", "video", "image"):
+        return _error_response(
+            f"{resolved.name} is not an audio, video or image file the editor can place. "
+            "Save it as .mp3, .wav, .m4a, .mp4, .webm, .png or .jpg."
+        )
+    cap = deliver._deliver_max_bytes()
+    if resolved.stat().st_size > cap:
+        return _error_response(deliver._too_large_message(resolved.stat().st_size, cap))
+
+    at_ms = _int_ms(args.get("at_ms"))
+    try:
+        rec, url = await deliver._upload_artifact(
+            resolved,
+            filename=resolved.name,
+            mime=mime,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            deliver_max=cap,
+        )
+    except UploadError as exc:
+        return _error_response(f"Could not upload {resolved.name}: {exc}")
+
+    media: dict[str, Any] = {
+        "fileId": rec.id,
+        "url": url,
+        "name": str(args.get("name") or "").strip() or rec.filename,
+        "mime": rec.mime,
+        "kind": kind,
+        "size": rec.size,
+    }
+    if at_ms is not None:
+        media["atMs"] = at_ms
+    placed = f" and placed at {at_ms} ms" if at_ms is not None else ""
+    return _success_response(
+        {
+            "ok": True,
+            "media_import": media,
+            "note": (
+                f"Uploaded. The editor adds it to the media rail{placed} in the user's "
+                "browser; that is dispatched, not finished. It appears in the timeline "
+                "summary with an asset id next turn, ready for place_clip / place_audio."
+            ),
+        }
+    )
+
+
 EDIT_TIMELINE_DESCRIPTION = """\
 Change the timeline the user has open in the /studio/editor canvas.
 
@@ -474,6 +553,17 @@ rendered. Tell the user it is rendering, never that it is done.
 
 """
 ADD_MOTION_GRAPHIC_DESCRIPTION += RIPPLE_BEATS_BRIEF
+
+ADD_MEDIA_DESCRIPTION = """\
+Put a media file you made in your working directory onto the user's
+/studio/editor media rail: a voiceover you synthesised, music, a clip you cut,
+an image. Audio, video and image files only, inside your own working directory.
+
+Pass `at_ms` to also place it on the timeline at that time (audio on an audio
+lane, video and images on the video track); omit it to just add it to the rail.
+
+Returns once the file is uploaded and dispatched to the editor, NOT once the
+browser has added it. Say it is being added, never that it is done."""
 
 
 def _edit_timeline_parameters() -> dict[str, Any]:
@@ -643,6 +733,25 @@ def _add_motion_graphic_parameters() -> dict[str, Any]:
     }
 
 
+def _add_media_parameters() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "The file, relative to your working directory: 'out/voice.mp3'.",
+            },
+            "name": {"type": "string", "description": "Optional label for the rail."},
+            "at_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional timeline time in ms to place it at.",
+            },
+        },
+        "required": ["path"],
+    }
+
+
 def build_timeline_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server, or None if the SDK is unavailable."""
     try:
@@ -675,15 +784,21 @@ def build_timeline_server() -> tuple[str, Any] | None:
     async def add_motion_graphic(args):  # type: ignore[no-untyped-def]
         return await _add_motion_graphic_handler(args)
 
+    @tool("add_media", ADD_MEDIA_DESCRIPTION, _add_media_parameters())
+    async def add_media(args):  # type: ignore[no-untyped-def]
+        return await _add_media_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[edit_timeline, export_timeline, add_motion_graphic],
+        tools=[edit_timeline, export_timeline, add_motion_graphic, add_media],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "ADD_MEDIA_DESCRIPTION",
+    "ADD_MEDIA_TOOL_ID",
     "ADD_MOTION_GRAPHIC_DESCRIPTION",
     "ADD_MOTION_GRAPHIC_TOOL_ID",
     "EDIT_TIMELINE_TOOL_ID",

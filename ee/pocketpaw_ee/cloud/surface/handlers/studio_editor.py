@@ -556,6 +556,11 @@ Honesty (this surface has burned people before):
 To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
 Never batch an export with edits — it would render a half-built timeline.
 
+When you make a media file yourself (a voiceover you synthesised, music, a clip
+you cut, an image), put it on the editor with
+`mcp__pocketpaw_timeline__add_media` and its path in your working directory;
+pass at_ms to place it too. Never tell the user to download and re-upload it.
+
 For a motion graphic, load the `hyperframes-core` and `studio-motion` skills and
 call `mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
 composition (plus `replace_asset_id` when editing one that exists). Graphics the
