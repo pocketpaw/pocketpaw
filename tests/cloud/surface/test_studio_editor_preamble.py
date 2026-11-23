@@ -389,7 +389,9 @@ async def test_the_procedure_teaches_placement_on_the_render_call() -> None:
     assert "replace_range {from_ms: 10000, to_ms: 14000}" in flat
     assert "data-duration set to exactly that span" in flat
     assert "start_ms = the Playhead" in flat
-    assert "Use the Graphic style for new graphics unless the user names another" in flat
+    assert (
+        "Use the Graphic style for a plain house card (title, statement, logo, stat, chart)" in flat
+    )
     assert "focusX/focusY = the centre and atMs = that time" in flat
 
 
@@ -473,3 +475,15 @@ async def test_media_the_agent_makes_has_a_way_onto_the_rail() -> None:
 
     assert f"`{ADD_MEDIA_TOOL_ID}`" in preamble
     assert "never tell the user to download and re-upload" in preamble.lower()
+
+
+async def test_a_new_graphic_starts_by_picking_a_world() -> None:
+    """Every graphic came out as the same centred card because nothing asked the
+    agent to choose a look; the procedure now routes anything beyond a plain
+    house card through the direction skill and names its worlds."""
+    preamble = await _render(_timeline())
+
+    assert "`studio-motion-direction` skill" in preamble
+    for world in ("calm-demo", "one-take", "beat-cut", "editorial-collage", "launch-beats"):
+        assert world in preamble, world
+    assert "data-world" in preamble

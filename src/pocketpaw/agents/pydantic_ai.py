@@ -1963,9 +1963,11 @@ class PydanticAIBackend:
           surface could differ from what the policy says it is.
         * **``run_skill_script`` is excluded.** It executes a skill's bundled
           script — local execution, which dispatch-only rules out and which has
-          no per-tenant jail on an in-process backend. ``read_skill_resource``
-          goes too, since we pass no resources, so leaving it would advertise a
-          tool that can only fail.
+          no per-tenant jail on an in-process backend. A skill's
+          ``references/*.md`` files ride along as static in-memory resources
+          (read once here, never a path the model can steer), so
+          ``read_skill_resource`` stays exactly when some skill has one; a
+          SKILL.md that links ``references/x.md`` is otherwise a dead link.
 
         *only* is the subset named by ``skill_names`` when the caller supplies
         one — the same per-entity kwarg the Claude SDK backend uses to narrow a
@@ -1976,9 +1978,11 @@ class PydanticAIBackend:
         """
         if not getattr(self.settings, "pydantic_ai_skills_enabled", True):
             return None
+        from pathlib import Path
+
         try:
             from pydantic_ai_skills import Skill as PaiSkill
-            from pydantic_ai_skills import SkillsCapability
+            from pydantic_ai_skills import SkillResource, SkillsCapability
         except ImportError:
             logger.debug("pydantic-ai-skills not installed, running without skills")
             return None
@@ -1990,13 +1994,24 @@ class PydanticAIBackend:
             return None
 
         skills = [
-            PaiSkill(name=s.name, description=s.description, content=s.content)
+            PaiSkill(
+                name=s.name,
+                description=s.description,
+                content=s.content,
+                resources=[
+                    SkillResource(name=f"references/{ref.name}", content=ref.read_text("utf-8"))
+                    for ref in sorted(Path(s.path).parent.glob("references/*.md"))
+                ],
+            )
             for s in loaded
             if not getattr(s, "disable_model_invocation", False)
             and (not skill_names or s.name in skill_names)
         ]
         if not skills:
             return None
+        excluded = {"run_skill_script"}
+        if not any(skill.resources for skill in skills):
+            excluded.add("read_skill_resource")
 
         defer = bool(getattr(self.settings, "pydantic_ai_defer_skills", False))
         logger.info(
@@ -2007,7 +2022,7 @@ class PydanticAIBackend:
         if not defer:
             return SkillsCapability(
                 skills=skills,
-                exclude_tools={"run_skill_script", "read_skill_resource"},
+                exclude_tools=excluded,
                 validate=False,
             )
 
@@ -2025,7 +2040,7 @@ class PydanticAIBackend:
         # cost the round trip to discover, and never reach the model.
         return SkillsCapability(
             skills=skills,
-            exclude_tools={"run_skill_script", "read_skill_resource"},
+            exclude_tools=excluded,
             validate=False,
             id=_SKILLS_CAPABILITY_ID,
             defer_loading=True,
