@@ -4,6 +4,12 @@
 # frozen dataclass with REQUIRED tenancy fields (workspace_id has no
 # default) — constructing an ``InstinctApproval`` domain object without
 # tenancy is a type error. EE rule 3.
+# Updated: 2026-08-06 (feat/coupling-template-approvals, T-5) — added
+# ``correlation_id``, the Decision-Graph chain id minted on the row at
+# create time. Without it a template-level approval — the human decision
+# that authorises a whole CLASS of future writes — was invisible to
+# /decisions and /activity, because every governance surface joins on the
+# chain id and this object carried none.
 
 """Domain value object for ``instinct_approvals``."""
 
@@ -39,6 +45,7 @@ class InstinctApproval:
     status: str
     decided_at: datetime | None = None
     decided_by: str | None = None
+    correlation_id: str = ""
     park: dict[str, Any] | None = None
     created_at: datetime | None = None
     notify_rules: list[dict[str, Any]] = field(default_factory=list)

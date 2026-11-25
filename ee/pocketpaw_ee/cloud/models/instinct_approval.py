@@ -19,6 +19,18 @@
 # scoped to the RFC 03 v2 template flow only — the M2b.1 binding-level
 # park remains for backward compatibility.
 #
+# Updated: 2026-08-06 (feat/coupling-template-approvals, T-5) — added the
+# additive ``correlation_id`` field. A template-level approval is a human
+# decision that authorises a whole CLASS of future writes, but until now it
+# carried no Decision-Graph chain id, so an approved row reached neither
+# /decisions nor /activity. ``instinct_approvals.service.create_approval``
+# now MINTS a fresh uuid4 here and opens the chain with ``agent.proposed``;
+# the decide path closes it with ``human.corrected`` +
+# ``decision.completed`` under the SAME id, which is what makes a decided
+# approval joinable to its chain. Rows written before this change (and
+# ``auto_approve`` rows, which have no human chain) keep the "" default —
+# the field is additive, so no migration.
+#
 # Updated: 2026-06-18 (feat/instinct-gate-foundation, T3) — added the
 # additive ``"auto_approved"`` status value to ``ApprovalStatusT``. The
 # layered/learning gate's AUTO lane writes a row already-decided with this
@@ -75,6 +87,12 @@ class InstinctApproval(TimestampedDocument):
             future temporal sweeper.
         decided_at / decided_by: set when an operator approves or
             rejects. ``None`` while pending.
+        correlation_id: Decision-Graph chain id, minted at create time by
+            ``instinct_approvals.service.create_approval``. Every chain
+            event for this approval (``agent.proposed`` at create,
+            ``human.corrected`` + ``decision.completed`` at decide) carries
+            it, so /decisions and /activity rows join back to this row.
+            Empty on rows written before T-5 and on ``auto_approve`` rows.
         _park: the resolved write blob the executor parked (method,
             path, params, idempotency_key, outcome, workspace_id,
             requested_by). Re-loaded by a future post-approval re-entry
@@ -96,6 +114,7 @@ class InstinctApproval(TimestampedDocument):
     status: ApprovalStatusT = "pending"
     decided_at: datetime | None = None
     decided_by: str | None = None
+    correlation_id: str = ""
     park: dict[str, Any] | None = Field(default=None, alias="_park")
 
     model_config = {"populate_by_name": True}
