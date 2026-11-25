@@ -39,7 +39,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Two commits so the header-dates check can diff the PR merge
           # commit against its first parent (the base branch).
@@ -52,7 +52,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: scripts/check_header_dates.sh HEAD^1 HEAD
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -78,9 +78,9 @@ jobs:
     name: Build wheels
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -119,7 +119,7 @@ jobs:
       # `pocketpaw-ee` wheel is NOT published — for now it is distributed
       # in-house, and this artifact is where you grab the built EE wheel.
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels
           path: |
@@ -133,9 +133,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -211,9 +211,9 @@ jobs:
         # specific breaks are still caught at the merge gate.
         python-version: ${{ (github.event_name == 'push') && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.12"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -633,13 +633,13 @@ jobs:
     name: Mutation plan anchors
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # setup-python rather than uv: this runs stdlib-only code against JSON and source
       # text, so there is nothing to resolve or sync. If this step ever needs dependencies,
       # the validator has started doing more than counting substrings and should be
       # reviewed rather than fed a `uv sync`.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -650,9 +650,9 @@ jobs:
     name: OSS-EE boundary
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
