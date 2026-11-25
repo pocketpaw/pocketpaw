@@ -44,6 +44,7 @@ class ActionStatus(StrEnum):
     REJECTED = "rejected"
     EXECUTED = "executed"
     FAILED = "failed"
+    EXPIRED = "expired"  # set by the decisions abandon-path sweeper; terminal
 
 
 class OutcomeStatus(StrEnum):
