@@ -47,10 +47,11 @@
   {
     "label": "a failed issue list still resolves the sightings it cannot see",
     "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
-    "find": "            (err or \"\")[-200:],\n        )\n        return []",
-    "replace": "            (err or \"\")[-200:],\n        )\n        return await _departures(slug, wanted, {}, sighted or [], gh)",
+    "find": "                (err or \"\")[-200:],\n            )\n            return []",
+    "replace": "                (err or \"\")[-200:],\n            )\n            return await _departures(slug, wanted, {}, sighted or [], gh)",
     "tests": [
-      "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_resolves_nothing"
+      "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_resolves_nothing",
+      "tests/cloud/test_belt_github_issues_patrol.py::test_one_failed_label_list_files_and_resolves_nothing"
     ]
   },
   {

@@ -35,7 +35,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -57,6 +56,7 @@ from pocketpaw.instinct.models import ActionStatus  # noqa: E402
 from tests.cloud.test_belt_github_issues_patrol import (  # noqa: E402
     SLUG,
     FakeGh,
+    LimitedGh,
     _fresh_gh_caches,  # noqa: F401 — autouse: the gh caches are per test
     _github_mandate,
     _issue,
@@ -926,25 +926,6 @@ async def test_an_issue_labelled_needs_human_after_its_sighting_is_skipped(
         await stores.get_instinct_store().get_action(out["shift"]["plan_action_id"])
     ).parameters["_belt_plan"]
     assert _refs(blob) == [[ids[n]] for n in (11, 10, 15, 17)]
-
-
-class LimitedGh(FakeGh):
-    """``FakeGh`` whose unfiltered open issue list stops short of ``hidden`` (an
-    old issue past ``--limit`` on a busy repo), while a ``--label`` list returns
-    every issue carrying that label."""
-
-    hidden: set[int] = set()
-
-    async def __call__(self, argv: list[str]) -> tuple[int, str, str]:
-        if argv[:3] == ["gh", "issue", "list"] and "all" not in argv:
-            self.calls.append(list(argv))
-            if "--label" in argv:
-                want = argv[argv.index("--label") + 1]
-                rows = [i for i in self.issues if want in {lb["name"] for lb in i["labels"]}]
-            else:
-                rows = [i for i in self.issues if i["number"] not in self.hidden]
-            return 0, json.dumps(rows), ""
-        return await super().__call__(argv)
 
 
 @pytest.mark.usefixtures("store", "graph", "journal", "cloud_station_wired")
