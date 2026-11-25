@@ -1,0 +1,53 @@
+{
+  "id": "load-order-inject",
+  "asserts": "A plugin with unmet required deps stays PENDING; it activates only after the provider has fully settled, never mid-apply.",
+  "semantics": "\u00a72",
+  "plugins": {
+    "a": {
+      "provides": [
+        "svcA"
+      ],
+      "apply_delay_ms": 30
+    },
+    "b": {
+      "inject": {
+        "required": [
+          "svcA"
+        ]
+      }
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "expect_state": {
+        "b": "PENDING"
+      }
+    },
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "ACTIVE",
+        "b": "ACTIVE"
+      }
+    }
+  ],
+  "expect_trace": [
+    "b:PENDING",
+    "a:LOADING",
+    "a:provide:svcA",
+    "a:ACTIVE",
+    "b:LOADING",
+    "b:ACTIVE"
+  ],
+  "regression_note": "Amended 2026-08-24: plugin a now awaits AFTER publishing, which yields the event loop mid-apply. A runtime that activates dependents immediately rather than deferring until the provider settles will emit b:LOADING before a:ACTIVE and fail."
+}

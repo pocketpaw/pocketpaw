@@ -1,0 +1,43 @@
+{
+  "id": "effect-rejected-while-unloading",
+  "asserts": "DRAGON. Creating an effect while the owner is UNLOADING is rejected, so a cleanup-time registration cannot escape the unload snapshot and leak.",
+  "semantics": "\u00a73",
+  "plugins": {
+    "a": {
+      "effects": [
+        "e1"
+      ],
+      "effect_during_dispose": "e2"
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "dispose",
+      "plugin": "a"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "a": "DISPOSED"
+      }
+    }
+  ],
+  "expect_trace": [
+    "a:LOADING",
+    "a:effect:e1:setup",
+    "a:ACTIVE",
+    "a:UNLOADING",
+    "a:effect:e1:dispose",
+    "a:effect:e2:rejected",
+    "a:DISPOSED"
+  ]
+}
