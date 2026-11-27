@@ -500,3 +500,152 @@ async def test_delete_sso(env):
     resp = await client.delete(f"/api/v1/workspaces/{ws_id}/sso")
     assert resp.status_code == 204
     assert await sso_service.get_sso_config(ws_id) is None
+
+
+# ---------------------------------------------------------------------------
+# Enforcement of SsoConfig.enforced on the password-login path (#1306)
+# ---------------------------------------------------------------------------
+
+
+_MEMBER_EMAIL = "member@acme.com"
+_MEMBER_PASSWORD = "StrongPass123!"
+
+
+async def _add_member(ws_id: str, email: str = _MEMBER_EMAIL) -> str:
+    """Create a non-owner member of ``ws_id`` and return the user id."""
+    async for db in get_user_db():
+        manager = UserManager(db)
+        member = await manager.create(UserCreate(email=email, password=_MEMBER_PASSWORD))
+        break
+    member.workspaces.append(WorkspaceMembership(workspace=ws_id, role="member"))
+    member.active_workspace = ws_id
+    await member.save()
+    return str(member.id)
+
+
+async def _enforce_sso(ws_id: str) -> None:
+    await sso_service.upsert_sso_config(
+        ws_id,
+        provider="okta",
+        issuer="https://acme.okta.com",
+        client_id="client-123",
+        client_secret_plain="super-secret",
+        allowed_domains=["acme.com"],
+        enforced=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_enforced_sso_block_returns_workspace_for_member(env):
+    _client, _admin_id, ws_id, _fake = env
+    member_id = await _add_member(ws_id)
+    await _enforce_sso(ws_id)
+
+    member = await User.get(PydanticObjectId(member_id))
+    blocked = await sso_service.find_enforced_sso_block(member)
+    assert blocked is not None
+    assert str(blocked.id) == ws_id
+
+
+@pytest.mark.asyncio
+async def test_find_enforced_sso_block_owner_break_glass(env):
+    _client, admin_id, ws_id, _fake = env
+    await _enforce_sso(ws_id)
+
+    admin = await User.get(PydanticObjectId(admin_id))
+    # Workspace owner must NOT be blocked, even when SSO is enforced —
+    # this is the documented break-glass.
+    assert await sso_service.find_enforced_sso_block(admin) is None
+
+
+@pytest.mark.asyncio
+async def test_find_enforced_sso_block_skips_unenforced(env):
+    _client, _admin_id, ws_id, _fake = env
+    member_id = await _add_member(ws_id)
+    # Configure SSO but leave enforced=False (the historical no-op state).
+    await sso_service.upsert_sso_config(
+        ws_id,
+        provider="okta",
+        issuer="https://acme.okta.com",
+        client_id="client-123",
+        client_secret_plain="super-secret",
+        allowed_domains=["acme.com"],
+        enforced=False,
+    )
+    member = await User.get(PydanticObjectId(member_id))
+    assert await sso_service.find_enforced_sso_block(member) is None
+
+
+@pytest.mark.asyncio
+async def test_password_login_rejected_when_sso_enforced(env):
+    client, _admin_id, ws_id, _fake = env
+    await _add_member(ws_id)
+    await _enforce_sso(ws_id)
+
+    resp = await client.post(
+        "/api/v1/auth/login",
+        data={"username": _MEMBER_EMAIL, "password": _MEMBER_PASSWORD},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 403, resp.text
+    body = resp.json()
+    detail = body.get("detail") or body
+    assert detail["code"] == "sso.enforced"
+    assert detail["workspace_slug"] == _WS_SLUG
+    assert detail["sso_login_url"].endswith(f"/api/v1/auth/sso/{_WS_SLUG}/login")
+    # No session cookie was set on the rejection.
+    assert "paw_auth" not in resp.cookies
+
+
+@pytest.mark.asyncio
+async def test_bearer_login_rejected_when_sso_enforced(env):
+    client, _admin_id, ws_id, _fake = env
+    await _add_member(ws_id)
+    await _enforce_sso(ws_id)
+
+    resp = await client.post(
+        "/api/v1/auth/bearer/login",
+        data={"username": _MEMBER_EMAIL, "password": _MEMBER_PASSWORD},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_owner_password_login_allowed_when_sso_enforced(env):
+    client, _admin_id, ws_id, _fake = env
+    await _enforce_sso(ws_id)
+
+    resp = await client.post(
+        "/api/v1/auth/login",
+        data={"username": _ADMIN_EMAIL, "password": _ADMIN_PASSWORD},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    # Owner break-glass: password login still works.
+    assert resp.status_code in (200, 204), resp.text
+
+
+@pytest.mark.asyncio
+async def test_enforced_rejection_emits_audit_row(env):
+    client, _admin_id, ws_id, _fake = env
+    member_id = await _add_member(ws_id)
+    await _enforce_sso(ws_id)
+
+    resp = await client.post(
+        "/api/v1/auth/login",
+        data={"username": _MEMBER_EMAIL, "password": _MEMBER_PASSWORD},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 403
+
+    from pocketpaw_ee.cloud.models.audit_event import AuditEvent as _AuditEventDoc
+
+    row = await _AuditEventDoc.find_one(
+        _AuditEventDoc.workspace == ws_id,
+        _AuditEventDoc.action == "sso.enforced_password_rejected",
+    )
+    assert row is not None
+    assert row.actor_id == member_id
+    assert row.target_id == member_id
+    assert row.metadata.get("email") == _MEMBER_EMAIL
+    assert row.metadata.get("workspace_slug") == _WS_SLUG
