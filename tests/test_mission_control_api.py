@@ -305,6 +305,17 @@ class TestTaskAPI:
         for task in response.json()["tasks"]:
             assert task["status"] == "inbox"
 
+    def test_delete_task(self, client):
+        """Test deleting a task."""
+        create_response = client.post(
+            "/api/mission-control/tasks",
+            json={"title": "Task to delete"},
+        )
+        task_id = create_response.json()["task"]["id"]
+        response = client.delete(f"/api/mission-control/tasks/{task_id}")
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+
 
 # ============================================================================
 # Message API Tests
@@ -454,6 +465,17 @@ class TestDocumentAPI:
         for doc in response.json()["documents"]:
             assert doc["type"] == "research"
 
+    def test_delete_document(self, client):
+        """Test deleting a document."""
+        create_response = client.post(
+            "/api/mission-control/documents",
+            json={"title": "Doc to delete", "content": "temp"},
+        )
+        doc_id = create_response.json()["document"]["id"]
+        response = client.delete(f"/api/mission-control/documents/{doc_id}")
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+
 
 # ============================================================================
 # Activity & Stats API Tests
@@ -523,6 +545,13 @@ class TestActivityStatsAPI:
         response = client.get("/api/mission-control/standup")
         assert response.status_code == 200
         assert "Daily Standup" in response.json()["standup"]
+
+    def test_get_activities_filtered(self, client):
+        """Test getting activities with filters."""
+        response = client.get("/api/mission-control/activity")
+        assert response.status_code == 200
+        data = response.json()
+        assert "activities" in data
 
 
 # ============================================================================
