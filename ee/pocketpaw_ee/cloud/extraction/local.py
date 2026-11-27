@@ -312,7 +312,7 @@ def _extract_text(path: Path, mime: str = "") -> str:
         with open(file_path, "rb") as handle:
             return _extract_xlsx(load_workbook(handle, read_only=True, data_only=True))
 
-    if suffix in (".html", ".htm"):
+    if suffix in (".html", ".htm") or norm_mime == "text/html":
         _refuse_if_too_big(path, _MAX_HTML_BYTES, "html")
         return _extract_html(path.read_text(encoding="utf-8", errors="replace"))
 
