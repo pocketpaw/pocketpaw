@@ -51,6 +51,7 @@ class FakeDoc:
     extracted_text_version: int | None = 1
     content_version: int = 1
     file_id: str = "f1"
+    size: int | None = None
 
 
 @dataclass
@@ -218,7 +219,7 @@ def _install_blob(monkeypatch, tmp_path, body: str, *, title_only_stored: bool =
 
     class _Resolver:
         @asynccontextmanager
-        async def open_local_for_url(self, url, workspace):
+        async def open_local_for_id(self, file_id, workspace):
             assert workspace == "ws1"
             yield FakeRec(id="f1", filename=path.name, mime="text/html"), path
 
@@ -276,3 +277,102 @@ async def test_a_hidden_html_file_is_refused_before_the_blob_is_read(monkeypatch
 
     assert resp.get("is_error") or resp.get("isError")
     assert "hidden" in resp["content"][0]["text"]
+
+
+# --- the real resolver, not a fake one ---------------------------------------
+#
+# The tests above stub ``default_resolver``, which hid the production bug: the
+# handler built ``upload://<id>``, a URL ``parse_upload_url`` has never
+# accepted, so every live read in prod resolved to None and quietly fell back
+# to the stored title-only text. These go through ``EEUploadResolver`` itself.
+
+
+def _install_real_resolver(monkeypatch, tmp_path, body: str, *, mime: str = "text/html"):
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.uploads import resolver
+
+    from pocketpaw.uploads.file_store import FileRecord
+    from pocketpaw.uploads.local import LocalStorageAdapter
+
+    root = tmp_path / "blobs"
+    (root / "chat").mkdir(parents=True)
+    (root / "chat" / "f1.html").write_text(body, encoding="utf-8")
+    rec = FileRecord(
+        id="f1",
+        storage_key="chat/f1.html",
+        filename="The Last Boring Slide (Copy).html",
+        mime=mime,
+        size=len(body),
+        owner_id="u1",
+        chat_id=None,
+        created=datetime.now(UTC),
+    )
+
+    class _Meta:
+        async def get_scoped(self, file_id, workspace):
+            return rec if (file_id, workspace) == ("f1", "ws1") else None
+
+    real = resolver.EEUploadResolver(adapter=LocalStorageAdapter(root), meta=_Meta())
+    monkeypatch.setattr(resolver, "default_resolver", lambda: real)
+
+
+async def test_read_upload_reads_the_blob_through_the_real_resolver(monkeypatch, tmp_path) -> None:
+    body = _artifact_html()
+    doc = FakeDoc(filename="The Last Boring Slide (Copy).html", mime="text/html", size=len(body))
+    _install(monkeypatch, store=FakeStore(doc=doc))
+    _install_blob(monkeypatch, tmp_path, body)  # title-only stored text
+    _install_real_resolver(monkeypatch, tmp_path, body)
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1"}))
+
+    assert "<script>" in out["text"]
+    assert out["total_chars"] > 1000
+
+
+async def test_live_extract_also_reaches_the_blob(monkeypatch, tmp_path) -> None:
+    """The non-source fallback used the same broken URL."""
+    _install_real_resolver(monkeypatch, tmp_path, "plain words here", mime="text/plain")
+
+    text = await files_mcp._live_extract("f1", "ws1")
+
+    assert text and "plain words here" in text
+
+
+async def test_short_text_from_a_big_text_file_says_content_was_dropped(monkeypatch) -> None:
+    """28 chars back from a 5 MB HTML file must never report content_dropped=false,
+    whichever path produced the text."""
+    doc = FakeDoc(filename="page.html", mime="text/html", size=5_039_647)
+    _install(monkeypatch, store=FakeStore(doc=doc))
+
+    async def _no_source(_fid, _ws):
+        return None
+
+    async def _stored(_doc, **_kw):
+        from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
+
+        return ExtractionResult(text="The Last Boring Slide (Copy)", backend="local")
+
+    from pocketpaw_ee.cloud.uploads import extracted_text
+
+    monkeypatch.setattr(files_mcp, "_live_source", _no_source)
+    monkeypatch.setattr(extracted_text, "load_extracted_text", _stored)
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1"}))
+
+    assert out["total_chars"] == 28
+    assert out["content_dropped"] is True
+    assert "5039647" in out["note"]
+
+
+async def test_a_truncated_page_tells_the_agent_to_keep_reading(monkeypatch, tmp_path) -> None:
+    body = _artifact_html()
+    doc = FakeDoc(filename="page.html", mime="text/html", size=len(body))
+    _install(monkeypatch, store=FakeStore(doc=doc))
+    _install_blob(monkeypatch, tmp_path, body)
+    _install_real_resolver(monkeypatch, tmp_path, body)
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1"}))
+
+    assert out["truncated"] is True
+    assert f"offset={out['next_offset']}" in out["note"]

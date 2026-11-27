@@ -312,7 +312,7 @@ def _extract_text(path: Path, mime: str = "") -> str:
         with open(file_path, "rb") as handle:
             return _extract_xlsx(load_workbook(handle, read_only=True, data_only=True))
 
-    if suffix in (".html", ".htm") or norm_mime == "text/html":
+    if suffix in (".html", ".htm"):
         _refuse_if_too_big(path, _MAX_HTML_BYTES, "html")
         return _extract_html(path.read_text(encoding="utf-8", errors="replace"))
 
@@ -470,13 +470,9 @@ def _extract_html(html: str) -> str:
         clean = re.sub(r"\s+", " ", clean).strip()
 
     if len(clean) < _HTML_NO_VISIBLE_TEXT_CHARS and len(html) > _HTML_SCRIPT_PAGE_MIN_CHARS:
-        return _budgeted(
-            [
-                "[no visible text: this page renders with JavaScript, so its source "
-                "is shown with inline data stripped]",
-                strip_inline_blobs(html)[0],
-            ]
-        )
+        # Bare source, no preamble: read_upload pages the same stripped source,
+        # so an offset quoted from a cut attachment lands on the same character.
+        return _budgeted([strip_inline_blobs(html)[0]])
 
     return _budgeted([clean])
 

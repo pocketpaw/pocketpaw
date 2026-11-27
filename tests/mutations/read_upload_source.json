@@ -21,6 +21,20 @@
     "tests": ["tests/ee/agent/test_files_mcp_server.py"]
   },
   {
+    "label": "read_upload: live source read goes back to the fake upload:// URL",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "        cm = default_resolver().open_local_for_id(file_id, workspace=workspace_id)\n        async with cm as resolved:\n            if resolved is None:\n                logger.info(\"files: no blob for %s in workspace %s\", file_id, workspace_id)\n                return None\n            _rec, path = resolved",
+    "replace": "        cm = default_resolver().open_local_for_url(f\"upload://{file_id}\", workspace=workspace_id)\n        async with cm as resolved:\n            if resolved is None:\n                logger.info(\"files: no blob for %s in workspace %s\", file_id, workspace_id)\n                return None\n            _rec, path = resolved",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
+  },
+  {
+    "label": "read_upload: short text from a big text file no longer flagged as dropped",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "        and total < size // 10",
+    "replace": "        and False",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
+  },
+  {
     "label": "extraction: data: URIs kept whole",
     "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
     "find": "    text = _DATA_URI_RE.sub(_data_uri, text)",

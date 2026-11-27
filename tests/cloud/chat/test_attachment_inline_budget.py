@@ -129,3 +129,18 @@ async def test_the_total_cap_still_bounds_a_batch(monkeypatch) -> None:
 
     # Headers and the wrapper add a little; the inlined TEXT is what is bounded.
     assert len(block) < agent_service._ATTACHMENT_TOTAL_CHARS + 2_000
+
+
+@pytest.mark.asyncio
+async def test_a_cut_attachment_says_how_to_read_the_rest(monkeypatch) -> None:
+    """The cut must name read_upload, the file id and the offset to resume at;
+    a bare marker left the agent asking the user for screenshots instead."""
+    huge = "x" * (agent_service._ATTACHMENT_PER_FILE_CHARS + 5_000)
+    _install(monkeypatch, {"upload://huge": huge})
+
+    block = await agent_service._build_attachments_block(
+        FakeCtx(), [{"url": "upload://huge"}], surface="sites"
+    )
+
+    assert "read_upload" in block
+    assert f"offset={agent_service._ATTACHMENT_PER_FILE_CHARS}" in block
