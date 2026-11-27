@@ -3257,7 +3257,13 @@ async def _build_attachments_block(
                 remaining = _ATTACHMENT_TOTAL_CHARS - used_chars
                 per_file_cap = min(_ATTACHMENT_PER_FILE_CHARS, remaining)
                 if len(text) > per_file_cap:
-                    text = text[:per_file_cap].rstrip() + "\n…[truncated]"
+                    full_len = len(text)
+                    text = (
+                        text[:per_file_cap].rstrip() + "\n…[truncated]"
+                        f" Showing the first {per_file_cap} of {full_len} characters."
+                        f" Call read_upload with file_id={rec.id} and offset={per_file_cap}"
+                        " to read the rest."
+                    )
                 entries.append(f"{header}\n{text}")
                 used_chars += len(text)
                 processed += 1

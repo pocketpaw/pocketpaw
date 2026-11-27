@@ -470,13 +470,9 @@ def _extract_html(html: str) -> str:
         clean = re.sub(r"\s+", " ", clean).strip()
 
     if len(clean) < _HTML_NO_VISIBLE_TEXT_CHARS and len(html) > _HTML_SCRIPT_PAGE_MIN_CHARS:
-        return _budgeted(
-            [
-                "[no visible text: this page renders with JavaScript, so its source "
-                "is shown with inline data stripped]",
-                strip_inline_blobs(html)[0],
-            ]
-        )
+        # Bare source, no preamble: read_upload pages the same stripped source,
+        # so an offset quoted from a cut attachment lands on the same character.
+        return _budgeted([strip_inline_blobs(html)[0]])
 
     return _budgeted([clean])
 

@@ -132,3 +132,14 @@ def test_a_url_encoded_data_uri_is_stripped_and_keeps_its_mime() -> None:
     assert svg not in text
     assert "data:image/svg+xml,[" in text
     assert stripped == len(svg)
+
+
+async def test_script_page_extraction_matches_read_source_char_for_char(tmp_path: Path) -> None:
+    """A cut chat attachment quotes an offset into this text, and read_upload
+    pages read_source's text, so the two must line up exactly."""
+    path = tmp_path / "page.html"
+    path.write_text(artifact_html(), encoding="utf-8")
+
+    result = await LocalExtractor().extract(path, "text/html")
+
+    assert result.text == local_mod.read_source(path).text

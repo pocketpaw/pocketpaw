@@ -133,6 +133,18 @@ class EEUploadResolver:
         if file_id is None:
             yield None
             return
+        async with self.open_local_for_id(file_id, workspace) as resolved:
+            yield resolved
+
+    @contextlib.asynccontextmanager
+    async def open_local_for_id(
+        self, file_id: str, workspace: str
+    ) -> AsyncIterator[tuple[FileRecord, Path] | None]:
+        """Yield ``(record, local_path)`` for a bare ``file_id``.
+
+        The one implementation behind :meth:`open_local_for_url`. Callers that
+        already hold an id use this directly instead of building a URL for it.
+        """
         rec = await self._meta.get_scoped(file_id, workspace=workspace)
         if rec is None:
             yield None

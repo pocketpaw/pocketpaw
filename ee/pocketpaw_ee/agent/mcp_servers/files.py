@@ -286,11 +286,26 @@ async def _read_handler(args: dict) -> dict:
         "total_chars": total,
         "content_dropped": bool(source and (source.stripped_chars or source.truncated)),
     }
-    if more:
-        body["next_offset"] = end
-    if source is not None and body["content_dropped"]:
+    notes: list[str] = []
+    # A text-like file that yields under a tenth of its bytes as text lost the
+    # rest somewhere (a script-rendered page's title, say). A source read already
+    # accounts for what it dropped (stripped blobs, the read limit) below.
+    size = getattr(doc, "size", None)
+    if (
+        source is None
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and size > 0
+        and _is_text_like(mime, as_source)
+        and total < size // 10
+    ):
+        body["content_dropped"] = True
+        notes.append(
+            f"Only {total} of the file's {size} bytes came through as text; the rest "
+            "was not extracted. Do not assume the missing part is empty."
+        )
+    if source is not None and (source.stripped_chars or source.truncated):
         body["stripped_chars"] = source.stripped_chars
-        notes = []
         if source.stripped_chars:
             notes.append(
                 "Inline data (images, fonts) was replaced by [N chars stripped] "
@@ -298,9 +313,29 @@ async def _read_handler(args: dict) -> dict:
             )
         if source.truncated:
             notes.append("The file is larger than the read limit; only its start was read.")
+    if more:
+        body["next_offset"] = end
+        notes.append(
+            f"Call read_upload again with file_id={file_id} and offset={end} to read on; "
+            "keep going until truncated is false before concluding anything is missing."
+        )
+    if notes:
         body["note"] = " ".join(notes)
 
     return _success_response(body)
+
+
+def _is_text_like(mime: str, as_source: bool) -> bool:
+    """Whether a file's bytes are mostly text, so its size bounds its text."""
+    m = mime.split(";", 1)[0].strip().lower()
+    # Exact types and +json/+xml suffixes only: every OOXML (docx/xlsx/pptx)
+    # mime contains "xml" and is a zip, not text.
+    return (
+        as_source
+        or m.startswith("text/")
+        or m in ("application/json", "application/xml")
+        or m.endswith(("+json", "+xml"))
+    )
 
 
 class _Ambiguous(Exception):
@@ -346,10 +381,10 @@ async def _live_extract(file_id: str, workspace_id: str) -> str | None:
         return None
 
     try:
-        resolver = default_resolver()
-        cm = resolver.open_local_for_url(f"upload://{file_id}", workspace=workspace_id)
+        cm = default_resolver().open_local_for_id(file_id, workspace=workspace_id)
         async with cm as resolved:
             if resolved is None:
+                logger.info("files: no blob for %s in workspace %s", file_id, workspace_id)
                 return None
             rec, path = resolved
             chain = build_chain(get_settings())
@@ -371,9 +406,10 @@ async def _live_source(file_id: str, workspace_id: str) -> Any | None:
         from pocketpaw_ee.cloud.extraction.local import read_source
         from pocketpaw_ee.cloud.uploads.resolver import default_resolver
 
-        cm = default_resolver().open_local_for_url(f"upload://{file_id}", workspace=workspace_id)
+        cm = default_resolver().open_local_for_id(file_id, workspace=workspace_id)
         async with cm as resolved:
             if resolved is None:
+                logger.info("files: no blob for %s in workspace %s", file_id, workspace_id)
                 return None
             _rec, path = resolved
             return await asyncio.to_thread(read_source, path)
@@ -438,8 +474,9 @@ def build_files_server() -> tuple[str, Any] | None:
             "truncated, offset, total_chars, next_offset?, content_dropped}. "
             "Code-like files (HTML, JS, CSS, SVG) come back as source with "
             "inline data and base64 stripped. `content_dropped` true means the "
-            "text is not the whole file. When `next_offset` is present, pass it "
-            "as `offset` to read on. `text` is null for images, "
+            "text is not the whole file. Always page: when `next_offset` is "
+            "present, call again with it as `offset`, and never conclude a file "
+            "lacks something until `truncated` is false. `text` is null for images, "
             "video and other binaries with no extractable text — report that "
             "rather than inventing contents. A file its owner marked hidden from "
             "AI returns an error; tell the user instead of working around it."
