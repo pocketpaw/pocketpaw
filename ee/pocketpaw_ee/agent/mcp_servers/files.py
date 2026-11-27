@@ -1,8 +1,6 @@
 # files.py — in-process MCP server exposing the workspace's UPLOADED FILES
 # (list + read) to the claude_agent_sdk cloud chat backend.
 #
-# Created: 2026-09-14 (fix/attachment-not-on-disk).
-#
 # WHY THIS EXISTS. Uploads live in object storage (S3), and until now the agent
 # had no tool that could reach one. The only path was PUSH:
 # ``_build_attachments_block`` inlines the extracted text of the files attached
@@ -37,6 +35,10 @@
 #     ``hide_from_ai`` explicitly — without that the fallback would walk around
 #     the gate the stored-text path just enforced.
 #
+# SOURCE FILES. HTML, JS, CSS and SVG skip the stored extraction (a visible-text
+# pass that keeps only a script-rendered page's title) and are read from the
+# blob as source, inline data stripped, paged by ``offset``.
+#
 # TENANCY. The workspace comes from the per-stream ContextVar (``_identity``),
 # never from tool args — an agent-supplied workspace id would be a cross-tenant
 # read primitive. Every store call is the ``*_scoped`` variant.
@@ -49,6 +51,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -175,11 +178,18 @@ async def _read_handler(args: dict) -> dict:
     Its ``None`` means "extract it yourself", so we fall back to a live
     extraction — after re-checking ``hide_from_ai``, because that fallback would
     otherwise route around the gate that just refused.
+
+    Code-like files skip the stored text and are read as source (see
+    ``_live_source``). ``offset`` pages through any text past the read cap.
     """
     file_id = args.get("file_id")
     if not isinstance(file_id, str) or not file_id.strip():
         return _error_response("read_upload requires a non-empty `file_id`.")
     file_id = file_id.strip()
+
+    offset = args.get("offset")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        offset = 0
 
     workspace_id, _ = _identity()
     if not workspace_id:
@@ -222,18 +232,29 @@ async def _read_handler(args: dict) -> dict:
             "cannot be read. Tell the user that rather than guessing at it."
         )
 
-    text: str | None = None
     try:
-        from pocketpaw_ee.cloud.uploads.extracted_text import load_extracted_text
+        from pocketpaw_ee.cloud.extraction.local import is_source_file
 
-        stored = await load_extracted_text(doc)
-        if stored is not None:
-            text = (getattr(stored, "text", "") or "").strip()
+        as_source = is_source_file(filename, mime)
     except Exception:  # noqa: BLE001
-        logger.debug("files: stored extraction unavailable for %s", file_id, exc_info=True)
+        as_source = False
 
-    if not text:
-        text = await _live_extract(file_id, workspace_id)
+    text: str | None = None
+    source = await _live_source(file_id, workspace_id) if as_source else None
+    if source is not None:
+        text = source.text
+    else:
+        try:
+            from pocketpaw_ee.cloud.uploads.extracted_text import load_extracted_text
+
+            stored = await load_extracted_text(doc)
+            if stored is not None:
+                text = (getattr(stored, "text", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            logger.debug("files: stored extraction unavailable for %s", file_id, exc_info=True)
+
+        if not text:
+            text = await _live_extract(file_id, workspace_id)
 
     if not text:
         return _success_response(
@@ -250,20 +271,36 @@ async def _read_handler(args: dict) -> dict:
             }
         )
 
-    truncated = len(text) > _READ_CHARS_CAP
-    if truncated:
-        text = text[:_READ_CHARS_CAP].rstrip()
+    # Pages are not stripped: whitespace at a page edge belongs to the file.
+    total = len(text)
+    end = offset + _READ_CHARS_CAP
+    more = end < total
+    body: dict[str, Any] = {
+        "ok": True,
+        "file_id": file_id,
+        "filename": filename,
+        "mime": mime,
+        "text": text[offset:end],
+        "truncated": more or bool(source and source.truncated),
+        "offset": offset,
+        "total_chars": total,
+        "content_dropped": bool(source and (source.stripped_chars or source.truncated)),
+    }
+    if more:
+        body["next_offset"] = end
+    if source is not None and body["content_dropped"]:
+        body["stripped_chars"] = source.stripped_chars
+        notes = []
+        if source.stripped_chars:
+            notes.append(
+                "Inline data (images, fonts) was replaced by [N chars stripped] "
+                "markers; the markup, scripts and styles are intact."
+            )
+        if source.truncated:
+            notes.append("The file is larger than the read limit; only its start was read.")
+        body["note"] = " ".join(notes)
 
-    return _success_response(
-        {
-            "ok": True,
-            "file_id": file_id,
-            "filename": filename,
-            "mime": mime,
-            "text": text,
-            "truncated": truncated,
-        }
-    )
+    return _success_response(body)
 
 
 class _Ambiguous(Exception):
@@ -323,6 +360,28 @@ async def _live_extract(file_id: str, workspace_id: str) -> str | None:
         return None
 
 
+async def _live_source(file_id: str, workspace_id: str) -> Any | None:
+    """Read a code-like upload straight from the blob as ``SourceText``.
+
+    Same resolve path as ``_live_extract``; ``None`` on any failure, so the
+    caller falls back to the stored extraction. Callers MUST have cleared
+    ``hide_from_ai`` first.
+    """
+    try:
+        from pocketpaw_ee.cloud.extraction.local import read_source
+        from pocketpaw_ee.cloud.uploads.resolver import default_resolver
+
+        cm = default_resolver().open_local_for_url(f"upload://{file_id}", workspace=workspace_id)
+        async with cm as resolved:
+            if resolved is None:
+                return None
+            _rec, path = resolved
+            return await asyncio.to_thread(read_source, path)
+    except Exception:  # noqa: BLE001
+        logger.warning("files: source read failed for %s", file_id, exc_info=True)
+        return None
+
+
 def build_files_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server for uploaded files, or ``None`` if the
     Claude Agent SDK isn't installed. Matches the ``(name, server)`` / ``None``
@@ -376,10 +435,14 @@ def build_files_server() -> tuple[str, Any] | None:
             "files live in object storage, NOT on your local filesystem — Read, "
             "Glob, Grep and Bash cannot see them, so this tool is the only way "
             "to reach one. Returns {ok, file_id, filename, mime, text, "
-            "truncated}. `text` is null for images, video and other binaries "
-            "with no extractable text — report that rather than inventing "
-            "contents. A file its owner marked hidden from AI returns an error; "
-            "tell the user instead of working around it."
+            "truncated, offset, total_chars, next_offset?, content_dropped}. "
+            "Code-like files (HTML, JS, CSS, SVG) come back as source with "
+            "inline data and base64 stripped. `content_dropped` true means the "
+            "text is not the whole file. When `next_offset` is present, pass it "
+            "as `offset` to read on. `text` is null for images, "
+            "video and other binaries with no extractable text — report that "
+            "rather than inventing contents. A file its owner marked hidden from "
+            "AI returns an error; tell the user instead of working around it."
         ),
         {
             "type": "object",
@@ -388,6 +451,11 @@ def build_files_server() -> tuple[str, Any] | None:
                     "type": "string",
                     "minLength": 1,
                     "description": "The file's id, as returned by list_uploads.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Character offset to start reading at (default 0).",
                 },
             },
             "required": ["file_id"],

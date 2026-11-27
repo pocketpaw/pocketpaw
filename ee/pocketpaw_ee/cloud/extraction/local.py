@@ -7,9 +7,8 @@
 # event loop and must never block it. Every branch carries a size ceiling
 # checked BEFORE the library is handed the file, and the raw-text fallback reads
 # at most `_MAX_TEXT_BYTES` so an unknown binary is never slurped whole.
-#
-# Changes (2026-10-01, CN-7): two docstring pointers at the deleted
-# src/pocketpaw/knowledge/ingest.py no longer cite it.
+# Code-like files (JS, CSS, SVG, and HTML pages with no visible text) are read
+# as source, with inline data: URIs and long base64 runs replaced by a marker.
 """LocalExtractor — wraps the traditional extraction libraries.
 
 The PDF, DOCX, image and VTT branches remain a behavior-preserving port of the
@@ -61,11 +60,23 @@ Two different over-limit behaviours, deliberately:
 The caps apply to the branches added in 2026-08; the ported PDF/DOCX/image
 branches are left exactly as they were so their parity tests keep meaning what
 they say.
+
+Source files
+------------
+JS, CSS and SVG have no "visible text" to extract; their source is the content.
+``read_source`` reads at most ``_MAX_SOURCE_BYTES`` (32 MB: inline base64
+inflates a page, and uploads cap near 25 MiB), cuts first so memory stays
+bounded, then ``strip_inline_blobs`` swaps each long ``data:`` payload and bare
+base64 run for a ``[N chars stripped]`` marker. HTML keeps the article path; only
+a script-rendered page (almost no visible text, a lot of markup) falls back to
+its stripped source, because otherwise its title is all that survives.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
@@ -89,6 +100,29 @@ _MAX_EXTRACTED_CHARS = 100_000
 # phone-camera upload falling through to the raw-bytes read.
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".heic", ".heif")
 _HEIF_SUFFIXES = (".heic", ".heif")
+
+# Code-like files whose source IS the content (see "Source files" above).
+_SOURCE_SUFFIXES = (".html", ".htm", ".js", ".mjs", ".cjs", ".css", ".svg")
+_SOURCE_MIMES = {
+    "text/html",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "text/css",
+    "image/svg+xml",
+}
+_MAX_SOURCE_BYTES = 32 * 1024 * 1024
+
+# A page whose visible text is under this, but whose markup is over the next
+# one, renders with JavaScript: its source is the only content worth keeping.
+_HTML_NO_VISIBLE_TEXT_CHARS = 200
+_HTML_SCRIPT_PAGE_MIN_CHARS = 4000
+
+# Linear by construction: the mime/params part is one bounded class with no
+# comma, the payload one greedy class, and the bare-run pattern only starts at a
+# run boundary (the lookbehind), so no position is rescanned.
+_DATA_URI_RE = re.compile(r"data:([\w.+/;=-]{0,200}),([^\s\"'()<>\\]{256,})")
+_BARE_BASE64_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{1000,}={0,2}")
 
 _PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -117,6 +151,58 @@ def _read_text_capped(path: Path, limit: int = _MAX_TEXT_BYTES) -> str:
     if len(data) > limit:
         text += f"\n[truncated: only the first {limit} bytes were read]"
     return text
+
+
+def _norm_mime(mime: str) -> str:
+    return (mime or "").split(";", 1)[0].strip().lower()
+
+
+def is_source_file(filename: str, mime: str) -> bool:
+    """True for HTML, JS, CSS and SVG: files whose source is their content."""
+    return Path(filename).suffix.lower() in _SOURCE_SUFFIXES or _norm_mime(mime) in _SOURCE_MIMES
+
+
+def strip_inline_blobs(text: str) -> tuple[str, int]:
+    """Replace long ``data:`` payloads and bare base64 runs with a marker.
+
+    Returns ``(new_text, chars_stripped)``. The markup, scripts and styles
+    around a blob are untouched; only the encoded bytes go.
+    """
+    stripped = 0
+
+    def _data_uri(m: re.Match[str]) -> str:
+        nonlocal stripped
+        stripped += len(m.group(2))
+        return f"data:{m.group(1)},[{len(m.group(2))} chars stripped]"
+
+    def _bare(m: re.Match[str]) -> str:
+        nonlocal stripped
+        stripped += len(m.group(0))
+        return f"[{len(m.group(0))} chars of base64 stripped]"
+
+    text = _DATA_URI_RE.sub(_data_uri, text)
+    text = _BARE_BASE64_RE.sub(_bare, text)
+    return text, stripped
+
+
+@dataclass(frozen=True)
+class SourceText:
+    text: str
+    stripped_chars: int
+    truncated: bool
+
+
+def read_source(path: Path, limit: int = _MAX_SOURCE_BYTES) -> SourceText:
+    """Read at most ``limit`` bytes of a code-like file, blobs stripped.
+
+    Cuts before stripping so memory stays bounded by ``limit``; no marker is
+    appended, ``truncated`` carries the cut.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read(limit + 1)
+    truncated = len(data) > limit
+    text, stripped = strip_inline_blobs(data[:limit].decode("utf-8", errors="replace"))
+    return SourceText(text=text, stripped_chars=stripped, truncated=truncated)
 
 
 def _budgeted(parts: list[str], limit: int = _MAX_EXTRACTED_CHARS) -> str:
@@ -175,7 +261,7 @@ def _extract_text(path: Path, mime: str = "") -> str:
     """
     file_path = str(path)
     suffix = path.suffix.lower()
-    norm_mime = (mime or "").split(";", 1)[0].strip().lower()
+    norm_mime = _norm_mime(mime)
 
     if suffix == ".pdf":
         try:
@@ -229,6 +315,14 @@ def _extract_text(path: Path, mime: str = "") -> str:
     if suffix in (".html", ".htm") or norm_mime == "text/html":
         _refuse_if_too_big(path, _MAX_HTML_BYTES, "html")
         return _extract_html(path.read_text(encoding="utf-8", errors="replace"))
+
+    # HTML returned above; this catches JS, CSS and SVG.
+    if suffix in _SOURCE_SUFFIXES or norm_mime in _SOURCE_MIMES:
+        source = read_source(path)
+        text = _budgeted([source.text])
+        if source.truncated:
+            text += f"\n[truncated: only the first {_MAX_SOURCE_BYTES} bytes were read]"
+        return text
 
     if suffix in _IMAGE_SUFFIXES:
         _refuse_if_too_big(path, _MAX_IMAGE_BYTES, "image")
@@ -359,8 +453,6 @@ def _extract_html(html: str) -> str:
       returning raw markup — before this branch existed, raw markup with all
       its tags is precisely what `.html` uploads were indexing into the KB.
     """
-    import re
-
     try:
         import trafilatura
     except ImportError as exc:
@@ -376,6 +468,15 @@ def _extract_html(html: str) -> str:
         clean = re.sub(r"<style[^>]*>.*?</style>", " ", clean, flags=re.DOTALL | re.IGNORECASE)
         clean = re.sub(r"<[^>]+>", " ", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
+
+    if len(clean) < _HTML_NO_VISIBLE_TEXT_CHARS and len(html) > _HTML_SCRIPT_PAGE_MIN_CHARS:
+        return _budgeted(
+            [
+                "[no visible text: this page renders with JavaScript, so its source "
+                "is shown with inline data stripped]",
+                strip_inline_blobs(html)[0],
+            ]
+        )
 
     return _budgeted([clean])
 
