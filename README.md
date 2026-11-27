@@ -429,7 +429,15 @@ pip install pocketpaw[all]                 # Everything
 ### Desktop Client (Tauri + SvelteKit)
 
 The native desktop app lives in `client/`. It connects to the Python backend via REST/WebSocket.
-
+> **Note for Windows users:**  
+> The desktop client setup primarily uses **Bun** as the package manager.  
+> Using `npm install` inside the `client/` folder may cause dependency or setup issues.  
+> It is recommended to install Bun first and use:
+>
+> ```bash
+> bun install
+> bun run dev
+> ```
 **Prerequisites:**
 - [Bun](https://bun.sh/) (package manager)
 - [Rust](https://rustup.rs/) (for Tauri)
