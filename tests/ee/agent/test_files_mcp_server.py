@@ -183,3 +183,96 @@ async def test_no_workspace_on_the_run_fails_closed(monkeypatch) -> None:
 
     assert (await files_mcp._read_handler({"file_id": "f1"})).get("is_error") is True
     assert (await files_mcp._list_handler({})).get("is_error") is True
+
+
+# --- code-like uploads (HTML / JS / CSS / SVG) ------------------------------
+#
+# A saved Claude artifact page is a <title>, an empty root div, a big inline
+# script and base64 images. Its stored extraction (made at upload time by a
+# visible-text pass) is the title alone. read_upload must ignore that and read
+# the blob as source, or the agent gets one line and truncated=false.
+
+
+def _artifact_html() -> str:
+    import base64
+
+    blob = base64.b64encode(bytes(range(256)) * 200).decode()
+    script = "function renderSlide(n){return n;}\n" * 4000
+    return (
+        "<!DOCTYPE html><html><head><title>The Last Boring Slide (Copy)</title></head>"
+        f"<body><div id='root'></div><img src=\"data:image/png;base64,{blob}\">"
+        f"<script>{script}</script></body></html>"
+    )
+
+
+def _install_blob(monkeypatch, tmp_path, body: str, *, title_only_stored: bool = True):
+    """Point the upload resolver at a real file, and make the stored
+    extraction the title-only text the bug produced."""
+    from contextlib import asynccontextmanager
+
+    from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
+    from pocketpaw_ee.cloud.uploads import extracted_text, resolver
+
+    path = tmp_path / "artifact.html"
+    path.write_text(body, encoding="utf-8")
+
+    class _Resolver:
+        @asynccontextmanager
+        async def open_local_for_url(self, url, workspace):
+            assert workspace == "ws1"
+            yield FakeRec(id="f1", filename=path.name, mime="text/html"), path
+
+    monkeypatch.setattr(resolver, "default_resolver", lambda: _Resolver())
+
+    async def _stored(_doc, **_kw):
+        if title_only_stored:
+            return ExtractionResult(text="The Last Boring Slide (Copy)", backend="local")
+        return None
+
+    monkeypatch.setattr(extracted_text, "load_extracted_text", _stored)
+
+
+async def test_an_html_upload_returns_its_source_not_just_its_title(monkeypatch, tmp_path) -> None:
+    body = _artifact_html()
+    store = FakeStore(doc=FakeDoc(filename="The Last Boring Slide (Copy).html", mime="text/html"))
+    _install(monkeypatch, store=store)
+    _install_blob(monkeypatch, tmp_path, body)
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1"}))
+
+    assert out["text"] != "The Last Boring Slide (Copy)"
+    assert out["text"].startswith("<!DOCTYPE html>")
+    assert "<script>" in out["text"]
+    assert "base64,[" in out["text"]  # the blob left a marker, not its bytes
+    assert out["content_dropped"] is True
+    assert out["truncated"] is True  # ~150k chars of script > the read cap
+    assert out["total_chars"] > files_mcp._READ_CHARS_CAP
+    assert out["next_offset"] == files_mcp._READ_CHARS_CAP
+
+
+async def test_offset_pages_through_a_long_source(monkeypatch, tmp_path) -> None:
+    body = _artifact_html()
+    store = FakeStore(doc=FakeDoc(filename="page.html", mime="text/html; charset=utf-8"))
+    _install(monkeypatch, store=store)
+    _install_blob(monkeypatch, tmp_path, body)
+
+    first = _body(await files_mcp._read_handler({"file_id": "f1"}))
+    last = _body(
+        await files_mcp._read_handler({"file_id": "f1", "offset": first["total_chars"] - 50})
+    )
+
+    assert last["offset"] == first["total_chars"] - 50
+    assert last["text"].endswith("</html>")
+    assert last["truncated"] is False
+    assert "next_offset" not in last
+
+
+async def test_a_hidden_html_file_is_refused_before_the_blob_is_read(monkeypatch, tmp_path) -> None:
+    store = FakeStore(doc=FakeDoc(filename="page.html", mime="text/html", hide_from_ai=True))
+    _install(monkeypatch, store=store)
+    _install_blob(monkeypatch, tmp_path, _artifact_html())
+
+    resp = await files_mcp._read_handler({"file_id": "f1"})
+
+    assert resp.get("is_error") or resp.get("isError")
+    assert "hidden" in resp["content"][0]["text"]

@@ -1,0 +1,58 @@
+[
+  {
+    "label": "read_upload: code-like files go back to the stored title-only text",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "        as_source = is_source_file(filename, mime)",
+    "replace": "        as_source = False",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
+  },
+  {
+    "label": "read_upload: content_dropped never reported",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "        \"content_dropped\": bool(source and (source.stripped_chars or source.truncated)),",
+    "replace": "        \"content_dropped\": False,",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
+  },
+  {
+    "label": "read_upload: offset ignored",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "        \"text\": text[offset:end],",
+    "replace": "        \"text\": text[:_READ_CHARS_CAP],",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
+  },
+  {
+    "label": "extraction: data: URIs kept whole",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    text = _DATA_URI_RE.sub(_data_uri, text)",
+    "replace": "    text = text",
+    "tests": ["tests/cloud/extraction/test_source_files.py"]
+  },
+  {
+    "label": "extraction: bare base64 runs kept whole",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    text = _BARE_BASE64_RE.sub(_bare, text)",
+    "replace": "    text = text",
+    "tests": ["tests/cloud/extraction/test_source_files.py"]
+  },
+  {
+    "label": "extraction: script-rendered page falls back to its title again",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "_HTML_NO_VISIBLE_TEXT_CHARS = 200",
+    "replace": "_HTML_NO_VISIBLE_TEXT_CHARS = 0",
+    "tests": ["tests/cloud/extraction/test_source_files.py"]
+  },
+  {
+    "label": "extraction: JS/CSS/SVG take the raw read again",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    if suffix in _SOURCE_SUFFIXES or norm_mime in _SOURCE_MIMES:\n        source = read_source(path)",
+    "replace": "    if False:\n        source = read_source(path)",
+    "tests": ["tests/cloud/extraction/test_source_files.py"]
+  },
+  {
+    "label": "extraction: read_source never cuts at its limit",
+    "file": "ee/pocketpaw_ee/cloud/extraction/local.py",
+    "find": "    truncated = len(data) > limit\n    text, stripped = strip_inline_blobs(data[:limit]",
+    "replace": "    truncated = False\n    text, stripped = strip_inline_blobs(data[:limit]",
+    "tests": ["tests/cloud/extraction/test_source_files.py"]
+  }
+]
