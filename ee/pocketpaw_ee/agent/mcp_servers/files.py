@@ -37,7 +37,7 @@
 #
 # SOURCE FILES. HTML, JS, CSS and SVG skip the stored extraction (a visible-text
 # pass that keeps only a script-rendered page's title) and are read from the
-# blob as source, inline data stripped, paged by ``offset``.
+# blob as source, inline data stripped, paged by ``offset``, searched by ``query``.
 #
 # TENANCY. The workspace comes from the per-stream ContextVar (``_identity``),
 # never from tool args — an agent-supplied workspace id would be a cross-tenant
@@ -73,6 +73,11 @@ FILES_TOOL_IDS = (LIST_UPLOADS_TOOL_ID, READ_UPLOAD_TOOL_ID)
 _READ_CHARS_CAP = 40000
 _LIST_DEFAULT_LIMIT = 50
 _LIST_MAX_LIMIT = 200
+# ``read_upload(query=...)``: a plain substring search over the same text
+# ``offset`` pages, so each match offset is a valid read offset.
+_QUERY_MAX_CHARS = 200
+_QUERY_MAX_MATCHES = 20
+_QUERY_CONTEXT_CHARS = 300
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -180,7 +185,8 @@ async def _read_handler(args: dict) -> dict:
     otherwise route around the gate that just refused.
 
     Code-like files skip the stored text and are read as source (see
-    ``_live_source``). ``offset`` pages through any text past the read cap.
+    ``_live_source``). ``offset`` pages through any text past the read cap;
+    ``query`` instead returns match offsets (searching from ``offset``).
     """
     file_id = args.get("file_id")
     if not isinstance(file_id, str) or not file_id.strip():
@@ -190,6 +196,11 @@ async def _read_handler(args: dict) -> dict:
     offset = args.get("offset")
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         offset = 0
+
+    query = args.get("query")
+    query = query.strip() if isinstance(query, str) else ""
+    if len(query) > _QUERY_MAX_CHARS:
+        return _error_response(f"`query` is limited to {_QUERY_MAX_CHARS} characters.")
 
     workspace_id, _ = _identity()
     if not workspace_id:
@@ -280,12 +291,20 @@ async def _read_handler(args: dict) -> dict:
         "file_id": file_id,
         "filename": filename,
         "mime": mime,
-        "text": text[offset:end],
-        "truncated": more or bool(source and source.truncated),
-        "offset": offset,
         "total_chars": total,
         "content_dropped": bool(source and (source.stripped_chars or source.truncated)),
     }
+    if query:
+        matches, total_matches, next_offset = _find_matches(text, query, offset)
+        body.update(query=query, total_matches=total_matches, matches=matches)
+    else:
+        body.update(
+            {
+                "text": text[offset:end],
+                "truncated": more or bool(source and source.truncated),
+                "offset": offset,
+            }
+        )
     notes: list[str] = []
     # A text-like file that yields under a tenth of its bytes as text lost the
     # rest somewhere (a script-rendered page's title, say). A source read already
@@ -313,16 +332,55 @@ async def _read_handler(args: dict) -> dict:
             )
         if source.truncated:
             notes.append("The file is larger than the read limit; only its start was read.")
-    if more:
+    if query:
+        if not matches:
+            where = f" after offset {offset}" if offset else ""
+            notes.append(f"No match for {query!r}{where}.")
+        else:
+            if next_offset is not None:
+                body["next_offset"] = next_offset
+                notes.append(
+                    f"Showing {len(matches)} of {total_matches} matches. Call read_upload "
+                    f"with file_id={file_id}, query={query!r} and offset={next_offset} "
+                    "for the next ones."
+                )
+            notes.append(
+                f"Read around a match with read_upload(file_id={file_id}, offset=<match offset>)."
+            )
+    elif more:
         body["next_offset"] = end
         notes.append(
             f"Call read_upload again with file_id={file_id} and offset={end} to read on; "
-            "keep going until truncated is false before concluding anything is missing."
+            "keep going until truncated is false before concluding anything is missing. "
+            "Or pass query=<words> to jump straight to a section, then read at the match offset."
         )
     if notes:
         body["note"] = " ".join(notes)
 
     return _success_response(body)
+
+
+def _find_matches(
+    text: str, query: str, start: int
+) -> tuple[list[dict[str, Any]], int, int | None]:
+    """Case-insensitive, non-overlapping substring matches of ``query`` in
+    ``text`` from ``start``: ``(first _QUERY_MAX_MATCHES matches, total count,
+    offset just past the last returned match if more remain, else None)``."""
+    lowered = text.lower()
+    # str.lower() changes length for a few non-ASCII chars; offsets would drift, so match exactly.
+    hay, needle = (lowered, query.lower()) if len(lowered) == len(text) else (text, query)
+    matches: list[dict[str, Any]] = []
+    total = 0
+    last_end = start
+    i = hay.find(needle, start)
+    while i != -1:
+        total += 1
+        if total <= _QUERY_MAX_MATCHES:
+            lo, hi = max(0, i - _QUERY_CONTEXT_CHARS), i + len(needle) + _QUERY_CONTEXT_CHARS
+            matches.append({"offset": i, "snippet": text[lo:hi]})
+            last_end = i + len(needle)
+        i = hay.find(needle, i + len(needle))
+    return matches, total, (last_end if total > _QUERY_MAX_MATCHES else None)
 
 
 def _is_text_like(mime: str, as_source: bool) -> bool:
@@ -476,7 +534,11 @@ def build_files_server() -> tuple[str, Any] | None:
             "inline data and base64 stripped. `content_dropped` true means the "
             "text is not the whole file. Always page: when `next_offset` is "
             "present, call again with it as `offset`, and never conclude a file "
-            "lacks something until `truncated` is false. `text` is null for images, "
+            "lacks something until `truncated` is false. To find a section of a "
+            "long file, pass `query` (case-insensitive substring, not regex): it "
+            "returns {total_matches, matches:[{offset, snippet}]} instead of text; "
+            "read at a match's `offset`, and page matches with `next_offset`. "
+            "`text` is null for images, "
             "video and other binaries with no extractable text — report that "
             "rather than inventing contents. A file its owner marked hidden from "
             "AI returns an error; tell the user instead of working around it."
@@ -493,6 +555,15 @@ def build_files_server() -> tuple[str, Any] | None:
                     "type": "integer",
                     "minimum": 0,
                     "description": "Character offset to start reading at (default 0).",
+                },
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": (
+                        "Case-insensitive substring (not regex) to search for from `offset`; "
+                        "returns match offsets instead of text."
+                    ),
                 },
             },
             "required": ["file_id"],
