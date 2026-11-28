@@ -376,3 +376,86 @@ async def test_a_truncated_page_tells_the_agent_to_keep_reading(monkeypatch, tmp
 
     assert out["truncated"] is True
     assert f"offset={out['next_offset']}" in out["note"]
+
+
+# --- query: jump to a section instead of paging ------------------------------
+#
+# A bundled artifact page is ~1.5M chars of source, about 37 pages. ``query``
+# finds a substring in the SAME stripped text ``offset`` pages, so every match
+# offset plugs straight into ``read_upload(file_id, offset=...)``.
+
+
+def _slide_html(n_slides: int) -> str:
+    vendor = "function vendorCode(a){return a*2;}\n" * 3000
+    slides = "".join(
+        f"<section class='slide'><h2>Slide Title {i}</h2></section>\n" for i in range(n_slides)
+    )
+    return (
+        "<!DOCTYPE html><html><head><title>Deck</title></head>"
+        f"<body><script>{vendor}</script>{slides}</body></html>"
+    )
+
+
+def _install_real_html(monkeypatch, tmp_path, body: str) -> None:
+    doc = FakeDoc(filename="deck.html", mime="text/html", size=len(body))
+    _install(monkeypatch, store=FakeStore(doc=doc))
+    _install_blob(monkeypatch, tmp_path, body)  # stored text is title-only
+    _install_real_resolver(monkeypatch, tmp_path, body)
+
+
+async def test_query_offsets_land_on_the_match(monkeypatch, tmp_path) -> None:
+    _install_real_html(monkeypatch, tmp_path, _slide_html(3))
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1", "query": "slide title"}))
+
+    assert out["total_matches"] == 3
+    assert len(out["matches"]) == 3
+    for m in out["matches"]:
+        assert "Slide Title" in m["snippet"]
+        page = _body(await files_mcp._read_handler({"file_id": "f1", "offset": m["offset"]}))
+        assert page["text"].lower().startswith("slide title")
+    # the slides sit past the first page, which is the point of searching
+    assert out["matches"][0]["offset"] > files_mcp._READ_CHARS_CAP
+
+
+async def test_query_caps_matches_and_says_how_to_get_the_rest(monkeypatch, tmp_path) -> None:
+    _install_real_html(monkeypatch, tmp_path, _slide_html(25))
+
+    first = _body(await files_mcp._read_handler({"file_id": "f1", "query": "Slide Title"}))
+
+    assert first["total_matches"] == 25
+    assert len(first["matches"]) == files_mcp._QUERY_MAX_MATCHES
+    nxt = first["next_offset"]
+    assert f"offset={nxt}" in first["note"]
+    rest = _body(
+        await files_mcp._read_handler({"file_id": "f1", "query": "Slide Title", "offset": nxt})
+    )
+    assert len(rest["matches"]) == 25 - files_mcp._QUERY_MAX_MATCHES
+    assert "next_offset" not in rest
+
+
+async def test_query_with_no_match_says_so(monkeypatch, tmp_path) -> None:
+    _install_real_html(monkeypatch, tmp_path, _slide_html(2))
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1", "query": "no such words"}))
+
+    assert out["total_matches"] == 0
+    assert out["matches"] == []
+    assert "no match" in out["note"].lower()
+
+
+async def test_an_overlong_query_is_refused(monkeypatch, tmp_path) -> None:
+    _install_real_html(monkeypatch, tmp_path, _slide_html(1))
+
+    resp = await files_mcp._read_handler({"file_id": "f1", "query": "x" * 201})
+
+    assert resp.get("is_error")
+
+
+async def test_the_paging_note_points_at_query(monkeypatch, tmp_path) -> None:
+    _install_real_html(monkeypatch, tmp_path, _slide_html(1))
+
+    out = _body(await files_mcp._read_handler({"file_id": "f1"}))
+
+    assert out["truncated"] is True
+    assert "query" in out["note"]

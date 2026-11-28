@@ -68,5 +68,19 @@
     "find": "    truncated = len(data) > limit\n    text, stripped = strip_inline_blobs(data[:limit]",
     "replace": "    truncated = False\n    text, stripped = strip_inline_blobs(data[:limit]",
     "tests": ["tests/cloud/extraction/test_source_files.py"]
+  },
+  {
+    "label": "read_upload: query search turns case-sensitive",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "    hay, needle = (lowered, query.lower()) if len(lowered) == len(text) else (text, query)",
+    "replace": "    hay, needle = text, query",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
+  },
+  {
+    "label": "read_upload: query match offset off by one",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/files.py",
+    "find": "            matches.append({\"offset\": i, \"snippet\": text[lo:hi]})",
+    "replace": "            matches.append({\"offset\": i + 1, \"snippet\": text[lo:hi]})",
+    "tests": ["tests/ee/agent/test_files_mcp_server.py"]
   }
 ]
